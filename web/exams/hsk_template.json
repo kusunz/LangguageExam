@@ -1,0 +1,129 @@
+{
+    "exam_id": "hsk_5",
+    "display_name_vi": "HSK 5",
+    "language": "zh-CN",
+    "level": "HSK5",
+    "modes": {
+        "basic": {
+            "time_scale": 0.3333,
+            "question_scale": 0.3333
+        },
+        "standard": {
+            "time_scale": 0.6667,
+            "question_scale": 0.6667
+        },
+        "official": {
+            "time_scale": 1.0,
+            "question_scale": 1.0
+        }
+    },
+    "official_time_limits_sec": {
+        "groups": [
+            {
+                "group_id": "listening",
+                "time_sec": 1800
+            },
+            {
+                "group_id": "reading",
+                "time_sec": 2700
+            },
+            {
+                "group_id": "writing",
+                "time_sec": 2400
+            }
+        ],
+        "overall_time_sec": 7500
+    },
+    "groups": [
+        {
+            "group_id": "listening",
+            "title_vi": "Nghe hiểu",
+            "mondai": [
+                {
+                    "mondai_id": "H1",
+                    "title_vi": "Nghe - Phần 1",
+                    "instructions_vi": "Nghe hội thoại và chọn đáp án đúng.",
+                    "types": [
+                        "listening_dialogue"
+                    ],
+                    "count_official": 20
+                },
+                {
+                    "mondai_id": "H2",
+                    "title_vi": "Nghe - Phần 2",
+                    "instructions_vi": "Nghe đoạn dài và trả lời câu hỏi.",
+                    "types": [
+                        "listening_passage"
+                    ],
+                    "count_official": 25
+                }
+            ]
+        },
+        {
+            "group_id": "reading",
+            "title_vi": "Đọc hiểu",
+            "mondai": [
+                {
+                    "mondai_id": "H3",
+                    "title_vi": "Đọc - Điền từ",
+                    "instructions_vi": "Chọn từ thích hợp để điền vào chỗ trống.",
+                    "types": [
+                        "reading_cloze"
+                    ],
+                    "count_official": 15
+                },
+                {
+                    "mondai_id": "H4",
+                    "title_vi": "Đọc - Chọn câu",
+                    "instructions_vi": "Chọn câu phù hợp để điền vào đoạn văn.",
+                    "types": [
+                        "reading_sentence"
+                    ],
+                    "count_official": 10
+                },
+                {
+                    "mondai_id": "H5",
+                    "title_vi": "Đọc - Hiểu nội dung",
+                    "instructions_vi": "Đọc đoạn văn và trả lời câu hỏi.",
+                    "types": [
+                        "reading_comprehension"
+                    ],
+                    "count_official": 20
+                }
+            ]
+        },
+        {
+            "group_id": "writing",
+            "title_vi": "Viết",
+            "mondai": [
+                {
+                    "mondai_id": "H6",
+                    "title_vi": "Viết - Sắp xếp câu",
+                    "instructions_vi": "Sắp xếp các từ thành câu hoàn chỉnh.",
+                    "types": [
+                        "writing_order"
+                    ],
+                    "count_official": 8
+                },
+                {
+                    "mondai_id": "H7",
+                    "title_vi": "Viết - Bài luận",
+                    "instructions_vi": "Viết bài luận theo chủ đề cho sẵn.",
+                    "types": [
+                        "writing_essay"
+                    ],
+                    "count_official": 2
+                }
+            ]
+        }
+    ],
+    "ui": {
+        "navigation_mode": "mondai",
+        "show_script_in_test": false,
+        "reveal_script_in_review": true,
+        "reading_focus_tools": {
+            "enable_zoom": true,
+            "enable_focus_mode": true
+        }
+    }
+}

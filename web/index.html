@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="description" content="Ứng dụng luyện thi JLPT N2, HSK - Tạo đề thi ngẫu nhiên 100% bằng AI">
+  <title>Luyện Thi Ngoại Ngữ | Language Exam Practice</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&family=Noto+Sans+SC:wght@400;500;700&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+  <div id="app">
+    <!-- Login Screen -->
+    <section id="login-screen" class="screen active">
+      <div class="login-container">
+        <div class="logo-section">
+          <div class="logo-icon"><i class="fa-solid fa-language"></i></div>
+          <h1>Luyện Thi Ngoại Ngữ</h1>
+          <p class="subtitle">JLPT • HSK • Và nhiều hơn nữa</p>
+        </div>
+        <div class="login-card glass">
+          <h2>Đăng nhập</h2>
+          <p class="login-desc">Đăng nhập để lưu tiến trình và xem lịch sử ôn tập</p>
+          <button id="btn-email-login" class="btn btn-primary btn-lg">
+            <span class="btn-icon"><i class="fa-solid fa-envelope"></i></span>
+            Đăng nhập bằng Email
+          </button>
+          <div class="login-divider">
+            <span>hoặc</span>
+          </div>
+          <button id="btn-demo-login" class="btn btn-secondary btn-lg">
+            Dùng thử không đăng nhập
+          </button>
+        </div>
+        <p class="login-footer">Bảo mật bởi Privy • Không cần mật khẩu</p>
+      </div>
+    </section>
+
+    <!-- Home Screen -->
+    <section id="home-screen" class="screen">
+      <header class="app-header glass">
+        <div class="header-left">
+          <div class="logo-small"><i class="fa-solid fa-language"></i></div>
+          <span class="header-title">Luyện Thi</span>
+        </div>
+        <div class="header-right">
+          <span id="user-email" class="user-badge"></span>
+          <button id="btn-theme-toggle" class="btn btn-icon-only" title="Đổi giao diện"><i
+              class="fa-solid fa-moon"></i></button>
+          <button id="btn-logout" class="btn btn-icon-only" title="Đăng xuất"><i
+              class="fa-solid fa-power-off"></i></button>
+        </div>
+      </header>
+
+      <main class="home-content">
+        <div class="welcome-section">
+          <h2>Chào mừng trở lại!</h2>
+          <p id="last-activity"></p>
+        </div>
+
+        <div class="exam-selector card glass">
+          <h3>Chọn kỳ thi</h3>
+          <div class="exam-tabs">
+            <div class="exam-tab-wrapper active" data-exam="jlpt">
+              <div class="exam-tab-header">
+                <span class="exam-flag">🇯🇵</span>
+                <span class="exam-name">JLPT</span>
+              </div>
+              <select id="jlpt-level" class="level-select">
+                <option value="N5">N5 (Sơ cấp)</option>
+                <option value="N4">N4</option>
+                <option value="N3">N3</option>
+                <option value="N2" selected>N2</option>
+                <option value="N1">N1 (Cao cấp)</option>
+              </select>
+            </div>
+            <div class="exam-tab-wrapper" data-exam="hsk" aria-disabled="true">
+              <div class="exam-tab-header">
+                <span class="exam-flag">🇨🇳</span>
+                <span class="exam-name">HSK</span>
+                <span class="coming-soon">Sắp có</span>
+              </div>
+              <select id="hsk-level" class="level-select" disabled>
+                <option value="HSK1">HSK 1</option>
+                <option value="HSK2">HSK 2</option>
+                <option value="HSK3">HSK 3</option>
+                <option value="HSK4">HSK 4</option>
+                <option value="HSK5" selected>HSK 5</option>
+                <option value="HSK6">HSK 6</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="mode-selector card glass">
+          <h3>Chọn chế độ thi</h3>
+          <div class="mode-cards">
+            <button class="mode-card" data-mode="basic">
+              <div class="mode-icon"><i class="fa-solid fa-bolt"></i></div>
+              <div class="mode-info">
+                <h4>Cơ bản</h4>
+                <p>~35 phút • Luyện nhanh</p>
+              </div>
+            </button>
+            <button class="mode-card" data-mode="standard">
+              <div class="mode-icon"><i class="fa-solid fa-book-open"></i></div>
+              <div class="mode-info">
+                <h4>Tiêu chuẩn</h4>
+                <p>~70 phút • Ôn tập kỹ</p>
+              </div>
+            </button>
+            <button class="mode-card selected" data-mode="official">
+              <div class="mode-icon"><i class="fa-solid fa-trophy"></i></div>
+              <div class="mode-info">
+                <h4>Chính thức</h4>
+                <p>~155 phút • Giống thi thật</p>
+              </div>
+            </button>
+          </div>
+        </div>
+
+        <div class="provider-settings card glass collapsed">
+          <button class="settings-toggle">
+            <span><i class="fa-solid fa-gear"></i> Cài đặt AI</span>
+            <span class="toggle-arrow"><i class="fa-solid fa-chevron-down"></i></span>
+          </button>
+          <div class="settings-content">
+            <div class="setting-group">
+              <label>LLM Provider</label>
+              <select id="llm-provider">
+                <option value="gemini">Gemini</option>
+                <option value="openai">OpenAI</option>
+              </select>
+            </div>
+            <div class="setting-group">
+              <label>TTS Mode</label>
+              <select id="tts-mode">
+                <option value="auto">Tự động</option>
+                <option value="gemini">Gemini TTS</option>
+                <option value="deepgram">Deepgram</option>
+                <option value="browser">Trình duyệt</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <button id="btn-start-test" class="btn btn-primary btn-xl">
+          <span class="btn-icon"><i class="fa-solid fa-play"></i></span>
+          Bắt đầu làm bài
+        </button>
+
+        <div class="quick-links">
+          <button id="btn-history" class="quick-link">
+            <span><i class="fa-solid fa-chart-simple"></i></span>
+            <span>Lịch sử</span>
+          </button>
+          <button id="btn-mistakes" class="quick-link">
+            <span><i class="fa-solid fa-book-bookmark"></i></span>
+            <span>Sổ lỗi sai</span>
+          </button>
+          <button id="btn-grammar" class="quick-link">
+            <span><i class="fa-solid fa-book"></i></span>
+            <span>Ngữ pháp</span>
+          </button>
+        </div>
+      </main>
+    </section>
+
+    <!-- Loading Screen -->
+    <section id="loading-screen" class="screen">
+      <div class="loading-container">
+        <div class="loader-icon"><i class="fa-solid fa-robot fa-bounce"></i></div>
+        <p id="loading-text">Đang tạo đề thi...</p>
+        <p class="loading-hint" id="loading-hint">AI đang phân tích và tạo câu hỏi mới...</p>
+
+        <div class="progress-container">
+          <div class="progress-bar">
+            <div id="loading-progress" class="progress-fill" style="width: 0%"></div>
+          </div>
+          <div id="progress-text" class="progress-text">0%</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Test Screen -->
+    <section id="test-screen" class="screen">
+      <header class="test-header glass">
+        <div class="timer-bar">
+          <div class="timer overall-timer">
+            <span class="timer-label">Tổng</span>
+            <span id="overall-time" class="timer-value">00:00</span>
+          </div>
+          <div class="timer group-timer">
+            <span class="timer-label" id="group-label">Phần</span>
+            <span id="group-time" class="timer-value">00:00</span>
+          </div>
+        </div>
+        <button id="btn-pause-test" class="btn btn-icon-only" title="Tạm dừng"><i
+            class="fa-solid fa-pause"></i></button>
+      </header>
+
+      <div class="mondai-nav glass">
+        <button id="btn-prev-mondai" class="nav-btn" disabled><i class="fa-solid fa-chevron-left"></i></button>
+        <div class="mondai-progress">
+          <span id="mondai-current">M1</span>
+          <span class="mondai-sep">/</span>
+          <span id="mondai-total">17</span>
+        </div>
+        <button id="btn-next-mondai" class="nav-btn"><i class="fa-solid fa-chevron-right"></i></button>
+      </div>
+
+      <main class="test-content">
+        <div class="mondai-header">
+          <h2 id="mondai-title">Chữ Hán (Kanji)</h2>
+          <p id="mondai-instructions" class="instructions"></p>
+        </div>
+
+        <div id="audio-player" class="audio-player hidden">
+          <div class="audio-controls">
+            <button id="btn-play-audio" class="btn btn-primary">
+              <span class="play-icon"><i class="fa-solid fa-play"></i></span>
+              Nghe
+            </button>
+            <span id="audio-status" class="audio-status"></span>
+          </div>
+          <button id="btn-show-script" class="btn btn-ghost btn-sm hidden">Hiển thị lời thoại</button>
+          <div id="audio-script" class="audio-script hidden"></div>
+        </div>
+
+        <div id="passage-container" class="passage-container hidden">
+          <div class="passage-controls">
+            <button id="btn-zoom-in" class="btn btn-sm"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
+            <button id="btn-zoom-out" class="btn btn-sm"><i class="fa-solid fa-magnifying-glass-minus"></i></button>
+            <button id="btn-focus-mode" class="btn btn-sm"><i class="fa-solid fa-expand"></i></button>
+          </div>
+          <div id="passage-text" class="passage-text"></div>
+        </div>
+
+        <div id="questions-container" class="questions-container"></div>
+
+
+      </main>
+
+      <footer class="test-footer glass">
+        <div class="question-dots" id="question-dots"></div>
+        <button id="btn-submit-group" class="btn btn-secondary">Nộp phần này</button>
+      </footer>
+    </section>
+
+    <!-- Focus Mode Overlay -->
+    <div id="focus-overlay" class="focus-overlay hidden">
+      <div class="focus-content">
+        <button id="btn-close-focus" class="btn-close-focus"><i class="fa-solid fa-xmark"></i></button>
+        <div id="focus-passage" class="focus-passage"></div>
+      </div>
+    </div>
+
+    <!-- Grammar Book Screen -->
+    <section id="grammar-screen" class="screen">
+      <header class="app-header glass">
+        <button id="btn-back-grammar" class="btn btn-icon-only"><i class="fa-solid fa-arrow-left"></i></button>
+        <h1 class="header-title">Sổ tay ngữ pháp</h1>
+        <div></div>
+      </header>
+      <main class="grammar-content">
+        <div id="grammar-list" class="grammar-list">
+          <!-- Grammar items will be populated here -->
+        </div>
+        <div id="grammar-detail" class="grammar-detail hidden">
+          <button id="btn-close-grammar-detail" class="btn-close-detail"><i class="fa-solid fa-xmark"></i></button>
+          <div class="detail-content">
+            <h2 id="grammar-title"></h2>
+            <div id="grammar-meaning" class="grammar-section"></div>
+            <div id="grammar-usage" class="grammar-section"></div>
+            <div id="grammar-examples" class="grammar-section"></div>
+            <a id="grammar-link" href="#" target="_blank" class="btn btn-outline btn-full">Xem trên Mazii</a>
+          </div>
+        </div>
+      </main>
+    </section>
+
+    <!-- Review Screen -->
+    <section id="review-screen" class="screen">
+      <header class="app-header glass">
+        <button id="btn-back-home" class="btn btn-icon-only"><i class="fa-solid fa-arrow-left"></i></button>
+        <h1 class="header-title">Kết quả bài thi</h1>
+        <div></div>
+      </header>
+
+      <main class="review-content">
+        <div class="score-summary card glass">
+          <div class="score-circle">
+            <svg viewBox="0 0 100 100">
+              <circle class="score-bg" cx="50" cy="50" r="45" />
+              <circle id="score-ring" class="score-ring" cx="50" cy="50" r="45" />
+            </svg>
+            <div class="score-text">
+              <span id="score-value">0</span>
+              <span id="score-max">/0</span>
+            </div>
+          </div>
+          <div class="score-details">
+            <div id="score-by-group" class="score-groups"></div>
+            <p id="recommendation" class="recommendation"></p>
+          </div>
+        </div>
+
+        <div class="weak-areas card glass">
+          <h3>Điểm cần cải thiện</h3>
+          <div id="weak-tags" class="tags"></div>
+        </div>
+
+        <div class="review-questions">
+          <h3>Chi tiết từng câu</h3>
+          <div id="review-list" class="review-list"></div>
+        </div>
+      </main>
+    </section>
+
+    <!-- History Screen -->
+    <section id="history-screen" class="screen">
+      <header class="app-header glass">
+        <button id="btn-history-back" class="btn btn-icon-only"><i class="fa-solid fa-arrow-left"></i></button>
+        <h1 class="header-title">Lịch sử làm bài</h1>
+        <div></div>
+      </header>
+      <main class="history-content">
+        <div id="history-list" class="history-list"></div>
+        <div id="history-empty" class="empty-state hidden">
+          <p>Chưa có lịch sử làm bài</p>
+        </div>
+      </main>
+    </section>
+
+    <!-- Mistakes Screen -->
+    <section id="mistakes-screen" class="screen">
+      <header class="app-header glass">
+        <button id="btn-mistakes-back" class="btn btn-icon-only"><i class="fa-solid fa-arrow-left"></i></button>
+        <h1 class="header-title">Sổ lỗi sai</h1>
+        <div></div>
+      </header>
+      <main class="mistakes-content">
+        <div id="mistakes-list" class="mistakes-list"></div>
+        <div id="mistakes-empty" class="empty-state hidden">
+          <p>Chưa có lỗi sai nào được ghi nhận</p>
+        </div>
+      </main>
+    </section>
+
+    <!-- Email OTP Modal -->
+    <div id="otp-modal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content glass">
+        <h3>Xác thực Email</h3>
+        <p id="otp-email-display">Nhập mã OTP đã gửi đến email của bạn</p>
+        <input type="text" id="otp-input" class="otp-input" maxlength="6" placeholder="000000"
+          autocomplete="one-time-code">
+        <div class="modal-actions">
+          <button id="btn-verify-otp" class="btn btn-primary">Xác nhận</button>
+          <button id="btn-cancel-otp" class="btn btn-secondary">Hủy</button>
+        </div>
+        <p id="otp-error" class="error-text hidden"></p>
+      </div>
+    </div>
+
+    <!-- Email Input Modal -->
+    <div id="email-modal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content glass">
+        <h3>Đăng nhập bằng Email</h3>
+        <p>Nhập email để nhận mã xác thực</p>
+        <input type="email" id="email-input" class="email-input" placeholder="email@example.com">
+        <div class="modal-actions">
+          <button id="btn-send-otp" class="btn btn-primary">Gửi mã OTP</button>
+          <button id="btn-cancel-email" class="btn btn-secondary">Hủy</button>
+        </div>
+        <p id="email-error" class="error-text hidden"></p>
+      </div>
+    </div>
+
+    <!-- Nickname Modal -->
+    <div id="nickname-modal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content glass">
+        <h3>Chào mừng bạn mới!</h3>
+        <p>Vui lòng chọn biệt danh (Nickname) để hiển thị.</p>
+        <input type="text" id="nickname-input" class="input-full" placeholder="Nhập biệt danh của bạn" maxlength="20">
+        <div class="modal-actions">
+          <button id="btn-save-nickname" class="btn btn-primary">Bắt đầu</button>
+          <button id="btn-skip-nickname" class="btn btn-secondary">Dùng Email làm tên</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toast-container" class="toast-container"></div>
+  </div>
+
+  <script type="module" src="./main.js"></script>
+</body>
+
+</html>
