@@ -14,8 +14,12 @@ const { createRemoteJWKSet, jwtVerify } = require('jose');
 const db = require('./db');
 const { createClient } = require('@deepgram/sdk');
 
-// Initialize Database
-db.initDb().catch(console.error);
+// Initialize Database (only if DATABASE_URL is set)
+if (process.env.DATABASE_URL) {
+  db.initDb().catch(err => console.error('DB init error:', err.message));
+} else {
+  console.warn('DATABASE_URL not set - running in demo mode only');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;

@@ -1,19 +1,30 @@
 const { Pool } = require('pg');
 
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: {
-        rejectUnauthorized: false // Required for Neon
+let pool = null;
+
+function getPool() {
+  if (!pool) {
+    if (!process.env.DATABASE_URL) {
+      console.error('DATABASE_URL environment variable is not set!');
+      throw new Error('DATABASE_URL is required');
     }
-});
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: {
+        rejectUnauthorized: false // Required for Neon
+      }
+    });
+  }
+  return pool;
+}
 
 async function initDb() {
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
 
-        // Users table
-        await client.query(`
+    // Users table
+    await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         email TEXT NOT NULL,
@@ -24,8 +35,8 @@ async function initDb() {
       );
     `);
 
-        // Sessions table
-        await client.query(`
+    // Sessions table
+    await client.query(`
       CREATE TABLE IF NOT EXISTS sessions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id TEXT REFERENCES users(id),
@@ -35,8 +46,8 @@ async function initDb() {
       );
     `);
 
-        // Exam Results table
-        await client.query(`
+    // Exam Results table
+    await client.query(`
       CREATE TABLE IF NOT EXISTS exam_results (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id TEXT REFERENCES users(id),
@@ -48,15 +59,19 @@ async function initDb() {
       );
     `);
 
-        await client.query('COMMIT');
-        console.log('Database initialized successfully');
-    } catch (e) {
-        await client.query('ROLLBACK');
-        console.error('Failed to initialize database:', e);
-        throw e;
-    } finally {
-        client.release();
-    }
+    await client.query('COMMIT');
+    console.log('Database initialized successfully');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('Failed to initialize database:', e);
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
-module.exports = { pool, initDb };
+// Export with getter for lazy initialization
+module.exports = {
+  get pool() { return getPool(); },
+  initDb
+};
