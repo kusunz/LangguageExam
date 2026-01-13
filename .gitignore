@@ -31,3 +31,4 @@ server/server.log
 # Cache
 .cache/
 *.cache
+.vercel
