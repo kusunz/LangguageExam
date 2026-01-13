@@ -129,10 +129,10 @@ app.post('/api/me', authMiddleware, (req, res) => {
 // ============ DB Helper Functions ============
 
 async function loadUserData(userId, email) {
-  if (IS_DEMO_MODE) {
+  if (IS_DEMO_MODE || userId === 'demo-user') {
     return {
       history: [],
-      mistakeBook: {},
+      mistakeBook: [],
       weakTags: [],
       nickname: 'Demo User',
       settings: {}
@@ -161,7 +161,7 @@ async function loadUserData(userId, email) {
 }
 
 async function saveUserData(userId, data) {
-  if (IS_DEMO_MODE) return;
+  if (IS_DEMO_MODE || userId === 'demo-user') return;
 
   // Filter out heavy objects like ttsCache to prevent DB bloat
   const { nickname, ttsCache, ...jsonData } = data;
@@ -259,7 +259,7 @@ app.post('/api/notebook', authMiddleware, async (req, res) => {
     const { question, note, tags, action } = req.body;
     const userId = req.user.userId;
 
-    if (IS_DEMO_MODE) return res.json({ success: true, demo: true });
+    if (IS_DEMO_MODE || userId === 'demo-user') return res.json({ success: true, demo: true });
 
     // 1. Ensure question exists in questions bank
     const hash = generateQuestionHash(question);
@@ -299,7 +299,7 @@ app.post('/api/notebook', authMiddleware, async (req, res) => {
 app.get('/api/notebook', authMiddleware, async (req, res) => {
   try {
     const userId = req.user.userId;
-    if (IS_DEMO_MODE) return res.json({ items: [] });
+    if (IS_DEMO_MODE || userId === 'demo-user') return res.json({ items: [] });
 
     const result = await db.pool.query(`
       SELECT n.*, q.content, q.hash

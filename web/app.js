@@ -116,6 +116,21 @@
                 method: 'POST',
                 body: { sessionId }
             });
+
+            // Client-side storage for Demo User
+            if (State.user?.token === 'demo-token') {
+                try {
+                    const local = localStorage.getItem('demo_userData');
+                    if (local) {
+                        const parsed = JSON.parse(local);
+                        // Merge local data with server response (which is mostly empty for demo)
+                        return { ...data, ...parsed, sessionId: data.sessionId };
+                    }
+                } catch (e) {
+                    console.error('Error loading demo local data:', e);
+                }
+            }
+
             if (data.sessionId) {
                 localStorage.setItem('app_session_id', data.sessionId);
             }
@@ -123,6 +138,13 @@
         },
 
         async saveUserData(data) {
+            // Client-side storage for Demo User
+            if (State.user?.token === 'demo-token') {
+                // Save the FULL current state, as 'data' might be partial
+                if (State.userData) {
+                    localStorage.setItem('demo_userData', JSON.stringify(State.userData));
+                }
+            }
             return this.request('/user-data', { method: 'PUT', body: data });
         },
 
@@ -172,6 +194,36 @@
         },
 
         async saveToNotebook(question, note = '', tags = []) {
+            // Client-side storage for Demo User
+            if (State.user?.token === 'demo-token') {
+                try {
+                    const local = localStorage.getItem('demo_notebook') || '[]';
+                    const notebook = JSON.parse(local);
+                    // Generate local ID
+                    const id = question.id || 'demo_' + Date.now();
+                    const entry = {
+                        question_hash: id,
+                        note,
+                        tags,
+                        created_at: new Date().toISOString(),
+                        question: question,
+                        hash: id, // Mimic server response
+                        content: question // Mimic joined query
+                    };
+
+                    // Simple dedupe by hash/id (remove old if exists)
+                    const idx = notebook.findIndex(n => n.question_hash === id);
+                    if (idx >= 0) notebook.splice(idx, 1);
+
+                    notebook.unshift(entry);
+                    localStorage.setItem('demo_notebook', JSON.stringify(notebook));
+                    return { success: true, hash: id };
+                } catch (e) {
+                    console.error('Error saving demo notebook:', e);
+                    throw e;
+                }
+            }
+
             const token = State.user?.token || 'demo-token';
             const res = await fetch('/api/notebook', {
                 method: 'POST',
@@ -183,6 +235,18 @@
         },
 
         async removeFromNotebook(question) {
+            // Client-side storage for Demo User
+            if (State.user?.token === 'demo-token') {
+                try {
+                    const local = localStorage.getItem('demo_notebook') || '[]';
+                    let notebook = JSON.parse(local);
+                    const id = question.hash || question.question_hash || question.id;
+                    notebook = notebook.filter(n => n.question_hash !== id && n.hash !== id);
+                    localStorage.setItem('demo_notebook', JSON.stringify(notebook));
+                    return { success: true };
+                } catch (e) { console.error('Error removing demo notebook:', e); }
+            }
+
             const token = State.user?.token || 'demo-token';
             const res = await fetch('/api/notebook', {
                 method: 'POST',
@@ -194,6 +258,14 @@
         },
 
         async getNotebook() {
+            // Client-side storage for Demo User
+            if (State.user?.token === 'demo-token') {
+                try {
+                    const local = localStorage.getItem('demo_notebook') || '[]';
+                    return { items: JSON.parse(local) };
+                } catch (e) { return { items: [] }; }
+            }
+
             const token = State.user?.token || 'demo-token';
             const res = await fetch('/api/notebook', {
                 headers: { 'Authorization': `Bearer ${token}` }
