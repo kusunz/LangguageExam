@@ -853,11 +853,11 @@
             return setInterval(() => {
                 // fast until 30%, then slower until 80%, then very slow until 90%
                 let increment = 0;
-                if (progress < 20) increment = 2;
-                else if (progress < 60) increment = 0.5;
+                if (progress < 50) increment = 2;
+                else if (progress < 80) increment = 1;
                 else if (progress < 90) increment = 0.1;
 
-                progress = Math.min(progress + increment, 97);
+                progress = Math.min(progress + increment, 99);
                 bar.style.width = `${progress}%`;
                 text.textContent = `${Math.round(progress)}%`;
             }, 200);
