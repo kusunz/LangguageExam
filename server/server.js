@@ -20,6 +20,9 @@ db.initDb().catch(console.error);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Trust proxy for Vercel/Cloud deployments (enables correct IP detection for rate limiting)
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -695,16 +698,27 @@ app.post('/api/prepare-tts-text', authMiddleware, async (req, res) => {
 app.post('/api/tts', authMiddleware, async (req, res) => {
   try {
     const { text, language, provider, speed, voice } = req.body;
-    const ttsProvider = provider || 'gemini';
+    // Default to deepgram as primary TTS (Gemini TTS uses Google Cloud API, not Gemini API)
+    const ttsProvider = provider || 'deepgram';
 
     let audioBuffer;
 
-    if (ttsProvider === 'gemini') {
-      audioBuffer = await generateGeminiTTS(text, language, speed, voice);
-    } else if (ttsProvider === 'deepgram') {
-      audioBuffer = await generateDeepgramTTS(text, language, speed, voice);
-    } else {
-      return res.status(400).json({ error: 'Use browser TTS on client side' });
+    try {
+      if (ttsProvider === 'deepgram') {
+        audioBuffer = await generateDeepgramTTS(text, language, speed, voice);
+      } else if (ttsProvider === 'gemini') {
+        audioBuffer = await generateGeminiTTS(text, language, speed, voice);
+      } else {
+        return res.status(400).json({ error: 'Use browser TTS on client side' });
+      }
+    } catch (primaryErr) {
+      console.warn(`Primary TTS (${ttsProvider}) failed, trying fallback:`, primaryErr.message);
+      // Fallback logic
+      if (ttsProvider === 'deepgram') {
+        audioBuffer = await generateGeminiTTS(text, language, speed, voice);
+      } else {
+        audioBuffer = await generateDeepgramTTS(text, language, speed, voice);
+      }
     }
 
     res.set('Content-Type', 'audio/mp3');
