@@ -1,16 +1,26 @@
 {
     "version": 2,
-    "buildCommand": "cd web && npm install && npm run build",
-    "outputDirectory": "web/dist",
-    "functions": {
-        "api/**/*.js": {
-            "runtime": "@vercel/node@3.0.0"
-        }
-    },
-    "rewrites": [
+    "builds": [
         {
-            "source": "/api/(.*)",
-            "destination": "/api/index.js"
+            "src": "server/server.js",
+            "use": "@vercel/node"
+        },
+        {
+            "src": "web/package.json",
+            "use": "@vercel/static-build",
+            "config": {
+                "distDir": "dist"
+            }
+        }
+    ],
+    "routes": [
+        {
+            "src": "/api/(.*)",
+            "dest": "/server/server.js"
+        },
+        {
+            "src": "/(.*)",
+            "dest": "/web/$1"
         }
     ]
 }
