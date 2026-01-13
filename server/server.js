@@ -758,19 +758,46 @@ async function generateGeminiTTS(text, language, speed = 1.0, voice) {
 
 async function generateDeepgramTTS(text, language, speed = 1.0, voice) {
   const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
-  // Use Aura-2 models (as of Dec 2025): aura-2-fujin-ja for Japanese, aura-asteria-en for English
-  const model = voice || (language === 'ja-JP' ? 'aura-2-fujin-ja' : 'aura-asteria-en');
 
-  const response = await deepgram.speak.request(
-    { text },
-    { model }
-  );
+  // Aura-2 models: aura-2-thalia-en (English), need to check Japanese support
+  // Default models: aura-asteria-en (English), aura-2-fujin-ja may not exist
+  const model = voice || (language === 'ja-JP' ? 'aura-2-thalia-en' : 'aura-2-thalia-en');
 
-  const stream = await response.getStream();
-  if (stream) {
-    return await streamToBuffer(stream);
-  } else {
-    throw new Error("Error generating audio stream");
+  try {
+    const response = await deepgram.speak.request(
+      { text },
+      { model }
+    );
+
+    // SDK v4: Use getStream() to get readable stream
+    const stream = await response.getStream();
+    if (!stream) {
+      throw new Error('No audio stream returned from Deepgram');
+    }
+
+    // Convert stream to buffer
+    const reader = stream.getReader();
+    const chunks = [];
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+    }
+
+    // Combine chunks into single buffer
+    const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+    const audioBuffer = Buffer.alloc(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      audioBuffer.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    return audioBuffer;
+  } catch (err) {
+    console.error('Deepgram TTS error:', err);
+    throw new Error(`Deepgram TTS failed: ${err.message}`);
   }
 }
 

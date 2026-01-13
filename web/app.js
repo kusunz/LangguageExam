@@ -1674,7 +1674,7 @@
                 <span class="review-status ${item.is_correct ? 'correct' : 'incorrect'}">
                     ${item.is_correct ? '✓ Đúng' : '✗ Sai'}
                 </span>
-                <button onclick="ReviewUI.saveToNotebook('${idx}')" class="btn btn-xs btn-outline" style="border: 1px solid var(--border); padding: 2px 8px; border-radius: 4px;" title="Lưu vào kho">
+                <button onclick="ReviewUI.saveToNotebook('${item.id}')" class="btn btn-xs btn-outline" style="border: 1px solid var(--border); padding: 2px 8px; border-radius: 4px;" title="Lưu vào kho">
                     <i class="fa-solid fa-bookmark"></i>
                 </button>
               </div>
