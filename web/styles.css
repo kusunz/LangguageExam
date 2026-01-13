@@ -554,6 +554,75 @@ body::before {
   border-radius: var(--radius-full);
 }
 
+/* Exam Section Selector */
+.exam-section-selector {
+  margin-top: var(--space-md);
+  margin-bottom: var(--space-md);
+  animation: slideDown 0.3s ease-out;
+}
+
+.exam-section-selector h4 {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-bottom: var(--space-sm);
+  font-weight: 500;
+}
+
+.section-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-sm);
+}
+
+.section-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-md);
+  background: var(--bg-tertiary);
+  border: 2px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  gap: var(--space-xs);
+  min-height: 80px;
+}
+
+.section-option:hover {
+  background: var(--bg-hover);
+  transform: translateY(-2px);
+}
+
+.section-option.selected {
+  border-color: var(--accent-primary);
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--accent-primary);
+}
+
+.section-option i {
+  font-size: var(--text-xl);
+  margin-bottom: 4px;
+}
+
+.section-option span {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-align: center;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 /* Mode Cards */
 .mode-cards {
   display: flex;

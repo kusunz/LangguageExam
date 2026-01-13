@@ -25,6 +25,7 @@
         userData: null,
         currentExam: 'jlpt',
         currentMode: 'official',
+        currentSection: 'full',
         examSpec: null,
         test: null,
         answers: {},
@@ -168,6 +169,37 @@
             }
 
             return response.blob();
+        },
+
+        async saveToNotebook(question, note = '', tags = []) {
+            const token = State.user?.token || 'demo-token';
+            const res = await fetch('/api/notebook', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ question, note, tags })
+            });
+            if (!res.ok) throw new Error('Failed to save to notebook');
+            return await res.json();
+        },
+
+        async removeFromNotebook(question) {
+            const token = State.user?.token || 'demo-token';
+            const res = await fetch('/api/notebook', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ question, action: 'remove' })
+            });
+            if (!res.ok) throw new Error('Failed to remove from notebook');
+            return await res.json();
+        },
+
+        async getNotebook() {
+            const token = State.user?.token || 'demo-token';
+            const res = await fetch('/api/notebook', {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (!res.ok) throw new Error('Failed to fetch notebook');
+            return await res.json();
         }
     };
 
@@ -508,6 +540,54 @@
             return scaledSpec;
         },
 
+        filterBySection(spec, section) {
+            if (section === 'full') return spec;
+
+            const filteredSpec = JSON.parse(JSON.stringify(spec));
+
+            // Define section to mondai mapping
+            const sectionMondaiMap = {
+                'vocab-grammar': ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7'],
+                'reading': ['M8', 'M9', 'M10', 'M11', 'M12'],
+                'listening': ['L1', 'L2', 'L3', 'L4', 'L5']
+            };
+
+            const allowedMondai = sectionMondaiMap[section] || [];
+
+            // Filter groups based on section
+            if (section === 'listening') {
+                // Only keep listening group
+                filteredSpec.groups = filteredSpec.groups.filter(g => g.group_id === 'listening');
+                // Recalculate time limits
+                const listeningTime = spec.official_time_limits_sec.groups.find(g => g.group_id === 'listening');
+                if (filteredSpec.scaled_time_limits) {
+                    filteredSpec.scaled_time_limits.overall_sec = filteredSpec.scaled_time_limits.groups.find(g => g.group_id === 'listening')?.time_sec || 3000;
+                    filteredSpec.scaled_time_limits.groups = filteredSpec.scaled_time_limits.groups.filter(g => g.group_id === 'listening');
+                }
+            } else {
+                // Only keep main group for vocab-grammar and reading
+                filteredSpec.groups = filteredSpec.groups.filter(g => g.group_id === 'main');
+                // Filter mondai within main group
+                filteredSpec.groups.forEach(group => {
+                    group.mondai = group.mondai.filter(m => allowedMondai.includes(m.mondai_id));
+                });
+                // Recalculate time limits based on remaining mondai
+                if (filteredSpec.scaled_time_limits) {
+                    const totalMondai = filteredSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
+                    const originalMainMondai = spec.groups.find(g => g.group_id === 'main')?.mondai.length || 12;
+                    const ratio = totalMondai / originalMainMondai;
+                    const mainTime = filteredSpec.scaled_time_limits.groups.find(g => g.group_id === 'main');
+                    if (mainTime) {
+                        mainTime.time_sec = Math.round(mainTime.time_sec * ratio);
+                        filteredSpec.scaled_time_limits.overall_sec = mainTime.time_sec;
+                    }
+                    filteredSpec.scaled_time_limits.groups = filteredSpec.scaled_time_limits.groups.filter(g => g.group_id === 'main');
+                }
+            }
+
+            return filteredSpec;
+        },
+
         getTotalMondai(spec) {
             return spec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
         },
@@ -779,7 +859,16 @@
 
             showScreen('loading-screen');
             $('#loading-text').textContent = 'Đang tạo đề thi...';
-            $('#loading-hint').textContent = `Đang tạo đề ${examType.toUpperCase()} ${selectedLevel}...`;
+
+            // Section hint
+            const sectionNames = {
+                'vocab-grammar': ' - Từ vựng & Ngữ pháp',
+                'reading': ' - Đọc hiểu',
+                'listening': ' - Nghe'
+            };
+            const sectionLabel = sectionNames[State.currentSection] || '';
+            $('#loading-hint').textContent = `Đang tạo đề ${examType.toUpperCase()} ${selectedLevel}${sectionLabel}...`;
+
             progressBar.style.width = '0%';
             progressText.textContent = '0%';
 
@@ -788,7 +877,10 @@
             try {
                 // Load exam spec with dynamic level
                 const rawSpec = await ExamLoader.loadSpec(examType, selectedLevel);
-                State.examSpec = ExamLoader.applyModeScaling(rawSpec, mode);
+                let scaledSpec = ExamLoader.applyModeScaling(rawSpec, mode);
+
+                // Filter by section
+                State.examSpec = ExamLoader.filterBySection(scaledSpec, State.currentSection);
 
                 // Generate FIRST GROUP only (for quick start)
                 const firstGroupResult = await Api.generateGroup(State.examSpec, mode, 0, llmProvider);
@@ -1464,9 +1556,14 @@
           <div class="review-item ${item.is_correct ? '' : 'incorrect'}">
             <div class="review-item-header">
               <span class="review-item-id">${item.id}</span>
-              <span class="review-status ${item.is_correct ? 'correct' : 'incorrect'}">
-                ${item.is_correct ? '✓ Đúng' : '✗ Sai'}
-              </span>
+              <div style="display: flex; gap: 8px; align-items: center;">
+                <span class="review-status ${item.is_correct ? 'correct' : 'incorrect'}">
+                    ${item.is_correct ? '✓ Đúng' : '✗ Sai'}
+                </span>
+                <button onclick="ReviewUI.saveToNotebook('${idx}')" class="btn btn-xs btn-outline" style="border: 1px solid var(--border); padding: 2px 8px; border-radius: 4px;" title="Lưu vào kho">
+                    <i class="fa-solid fa-bookmark"></i>
+                </button>
+              </div>
             </div>
             <div class="review-prompt ${isJapanese ? '' : 'zh'}">${TestUI.escapeHtml(questionData.prompt)}</div>
             
@@ -1530,6 +1627,44 @@
                 showToast('Đã lưu ngữ pháp!', 'success');
             } else {
                 showToast('Ngữ pháp này đã có trong sổ tay.', 'error');
+            }
+        },
+
+        async saveToNotebook(questionIndex) {
+            // Find question data
+            // If questionIndex is ID, find it. If numeric, key access.
+            // Wait, generated questions might not have IDs if strictly generated.
+            // Using index from map if ID is missing.
+            let question = null;
+            if (State.feedback?.by_question[questionIndex]) {
+                question = State.feedback.by_question[questionIndex].question;
+            } else {
+                // Fallback search
+                const found = State.feedback?.by_question.find(item => item.id == questionIndex || item.question.id == questionIndex);
+                if (found) question = found.question;
+            }
+
+            if (!question) {
+                showToast('Không tìm thấy dữ liệu câu hỏi', 'error');
+                return;
+            }
+
+            const note = prompt('Nhập ghi chú (tùy chọn):', '');
+            if (note === null) return; // Cancelled
+
+            try {
+                // Determine tags based on question type
+                const tags = [];
+                if (question.type) tags.push(question.type);
+                if (State.currentExam) tags.push(State.currentExam);
+
+                const result = await Api.saveToNotebook(question, note, tags);
+                if (result.success) {
+                    showToast('Đã lưu vào kho kiến thức!', 'success');
+                }
+            } catch (err) {
+                console.error('Save notebook error:', err);
+                showToast('Lỗi lưu câu hỏi: ' + err.message, 'error');
             }
         },
 
@@ -1786,6 +1921,19 @@
                 $$('.exam-tab-wrapper').forEach(w => w.classList.remove('active'));
                 wrapper.classList.add('active');
                 State.currentExam = wrapper.dataset.exam;
+
+                // Show section selector when exam is selected
+                const sectionSelector = $('#exam-section-selector');
+                // Ensure section selector is visible (though strictly already removed hidden)
+            });
+        });
+
+        // Section selection
+        $$('.section-option').forEach(option => {
+            option.addEventListener('click', () => {
+                $$('.section-option').forEach(o => o.classList.remove('selected'));
+                option.classList.add('selected');
+                State.currentSection = option.dataset.section;
             });
         });
 

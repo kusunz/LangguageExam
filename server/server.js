@@ -251,6 +251,116 @@ app.put('/api/user-data', authMiddleware, async (req, res) => {
   }
 });
 
+// ============ Notebook/Knowledge Bank Endpoints ============
+
+// Save/Unsave question to notebook
+app.post('/api/notebook', authMiddleware, async (req, res) => {
+  try {
+    const { question, note, tags, action } = req.body;
+    const userId = req.user.userId;
+
+    if (IS_DEMO_MODE) return res.json({ success: true, demo: true });
+
+    // 1. Ensure question exists in questions bank
+    const hash = generateQuestionHash(question);
+
+    // Upsert question to bank (ignore if exists)
+    await db.pool.query(
+      `INSERT INTO questions (hash, content, keywords) 
+       VALUES ($1, $2, $3) 
+       ON CONFLICT (hash) DO NOTHING`,
+      [hash, JSON.stringify(question), JSON.stringify(question.tags || [])]
+    );
+
+    if (action === 'remove') {
+      await db.pool.query(
+        'DELETE FROM user_notebook WHERE user_id = $1 AND question_hash = $2',
+        [userId, hash]
+      );
+    } else {
+      // Upsert notebook entry
+      await db.pool.query(
+        `INSERT INTO user_notebook (user_id, question_hash, note, tags)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (user_id, question_hash) 
+         DO UPDATE SET note = $3, tags = $4, created_at = NOW()`,
+        [userId, hash, note || '', JSON.stringify(tags || [])]
+      );
+    }
+
+    res.json({ success: true, hash });
+  } catch (err) {
+    console.error('Notebook save error:', err);
+    res.status(500).json({ error: 'Failed to save to notebook' });
+  }
+});
+
+// Get user notebook
+app.get('/api/notebook', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    if (IS_DEMO_MODE) return res.json({ items: [] });
+
+    const result = await db.pool.query(`
+      SELECT n.*, q.content, q.hash
+      FROM user_notebook n
+      JOIN questions q ON n.question_hash = q.hash
+      WHERE n.user_id = $1
+      ORDER BY n.created_at DESC
+      LIMIT 200
+    `, [userId]);
+
+    const items = result.rows.map(row => ({
+      ...row,
+      question: row.content,
+      content: undefined
+    }));
+
+    res.json({ items });
+  } catch (err) {
+    console.error('Notebook fetch error:', err);
+    res.status(500).json({ error: 'Failed to fetch notebook' });
+  }
+});
+
+// Helper: Generate consistent hash for a question
+function generateQuestionHash(question) {
+  // Normalize content for hashing: Prompt + Choices + Answer + Type
+  const content = {
+    p: question.prompt,
+    c: question.choices,
+    a: question.answer_index,
+    t: question.type
+    // Ignore ID, explanation, etc. for deduplication
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(content)).digest('hex');
+}
+
+// Helper: Async save generated questions to bank
+async function saveQuestionsFromTest(testData) {
+  if (!testData || !testData.groups) return;
+
+  try {
+    for (const group of testData.groups) {
+      for (const mondai of group.mondai) {
+        if (!mondai.items) continue;
+        for (const item of mondai.items) {
+          const hash = generateQuestionHash(item);
+          // Fire and forget insert
+          db.pool.query(
+            `INSERT INTO questions (hash, content, keywords) 
+             VALUES ($1, $2, $3) 
+             ON CONFLICT (hash) DO NOTHING`,
+            [hash, JSON.stringify(item), JSON.stringify(item.tags || [])]
+          ).catch(e => console.error('Question bank insert duplicate/error:', e.message));
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Error saving questions to bank:', e);
+  }
+}
+
 // ============ LLM Endpoints ============
 
 async function callOpenAI(messages, options = {}) {
@@ -443,6 +553,9 @@ app.post('/api/generate-test', authMiddleware, async (req, res) => {
       result = await callGemini(prompt);
     }
 
+    // Async save generated questions to Knowledge Bank
+    saveQuestionsFromTest(result).catch(e => console.error('Bank save error:', e));
+
     res.json(result);
   } catch (err) {
     console.error('Generate test error:', err);
@@ -469,6 +582,9 @@ app.post('/api/generate-group', authMiddleware, async (req, res) => {
     } else {
       result = await callGemini(prompt);
     }
+
+    // Async save generated questions (group) to Knowledge Bank
+    saveQuestionsFromTest({ groups: [result] }).catch(e => console.error('Bank save error group:', e));
 
     // If this is the first group (groupIndex === 0), include metadata
     if (groupIndex === 0) {
