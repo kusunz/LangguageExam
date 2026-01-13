@@ -554,6 +554,73 @@ body::before {
   border-radius: var(--radius-full);
 }
 
+/* Exam Section Selector */
+.exam-section-selector {
+  margin-top: var(--space-md);
+  padding: var(--space-md);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-height 0.3s ease, opacity 0.3s ease, padding 0.3s ease, margin 0.3s ease;
+}
+
+.exam-section-selector.hidden {
+  max-height: 0;
+  padding: 0 var(--space-md);
+  margin-top: 0;
+  opacity: 0;
+}
+
+.exam-section-selector:not(.hidden) {
+  max-height: 250px;
+  opacity: 1;
+}
+
+.exam-section-selector h4 {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-bottom: var(--space-sm);
+  font-weight: 500;
+}
+
+.section-options {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-sm);
+}
+
+.section-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-md);
+  background: var(--bg-secondary);
+  border: 2px solid transparent;
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.section-option:hover {
+  background: var(--bg-elevated);
+  border-color: var(--glass-border);
+}
+
+.section-option.selected {
+  border-color: var(--accent-primary);
+  background: rgba(59, 130, 246, 0.15);
+}
+
+.section-option i {
+  font-size: var(--text-xl);
+  color: var(--accent-primary);
+}
+
 /* Mode Cards */
 .mode-cards {
   display: flex;

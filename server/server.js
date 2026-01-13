@@ -144,7 +144,7 @@ async function loadUserData(userId, email) {
   if (IS_DEMO_MODE) {
     return {
       history: [],
-      mistakeBook: {},
+      mistakeBook: [],
       weakTags: [],
       nickname: 'Demo User',
       settings: {}
@@ -156,7 +156,7 @@ async function loadUserData(userId, email) {
 
     if (res.rows.length === 0) {
       // Create new user if not exists
-      const initialData = { history: [], mistakeBook: {}, weakTags: [], settings: {} };
+      const initialData = { history: [], mistakeBook: [], weakTags: [], settings: {} };
       await db.pool.query(
         'INSERT INTO users (id, email, data) VALUES ($1, $2, $3)',
         [userId, email || '', JSON.stringify(initialData)]
@@ -239,7 +239,7 @@ app.post('/api/user-data', authMiddleware, async (req, res) => {
     if (isDemoUser) {
       const demoData = {
         history: [],
-        mistakeBook: {},
+        mistakeBook: [],
         weakTags: [],
         settings: {},
         nickname: 'Demo User',
@@ -556,10 +556,13 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
       console.error('Failed to save exam result to DB:', dbErr);
     }
 
-    // Update User History (Legacy/Frontend compatibility)
+    // Update User History and Mistake Book
     try {
       const userData = await loadUserData(req.user.userId, req.user.email);
       userData.history = userData.history || [];
+      userData.mistakeBook = userData.mistakeBook || [];
+
+      // Add to history
       userData.history.unshift({
         id: crypto.randomUUID(),
         exam_id: test.meta.exam_id,
@@ -570,6 +573,39 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
       });
       // Limit history to 20
       if (userData.history.length > 20) userData.history.pop();
+
+      // Add incorrect answers to mistake book
+      if (result.by_question) {
+        const incorrectItems = result.by_question.filter(q => !q.is_correct);
+        for (const item of incorrectItems) {
+          // Find the question in test
+          let questionData = null;
+          for (const group of test.groups || []) {
+            for (const mondai of group.mondai || []) {
+              const found = (mondai.items || []).find(q => q.id === item.id);
+              if (found) {
+                questionData = found;
+                break;
+              }
+            }
+            if (questionData) break;
+          }
+
+          if (questionData) {
+            userData.mistakeBook.push({
+              date: new Date().toISOString(),
+              exam: test.meta?.exam_id,
+              question: questionData,
+              feedback: item,
+              userAnswer: answers[item.id]
+            });
+          }
+        }
+        // Limit mistake book to 100
+        if (userData.mistakeBook.length > 100) {
+          userData.mistakeBook = userData.mistakeBook.slice(-100);
+        }
+      }
 
       await saveUserData(req.user.userId, userData);
     } catch (histErr) {
