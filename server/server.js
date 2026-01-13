@@ -1028,7 +1028,11 @@ app.get('*', (req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`Language Exam Server running on http://localhost:${PORT}`);
-  console.log(`Auth Mode: ${IS_DEMO_MODE ? 'DEMO MODE (no auth required)' : 'Privy (' + PRIVY_APP_ID + ')'}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Language Exam Server running on http://localhost:${PORT}`);
+    console.log(`Auth Mode: ${IS_DEMO_MODE ? 'DEMO MODE (no auth required)' : 'Privy (' + PRIVY_APP_ID + ')'}`);
+  });
+}
+
+module.exports = app;
