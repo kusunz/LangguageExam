@@ -907,7 +907,13 @@ RULES:
 5. Include meaningful tags and brief explanations for each question.
 6. For listening items, include script_text for audio generation.
 
-OUTPUT JSON ONLY matching this schema (single group object):
+OUTPUT JSON ONLY matching the following schema.
+IMPORTANT:
+- Return RAW JSON only. Do not wrap in markdown code blocks.
+- Ensure strict JSON validity (escape quotes properly).
+- Ensure all required fields are present.
+
+Schema:
 {
   "group_id": "${group.group_id}",
   "title_vi": "${group.title_vi}",
@@ -935,7 +941,7 @@ OUTPUT JSON ONLY matching this schema (single group object):
   ]
 }
 
-Generate Group ${groupIndex + 1} now. JSON ONLY, no other text.`;
+GENERATE JSON NOW:`;
 }
 
 function buildGradeTestPrompt(test, answers) {
