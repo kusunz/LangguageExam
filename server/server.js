@@ -233,12 +233,26 @@ async function manageSession(userId, existingSessionId) {
 app.post('/api/user-data', authMiddleware, async (req, res) => {
   try {
     const { sessionId } = req.body; // Frontend sends current session ID if exists
+    const isDemoUser = req.user.userId === 'demo-user';
 
-    // Manage Session
-    const activeSessionId = await manageSession(req.user.userId, sessionId);
+    // For demo user, return mock data without DB operations
+    if (isDemoUser) {
+      const demoData = {
+        history: [],
+        mistakeBook: {},
+        weakTags: [],
+        settings: {},
+        nickname: 'Demo User',
+        sessionId: 'demo-session'
+      };
+      return res.json(demoData);
+    }
 
-    // Load Data
+    // Load Data (this also creates user if not exists)
     const data = await loadUserData(req.user.userId, req.user.email);
+
+    // Manage Session (now user exists, so foreign key won't fail)
+    const activeSessionId = await manageSession(req.user.userId, sessionId);
 
     // Update last login
     await db.pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [req.user.userId]);
@@ -253,6 +267,11 @@ app.post('/api/user-data', authMiddleware, async (req, res) => {
 // Save user data
 app.put('/api/user-data', authMiddleware, async (req, res) => {
   try {
+    // Skip saving for demo user
+    if (req.user.userId === 'demo-user') {
+      return res.json({ success: true, demo: true });
+    }
+
     const currentData = await loadUserData(req.user.userId, req.user.email);
     const newData = { ...currentData, ...req.body };
     await saveUserData(req.user.userId, newData);
@@ -591,7 +610,7 @@ app.post('/api/prepare-tts-text', authMiddleware, async (req, res) => {
 app.post('/api/tts', authMiddleware, async (req, res) => {
   try {
     const { text, language, provider, speed, voice } = req.body;
-    const ttsProvider = provider || 'gemini';
+    const ttsProvider = provider || 'deepgram';
 
     let audioBuffer;
 
