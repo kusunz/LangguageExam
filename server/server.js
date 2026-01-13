@@ -981,7 +981,7 @@ For each incorrect answer, provide:
 
 OUTPUT JSON ONLY matching correct schema.
 IMPORTANT:
-- Return RAW JSON only. Do not use markdown (```json).
+- Return RAW JSON only. Do not use markdown (\\`\\`\\`json).
   - Ensure strict JSON validity.
 - Ensure 'score_summary' field exists as used by system.
 
