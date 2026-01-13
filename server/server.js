@@ -981,7 +981,7 @@ For each incorrect answer, provide:
 
 OUTPUT JSON ONLY matching correct schema.
 IMPORTANT:
-- Return RAW JSON only. Do not use markdown (\\`\\`\\`json).
+- Return RAW JSON only. Do not use markdown code blocks.
   - Ensure strict JSON validity.
 - Ensure 'score_summary' field exists as used by system.
 
@@ -1010,10 +1010,10 @@ IMPORTANT:
                               GENERATE JSON NOW:`;
 }
 
-                              function buildTtsTextPrompt(text, language) {
+function buildTtsTextPrompt(text, language) {
   const langName = language === 'ja-JP' ? 'Japanese' : language === 'zh-CN' ? 'Chinese' : 'English';
 
-                              return `Convert the following ${langName} text into TTS-optimized text for natural speech synthesis.
+  return `Convert the following ${langName} text into TTS-optimized text for natural speech synthesis.
 
                               ORIGINAL TEXT:
                               ${text}
@@ -1036,15 +1036,15 @@ IMPORTANT:
 // ============ Serve SPA ============
 
 app.get('*', (req, res) => {
-                                  res.sendFile(path.join(__dirname, '../web/index.html'));
+  res.sendFile(path.join(__dirname, '../web/index.html'));
 });
 
-                                // Start server
-                                if (require.main === module) {
-                                  app.listen(PORT, () => {
-                                    console.log(`Language Exam Server running on http://localhost:${PORT}`);
-                                    console.log(`Auth Mode: ${IS_DEMO_MODE ? 'DEMO MODE (no auth required)' : 'Privy (' + PRIVY_APP_ID + ')'}`);
-                                  });
+// Start server
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Language Exam Server running on http://localhost:${PORT}`);
+    console.log(`Auth Mode: ${IS_DEMO_MODE ? 'DEMO MODE (no auth required)' : 'Privy (' + PRIVY_APP_ID + ')'}`);
+  });
 }
 
-                                module.exports = app;
+module.exports = app;
