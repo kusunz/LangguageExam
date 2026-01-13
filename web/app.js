@@ -851,16 +851,16 @@
         simulateProgress(bar, text) {
             let progress = 0;
             return setInterval(() => {
-                // fast until 30%, then slower until 80%, then very slow until 90%
+                // Fast progress to show activity - completes quickly
                 let increment = 0;
-                if (progress < 50) increment = 2;
-                else if (progress < 80) increment = 1;
-                else if (progress < 90) increment = 0.1;
+                if (progress < 70) increment = 5;       // Fast to 70%
+                else if (progress < 90) increment = 2;   // Slower to 90%
+                else if (progress < 98) increment = 0.5; // Very slow at end
 
-                progress = Math.min(progress + increment, 99);
+                progress = Math.min(progress + increment, 98);
                 bar.style.width = `${progress}%`;
                 text.textContent = `${Math.round(progress)}%`;
-            }, 200);
+            }, 100); // Faster interval - 100ms instead of 200ms
         },
 
         collectUserHistory() {

@@ -659,28 +659,55 @@ async function generateGeminiTTS(text, language, speed = 1.0, voice) {
 
 async function generateDeepgramTTS(text, language, speed = 1.0, voice) {
   const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
-  // Use Aura-2 models (as of Dec 2025): aura-2-fujin-ja for Japanese, aura-asteria-en for English
-  const model = voice || (language === 'ja-JP' ? 'aura-2-fujin-ja' : 'aura-asteria-en');
+
+  // Aura-2 models (2025): aura-2-thalia-en (English), aura-2-fujin-ja (Japanese)
+  // For Chinese, use aura-asteria-en (no Chinese voice yet)
+  let model;
+  if (voice) {
+    model = voice;
+  } else if (language === 'ja-JP') {
+    model = 'aura-2-fujin-ja';
+  } else if (language === 'zh-CN') {
+    model = 'aura-asteria-en'; // No Chinese voice, use English
+  } else {
+    model = 'aura-2-thalia-en';
+  }
 
   const response = await deepgram.speak.request(
     { text },
-    { model }
+    {
+      model,
+      encoding: 'mp3'  // Request MP3 format
+    }
   );
 
   const stream = await response.getStream();
-  if (stream) {
-    return await streamToBuffer(stream);
-  } else {
-    throw new Error("Error generating audio stream");
+  if (!stream) {
+    throw new Error('Deepgram: No audio stream returned');
   }
+
+  // Convert ReadableStream to Buffer (SDK v4 pattern)
+  return await getAudioBuffer(stream);
 }
 
-async function streamToBuffer(stream) {
+// Helper: Convert Deepgram ReadableStream to Buffer
+async function getAudioBuffer(stream) {
+  const reader = stream.getReader();
   const chunks = [];
-  for await (const chunk of stream) {
-    chunks.push(Buffer.from(chunk));
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
   }
-  return Buffer.concat(chunks);
+
+  // Combine all chunks into single Uint8Array
+  const dataArray = chunks.reduce(
+    (acc, chunk) => new Uint8Array([...acc, ...chunk]),
+    new Uint8Array(0)
+  );
+
+  return Buffer.from(dataArray.buffer);
 }
 
 // ============ Prompt Builders ============
