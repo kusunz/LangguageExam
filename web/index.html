@@ -247,12 +247,19 @@
 
         <div id="audio-player" class="audio-player hidden">
           <div class="audio-controls">
+            <button id="btn-replay-audio" class="btn btn-sm btn-secondary btn-icon-only" title="Tua lại 5s">
+              <i class="fa-solid fa-rotate-left"></i>
+            </button>
             <button id="btn-play-audio" class="btn btn-primary">
               <span class="play-icon"><i class="fa-solid fa-play"></i></span>
-              Nghe
+              <span class="btn-text">Nghe</span>
             </button>
-            <span id="audio-status" class="audio-status"></span>
+            <span id="audio-time" class="audio-time">00:00</span>
           </div>
+          <div class="audio-progress-container">
+            <input type="range" id="audio-seek" class="audio-seek" value="0" min="0" step="0.1">
+          </div>
+          <span id="audio-status" class="audio-status"></span>
           <button id="btn-show-script" class="btn btn-ghost btn-sm hidden">Hiển thị lời thoại</button>
           <div id="audio-script" class="audio-script hidden"></div>
         </div>

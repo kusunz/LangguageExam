@@ -840,25 +840,57 @@
 
                 if (State.ttsAudio) {
                     State.ttsAudio.pause();
-                    URL.revokeObjectURL(State.ttsAudio.src);
+                    if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
                 }
 
                 State.ttsAudio = new Audio(url);
+
+                // Time update & Seek integration
+                State.ttsAudio.ontimeupdate = () => {
+                    const currentTime = State.ttsAudio.currentTime;
+                    const duration = State.ttsAudio.duration;
+
+                    // Update time display
+                    const timeEl = $('#audio-time');
+                    if (timeEl && !isNaN(duration)) {
+                        timeEl.textContent = `${this.formatTime(currentTime)} / ${this.formatTime(duration)}`;
+                    }
+
+                    // Update seek bar
+                    const seek = $('#audio-seek');
+                    if (seek && !isNaN(duration)) {
+                        seek.value = (currentTime / duration) * 100;
+                    }
+                };
+
                 State.ttsAudio.onended = () => {
                     URL.revokeObjectURL(url);
                     const btn = $('#btn-play-audio');
                     if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
-                    resolve();
+
+                    // Reset seek
+                    const seek = $('#audio-seek');
+                    if (seek) seek.value = 100;
                 };
+
                 State.ttsAudio.onerror = reject;
 
-                // Update UI when playing starts
+                // Resolve promise when playback STARTS so UI is interactive
                 State.ttsAudio.onplay = () => {
                     const btn = $('#btn-play-audio');
                     if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
+                    resolve();
                 };
 
-                State.ttsAudio.play();
+                // Also resolve on canplay through to ensure we don't block
+                State.ttsAudio.oncanplaythrough = () => {
+                    // Optional: enable controls
+                };
+
+                State.ttsAudio.play().then(() => {
+                    // Modern browsers return promise
+                    // Resolve handled in onplay
+                }).catch(reject);
             });
         },
 
@@ -869,6 +901,9 @@
                     return;
                 }
 
+                // Stop any existing
+                speechSynthesis.cancel();
+
                 const utterance = new SpeechSynthesisUtterance(text);
                 utterance.lang = language;
                 utterance.rate = 0.9;
@@ -876,17 +911,15 @@
                 utterance.onstart = () => {
                     const btn = $('#btn-play-audio');
                     if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
+                    resolve(); // Resolve immediately
                 };
 
                 utterance.onend = () => {
                     const btn = $('#btn-play-audio');
                     if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
-                    resolve();
                 };
 
                 utterance.onerror = (err) => {
-                    // console.error('Browser TTS error', err); 
-                    // SpeechSynthesisErrorEvent might not have a clean message
                     reject(err);
                 };
 
@@ -902,6 +935,13 @@
             if ('speechSynthesis' in window) {
                 speechSynthesis.cancel();
             }
+        },
+
+        // Helper for time format (MM:SS)
+        formatTime(seconds) {
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
         }
     };
 
@@ -1430,9 +1470,9 @@
                 date: new Date().toISOString(),
                 exam: State.currentExam,
                 mode: State.currentMode,
-                score: feedback.summary.score_total,
-                maxScore: feedback.summary.score_max,
-                weakTags: feedback.summary.weak_tags
+                score: feedback.score_summary?.total_score ?? feedback.summary?.score_total,
+                maxScore: feedback.score_summary?.max_score ?? feedback.summary?.score_max,
+                weakTags: feedback.score_summary?.weak_tags ?? feedback.summary?.weak_tags
             });
 
             // Add mistakes to mistake book
@@ -1549,9 +1589,11 @@
             const test = State.test;
 
             // Score circle
-            const scoreValue = feedback.summary.score_total;
-            const scoreMax = feedback.summary.score_max || this.getTotalQuestions();
-            const percentage = (scoreValue / scoreMax) * 100;
+            // Schema update: summary -> score_summary, score_total -> total_score, score_max -> max_score
+            const scoreSummary = feedback.score_summary || feedback.summary || {};
+            const scoreValue = scoreSummary.total_score !== undefined ? scoreSummary.total_score : (scoreSummary.score_total || 0);
+            const scoreMax = scoreSummary.max_score !== undefined ? scoreSummary.max_score : (scoreSummary.score_max || this.getTotalQuestions());
+            const percentage = scoreMax > 0 ? (scoreValue / scoreMax) * 100 : 0;
 
             $('#score-value').textContent = scoreValue;
             $('#score-max').textContent = `/${scoreMax}`;
@@ -1576,7 +1618,7 @@
             }
 
             // Score by group
-            const groupsHtml = Object.entries(feedback.summary.score_by_group || {})
+            const groupsHtml = Object.entries(scoreSummary.score_by_group || {})
                 .map(([groupId, score]) => {
                     const group = test.groups.find(g => g.group_id === groupId);
                     const label = group?.title_vi || groupId;
@@ -1589,10 +1631,10 @@
                 }).join('');
 
             $('#score-by-group').innerHTML = groupsHtml;
-            $('#recommendation').textContent = feedback.summary.recommendation_vi || '';
+            $('#recommendation').textContent = scoreSummary.recommendation_vi || '';
 
             // Weak tags
-            const tagsHtml = (feedback.summary.weak_tags || [])
+            const tagsHtml = (scoreSummary.weak_tags || [])
                 .map(tag => `<span class="tag">${tag}</span>`)
                 .join('');
             $('#weak-tags').innerHTML = tagsHtml || '<span style="color: var(--text-muted)">Không có</span>';
@@ -2029,6 +2071,21 @@
         // Listening Controls
         $('#btn-show-script')?.addEventListener('click', () => TestUI.toggleScript());
         $('#btn-play-audio')?.addEventListener('click', () => TestUI.handleAudio());
+
+        // Audio Seek & Rewind
+        $('#audio-seek')?.addEventListener('input', (e) => {
+            if (State.ttsAudio && State.ttsAudio.duration) {
+                const pct = parseFloat(e.target.value);
+                State.ttsAudio.currentTime = (pct / 100) * State.ttsAudio.duration;
+            }
+        });
+
+        $('#btn-replay-audio')?.addEventListener('click', () => {
+            if (State.ttsAudio) {
+                State.ttsAudio.currentTime = Math.max(0, State.ttsAudio.currentTime - 5);
+                if (State.ttsAudio.paused) State.ttsAudio.play();
+            }
+        });
 
         // Grammar Book
         $('#btn-grammar')?.addEventListener('click', () => {

@@ -1787,3 +1787,8 @@ body::before {
 .error-text.hidden {
   display: none;
 }
+/* Audio Player Improvements */
+.audio-progress-container { width: 100%; margin-top: 8px; }
+.audio-seek { width: 100%; cursor: pointer; accent-color: var(--primary-color); }
+.audio-controls { display: flex; align-items: center; gap: 10px; }
+.audio-time { font-family: monospace; font-size: 0.9rem; color: var(--text-secondary); }

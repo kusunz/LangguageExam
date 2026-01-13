@@ -979,66 +979,72 @@ For each incorrect answer, provide:
 4. extra_examples_target: 2-3 example sentences in the target language
 5. review_tasks_vi: Suggested review tasks (Vietnamese)
 
-OUTPUT JSON ONLY:
-{
-  "summary": {
-    "score_total": <correct_count>,
-    "score_max": <total_questions>,
-    "score_by_group": { "<group_id>": <score>, ... },
-    "weak_tags": ["<tags where user made mistakes>"],
-    "recommendation_vi": "<personalized study recommendation in Vietnamese>"
+OUTPUT JSON ONLY matching correct schema.
+IMPORTANT:
+- Return RAW JSON only. Do not use markdown (```json).
+  - Ensure strict JSON validity.
+- Ensure 'score_summary' field exists as used by system.
+
+    Schema:
+  {
+    "score_summary": {
+      "total_score": <correct_count>,
+        "max_score": <total_questions>,
+          "score_by_group": {"<group_id>": <score>, ... },
+            "weak_tags": ["<tags where user made mistakes>"],
+              "recommendation_vi": "<personalized study recommendation in Vietnamese>"
   },
-  "by_question": [
-    {
-      "id": "<question_id>",
-      "is_correct": true/false,
-      "why_wrong_vi": "<only if incorrect>",
-      "key_point_vi": "<key learning point>",
-      "mini_lesson_vi": "<mini lesson>",
-      "extra_examples_target": ["<example1>", "<example2>"],
-      "review_tasks_vi": ["<task1>", "<task2>"]
+                "by_question": [
+                {
+                  "id": "<question_id>",
+                    "is_correct": true/false,
+                    "why_wrong_vi": "<only if incorrect>",
+                      "key_point_vi": "<key learning point>",
+                        "mini_lesson_vi": "<mini lesson>",
+                          "extra_examples_target": ["<example1>", "<example2>"],
+                            "review_tasks_vi": ["<task1>", "<task2>"]
     }
-  ]
+                              ]
 }
 
-JSON ONLY, no other text.`;
+                              GENERATE JSON NOW:`;
 }
 
-function buildTtsTextPrompt(text, language) {
+                              function buildTtsTextPrompt(text, language) {
   const langName = language === 'ja-JP' ? 'Japanese' : language === 'zh-CN' ? 'Chinese' : 'English';
 
-  return `Convert the following ${langName} text into TTS-optimized text for natural speech synthesis.
+                              return `Convert the following ${langName} text into TTS-optimized text for natural speech synthesis.
 
-ORIGINAL TEXT:
-${text}
+                              ORIGINAL TEXT:
+                              ${text}
 
-RULES:
-1. Preserve the exact meaning - do not add or remove content
-2. Add appropriate punctuation for natural pacing
+                              RULES:
+                              1. Preserve the exact meaning - do not add or remove content
+                              2. Add appropriate punctuation for natural pacing
 3. Normalize numbers (e.g., "3時" -> "さんじ" for Japanese)
-4. Add brief pauses with commas where natural
-5. Keep the same language - do not translate
+                              4. Add brief pauses with commas where natural
+                              5. Keep the same language - do not translate
 
-OUTPUT JSON ONLY:
-{
-  "tts_text": "<optimized text for TTS>"
+                              OUTPUT JSON ONLY:
+                              {
+                                "tts_text": "<optimized text for TTS>"
 }
 
-JSON ONLY, no other text.`;
+                                  JSON ONLY, no other text.`;
 }
 
 // ============ Serve SPA ============
 
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../web/index.html'));
+                                  res.sendFile(path.join(__dirname, '../web/index.html'));
 });
 
-// Start server
-if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`Language Exam Server running on http://localhost:${PORT}`);
-    console.log(`Auth Mode: ${IS_DEMO_MODE ? 'DEMO MODE (no auth required)' : 'Privy (' + PRIVY_APP_ID + ')'}`);
-  });
+                                // Start server
+                                if (require.main === module) {
+                                  app.listen(PORT, () => {
+                                    console.log(`Language Exam Server running on http://localhost:${PORT}`);
+                                    console.log(`Auth Mode: ${IS_DEMO_MODE ? 'DEMO MODE (no auth required)' : 'Privy (' + PRIVY_APP_ID + ')'}`);
+                                  });
 }
 
-module.exports = app;
+                                module.exports = app;
