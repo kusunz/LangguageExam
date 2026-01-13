@@ -4,14 +4,15 @@
     "outputDirectory": "web/dist",
     "installCommand": "npm install && cd server && npm install",
     "functions": {
-        "server/server.js": {
-            "runtime": "@vercel/node@3.0.0"
+        "api/index.js": {
+            "runtime": "@vercel/node@3.0.0",
+            "includeFiles": "server/**"
         }
     },
     "rewrites": [
         {
             "source": "/api/(.*)",
-            "destination": "/server/server.js"
+            "destination": "/api/index.js"
         }
     ]
 }
