@@ -4,7 +4,9 @@
     "private": true,
     "description": "Root config for deploying server and web together",
     "scripts": {
-        "install": "cd server && npm install",
+        "install": "cd server && npm install && cd ../web && npm install",
+        "build": "cd web && npm run build",
+        "postinstall": "npm run build",
         "start": "cd server && npm start",
         "dev": "cd server && npm start"
     },

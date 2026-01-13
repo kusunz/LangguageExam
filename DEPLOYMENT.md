@@ -1,58 +1,59 @@
-# Deployment Guide
+# Deployment Guide (Vercel)
 
-This app consists of a Node.js backend (`server/`) and a vanilla JS frontend (`web/`). The server serves the frontend static files, so they are deployed together as a single service.
+This app uses Vercel for deployment with:
+- **Frontend**: Static files from Vite build (`web/dist/`)
+- **Backend**: Serverless Express API (`api/index.js`)
 
 ## 1. Database Setup (Neon)
 
-We use **Neon** (Serverless PostgreSQL) for the database.
-
 1.  Go to [Neon.tech](https://neon.tech) and sign up.
 2.  Create a new project.
-3.  On the Dashboard, copy the **Connection String** (Postgres URL).
-    *   It looks like: `postgres://user:password@host/dbname?sslmode=require`
-4.  Keep this URL safe; you will need it for the Environment Variables.
+3.  Copy the **Connection String** (Postgres URL).
 
-## 2. Deployment Options
+## 2. Deploy to Vercel
 
-### Option A: Railway (Recommended)
+### Quick Deploy:
+```bash
+# Install Vercel CLI
+npm i -g vercel
 
-Railway handles the monorepo structure well.
-
-1.  Push your code to GitHub.
-2.  Login to [Railway.app](https://railway.app).
-3.  Click "New Project" -> "Deploy from GitHub repo".
-4.  Select your repository.
-5.  **Configuration**:
-    *   Railway usually detects `server/package.json`.
-    *   If asked for **Root Directory**, leave it as `/` (Root) so it can access both `server` and `web`.
-    *   **Build Command**: `cd server && npm install`
-    *   **Start Command**: `cd server && npm start`
-6.  **Variables**: Add the following variables:
-    *   `DATABASE_URL`: (Paste your Neon connection string)
-    *   `PRIVY_APP_ID`: (Your Privy App ID)
-    *   `GEMINI_API_KEY`: (Your Google Gemini Key)
-    *   `OPENAI_API_KEY`: (Optional)
-    *   `NODE_ENV`: `production`
-
-### Option B: Render / Heroku
-
-1.  Connect your GitHub repo.
-2.  **Settings**:
-    *   **Root Directory**: `.` (Keep default).
-    *   **Build Command**: `cd server && npm install`
-    *   **Start Command**: `cd server && npm start`
-3.  **Environment Variables**: Add the same variables as above.
-
-## 3. Important check
-
-Ensure your root directory contains the `Procfile` if the platform uses it.
-We have added a `Procfile` in the root:
+# Deploy from project root
+cd g:\japanesePractice
+vercel
 ```
-web: cd server && npm start
+
+### Or via GitHub:
+1. Push to GitHub
+2. Go to [vercel.com](https://vercel.com) → New Project
+3. Import your repository
+4. Deploy (Vercel auto-detects `vercel.json`)
+
+## 3. Environment Variables
+
+In Vercel Dashboard → Settings → Environment Variables:
+
+| Variable | Value | Required |
+|----------|-------|----------|
+| `DATABASE_URL` | Your Neon connection string | ✅ |
+| `NODE_ENV` | `production` | ✅ |
+| `GEMINI_API_KEY` | Your Gemini API key | ✅ |
+| `PRIVY_APP_ID` | Your Privy App ID | Optional |
+| `OPENAI_API_KEY` | Your OpenAI key | Optional |
+
+## 4. How It Works
+
+- `vercel.json` routes `/api/*` to Express serverless handler
+- Frontend is built with Vite and served as static files
+- All API requests go through the Express app in `api/index.js`
+
+## 5. Local Development
+
+```bash
+# Terminal 1: Backend
+cd server && npm start
+
+# Terminal 2: Frontend (with Vite)
+cd web && npm run dev
 ```
-*Note: Some platforms separate Build and Start steps. If so, put `cd server && npm install` in Build Settings and `cd server && npm start` in Start Command.*
 
-## 4. Troubleshooting
-
-*   **"Table not found"**: The server attempts to create tables on startup. Check logs to see if `db.initDb()` succeeded. Ensure `DATABASE_URL` is correct.
-*   **"Static files not found"**: Ensure the deployment context included the `web/` folder. If you set "Root Directory" to `server/`, the app cannot see `../web`. Always deploy from **Project Root**.
+Access via http://localhost:5173 (Vite proxies API to :3000)
