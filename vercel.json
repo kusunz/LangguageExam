@@ -2,7 +2,6 @@
     "version": 2,
     "buildCommand": "cd web && npm install && npm run build",
     "outputDirectory": "web/dist",
-    "installCommand": "cd server && npm install",
     "functions": {
         "api/**/*.js": {
             "runtime": "@vercel/node@3.0.0"
