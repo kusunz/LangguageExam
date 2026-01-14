@@ -812,6 +812,11 @@
     // TTS Manager
     // ============================================
     const TTSManager = {
+        audioQueue: [],      // Queue of audio blobs to play
+        isPlaying: false,    // Currently playing audio
+        currentIndex: 0,     // Current segment index
+        totalSegments: 0,    // Total segments expected
+
         async playAudio(text, language) {
             const ttsMode = $('#tts-mode').value;
             const statusEl = $('#audio-status');
@@ -823,13 +828,20 @@
                     await this.playBrowserTTS(text, language);
                 } else {
                     try {
-                        // Try server TTS first (Deepgram primary, falls back to Gemini on server)
+                        // Try streaming TTS first (Deepgram with SSE - reduces delay)
                         const provider = ttsMode === 'auto' ? 'deepgram' : ttsMode;
-                        const blob = await Api.getTts(text, language, provider);
-                        await this.playBlob(blob);
+                        await this.playStreamingTTS(text, language, provider);
                     } catch (err) {
-                        console.warn('Server TTS failed, falling back to browser:', err);
-                        await this.playBrowserTTS(text, language);
+                        console.warn('Streaming TTS failed, trying regular TTS:', err);
+                        try {
+                            // Fallback to regular TTS
+                            const provider = ttsMode === 'auto' ? 'deepgram' : ttsMode;
+                            const blob = await Api.getTts(text, language, provider);
+                            await this.playBlob(blob);
+                        } catch (err2) {
+                            console.warn('Server TTS failed, falling back to browser:', err2);
+                            await this.playBrowserTTS(text, language);
+                        }
                     }
                 }
 
@@ -837,6 +849,157 @@
             } catch (err) {
                 statusEl.textContent = 'Lỗi phát âm thanh';
                 showToast('Không thể phát âm thanh: ' + err.message, 'error');
+            }
+        },
+
+        // Streaming TTS using SSE - plays audio as segments arrive
+        async playStreamingTTS(text, language, provider) {
+            return new Promise((resolve, reject) => {
+                this.audioQueue = [];
+                this.currentIndex = 0;
+                this.totalSegments = 0;
+                this.isPlaying = false;
+
+                const statusEl = $('#audio-status');
+
+                // Create EventSource-like connection using fetch
+                fetch(`${CONFIG.apiBase}/tts/stream`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
+                    },
+                    body: JSON.stringify({ text, language, provider })
+                }).then(response => {
+                    if (!response.ok) {
+                        throw new Error('Streaming TTS request failed');
+                    }
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+
+                    const processStream = async () => {
+                        try {
+                            while (true) {
+                                const { done, value } = await reader.read();
+                                if (done) break;
+
+                                buffer += decoder.decode(value, { stream: true });
+                                const lines = buffer.split('\n\n');
+                                buffer = lines.pop() || '';
+
+                                for (const line of lines) {
+                                    if (line.startsWith('data: ')) {
+                                        const data = JSON.parse(line.slice(6));
+                                        await this.handleStreamEvent(data, statusEl, resolve, reject);
+                                    }
+                                }
+                            }
+                        } catch (err) {
+                            reject(err);
+                        }
+                    };
+
+                    processStream();
+                }).catch(reject);
+            });
+        },
+
+        async handleStreamEvent(data, statusEl, resolve, reject) {
+            switch (data.type) {
+                case 'info':
+                    this.totalSegments = data.total;
+                    statusEl.textContent = `Đang tải (0/${data.total})...`;
+                    break;
+
+                case 'audio':
+                    // Convert base64 to blob
+                    const audioData = atob(data.audio);
+                    const audioArray = new Uint8Array(audioData.length);
+                    for (let i = 0; i < audioData.length; i++) {
+                        audioArray[i] = audioData.charCodeAt(i);
+                    }
+                    const blob = new Blob([audioArray], { type: 'audio/mpeg' });
+
+                    this.audioQueue.push(blob);
+                    statusEl.textContent = `Đang tải (${this.audioQueue.length}/${this.totalSegments})...`;
+
+                    // Start playing immediately when first segment arrives
+                    if (!this.isPlaying && this.audioQueue.length === 1) {
+                        this.isPlaying = true;
+                        statusEl.textContent = 'Đang phát...';
+                        this.playNextInQueue(resolve, reject);
+                    }
+                    break;
+
+                case 'done':
+                    // All segments received
+                    if (this.audioQueue.length === 0) {
+                        resolve(); // No audio was generated
+                    }
+                    // Otherwise, playback will resolve when queue is empty
+                    break;
+
+                case 'error':
+                    reject(new Error(data.message));
+                    break;
+
+                case 'segment_error':
+                    console.warn(`Segment ${data.index} failed: ${data.message}`);
+                    // Continue with other segments
+                    break;
+            }
+        },
+
+        async playNextInQueue(resolve, reject) {
+            if (this.currentIndex >= this.audioQueue.length) {
+                // Check if more segments are coming
+                if (this.currentIndex >= this.totalSegments) {
+                    this.isPlaying = false;
+                    const btn = $('#btn-play-audio');
+                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
+                    resolve();
+                } else {
+                    // Wait for more segments
+                    setTimeout(() => this.playNextInQueue(resolve, reject), 100);
+                }
+                return;
+            }
+
+            const blob = this.audioQueue[this.currentIndex];
+            const url = URL.createObjectURL(blob);
+
+            if (State.ttsAudio) {
+                State.ttsAudio.pause();
+                if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
+            }
+
+            State.ttsAudio = new Audio(url);
+
+            State.ttsAudio.onended = () => {
+                URL.revokeObjectURL(url);
+                this.currentIndex++;
+                this.playNextInQueue(resolve, reject);
+            };
+
+            State.ttsAudio.onerror = (err) => {
+                URL.revokeObjectURL(url);
+                this.currentIndex++;
+                // Try next segment instead of failing completely
+                this.playNextInQueue(resolve, reject);
+            };
+
+            State.ttsAudio.onplay = () => {
+                const btn = $('#btn-play-audio');
+                if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
+            };
+
+            try {
+                await State.ttsAudio.play();
+            } catch (err) {
+                this.currentIndex++;
+                this.playNextInQueue(resolve, reject);
             }
         },
 
@@ -941,6 +1104,10 @@
             if ('speechSynthesis' in window) {
                 speechSynthesis.cancel();
             }
+            // Clear streaming queue
+            this.audioQueue = [];
+            this.isPlaying = false;
+            this.currentIndex = 0;
         },
 
         // Helper for time format (MM:SS)
