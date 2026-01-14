@@ -612,7 +612,7 @@
             return scaledSpec;
         },
 
-        filterBySection(spec, section) {
+        filterBySection(spec, section, mode = 'standard') {
             if (section === 'full') return spec;
 
             const filteredSpec = JSON.parse(JSON.stringify(spec));
@@ -624,7 +624,31 @@
                 'listening': ['L1', 'L2', 'L3', 'L4', 'L5']
             };
 
-            const allowedMondai = sectionMondaiMap[section] || [];
+            let allowedMondai = sectionMondaiMap[section] || [];
+
+            // For reading section: randomly select mondai based on mode
+            if (section === 'reading') {
+                const readingMondai = ['M8', 'M9', 'M10', 'M11', 'M12'];
+                let mondaiCount;
+
+                switch (mode) {
+                    case 'basic':
+                        mondaiCount = Math.floor(Math.random() * 2) + 1; // 1-2
+                        break;
+                    case 'standard':
+                        mondaiCount = Math.floor(Math.random() * 2) + 3; // 3-4
+                        break;
+                    case 'official':
+                    default:
+                        mondaiCount = readingMondai.length; // All 5
+                        break;
+                }
+
+                // Shuffle and pick random mondai
+                const shuffled = [...readingMondai].sort(() => Math.random() - 0.5);
+                allowedMondai = shuffled.slice(0, mondaiCount);
+                console.log(`Reading mode ${mode}: selected ${mondaiCount} mondai:`, allowedMondai);
+            }
 
             // Filter groups based on section
             if (section === 'listening') {
@@ -1277,8 +1301,8 @@
                 const rawSpec = await ExamLoader.loadSpec(examType, selectedLevel);
                 let scaledSpec = ExamLoader.applyModeScaling(rawSpec, mode);
 
-                // Filter by section
-                State.examSpec = ExamLoader.filterBySection(scaledSpec, State.currentSection);
+                // Filter by section (pass mode for reading mondai count)
+                State.examSpec = ExamLoader.filterBySection(scaledSpec, State.currentSection, mode);
 
                 // Generate FIRST GROUP only (for quick start)
                 const firstGroupResult = await Api.generateGroup(State.examSpec, mode, 0, llmProvider);
@@ -1438,16 +1462,19 @@
             $('#mondai-title').textContent = mondai.title_vi;
             $('#mondai-instructions').textContent = mondai.instructions_vi || '';
 
-            // Render passage if exists
+            // Render passage if exists (with zoom controls)
             const passageContainer = $('#passage-container');
             const passageText = $('#passage-text');
 
-            if (mondai.passage?.text) {
-                passageContainer.classList.remove('hidden');
-                passageText.textContent = mondai.passage.text;
-                passageText.className = `passage-text ${isJapanese ? '' : 'zh'}`;
-            } else {
-                passageContainer.classList.add('hidden');
+            if (passageContainer) {
+                if (mondai.passage?.text) {
+                    passageContainer.classList.remove('hidden');
+                    passageText.textContent = mondai.passage.text;
+                    passageText.className = `passage-text ${isJapanese ? '' : 'zh'}`;
+                } else {
+                    passageContainer.classList.add('hidden');
+                    passageText.textContent = '';
+                }
             }
 
             // Render audio player for listening
@@ -1943,27 +1970,68 @@
                 weakTags: feedback.score_summary?.weak_tags ?? feedback.summary?.weak_tags
             });
 
-            // Add mistakes to mistake book
+            // Add mistakes to mistake book (with optimized context)
             const incorrectItems = feedback.by_question.filter(q => !q.is_correct);
             for (const item of incorrectItems) {
-                // Find the question in test
+                // Find the question and parent mondai in test
                 let questionData = null;
+                let parentMondai = null;
+
                 for (const group of State.test.groups) {
                     for (const mondai of group.mondai) {
                         const found = mondai.items.find(q => q.id === item.id);
                         if (found) {
                             questionData = found;
+                            parentMondai = mondai;
                             break;
                         }
                     }
+                    if (questionData) break;
                 }
 
                 if (questionData) {
+                    // Build optimized question context (minimal storage)
+                    const optimizedQuestion = {
+                        id: questionData.id,
+                        type: questionData.type,
+                        prompt: questionData.prompt,
+                        choices: questionData.choices,
+                        answer_index: questionData.answer_index,
+                        explain_brief: questionData.explain_brief,
+                        tags: questionData.tags
+                    };
+
+                    // Add context text (passage or script) - truncated to save space
+                    let contextText = null;
+                    const MAX_CONTEXT_LENGTH = 500;
+
+                    // Check for passage (reading questions)
+                    if (parentMondai?.passage?.text) {
+                        contextText = parentMondai.passage.text.length > MAX_CONTEXT_LENGTH
+                            ? parentMondai.passage.text.substring(0, MAX_CONTEXT_LENGTH) + '...'
+                            : parentMondai.passage.text;
+                    }
+                    // Check for audio script (listening questions)
+                    else if (questionData.media?.script_text) {
+                        contextText = questionData.media.script_text.length > MAX_CONTEXT_LENGTH
+                            ? questionData.media.script_text.substring(0, MAX_CONTEXT_LENGTH) + '...'
+                            : questionData.media.script_text;
+                    }
+
+                    if (contextText) {
+                        optimizedQuestion.context = contextText;
+                    }
+
                     State.userData.mistakeBook.push({
                         date: new Date().toISOString(),
                         exam: State.currentExam,
-                        question: questionData,
-                        feedback: item,
+                        question: optimizedQuestion,
+                        feedback: {
+                            is_correct: item.is_correct,
+                            why_wrong_vi: item.why_wrong_vi,
+                            key_point_vi: item.key_point_vi,
+                            mini_lesson_vi: item.mini_lesson_vi
+                        },
                         userAnswer: State.answers[item.id]
                     });
                 }
