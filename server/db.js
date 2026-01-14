@@ -8,8 +8,9 @@ const pool = new Pool({
 });
 
 async function initDb() {
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     await client.query('BEGIN');
 
     // Users table
@@ -73,12 +74,14 @@ async function initDb() {
 
     await client.query('COMMIT');
     console.log('Database initialized successfully');
+    return true;
   } catch (e) {
-    await client.query('ROLLBACK');
-    console.error('Failed to initialize database:', e);
-    throw e;
+    if (client) await client.query('ROLLBACK');
+    console.warn('Failed to initialize database (running in filesystem fallback mode):', e.message);
+    // Do not throw, return false to indicate DB is not available
+    return false;
   } finally {
-    client.release();
+    if (client) client.release();
   }
 }
 

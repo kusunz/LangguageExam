@@ -15,7 +15,11 @@ const db = require('./db');
 const { createClient } = require('@deepgram/sdk');
 
 // Initialize Database
-db.initDb().catch(console.error);
+let IS_DB_AVAILABLE = false;
+db.initDb().then(success => {
+  IS_DB_AVAILABLE = success;
+  if (!success) console.log('⚠️ Running with File System storage fallback');
+}).catch(console.error);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -38,8 +42,8 @@ app.use('/api/', limiter);
 
 // Data directory
 // Data directory (Legacy/Local usage only - skipped for cloud)
-// const DATA_DIR = path.join(__dirname, 'data');
-// fs.mkdir(DATA_DIR, { recursive: true }).catch(() => { });
+const DATA_DIR = path.join(__dirname, 'data');
+fs.mkdir(DATA_DIR, { recursive: true }).catch(() => { });
 
 // Privy JWKS for token verification
 const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
@@ -132,6 +136,25 @@ app.post('/api/me', authMiddleware, (req, res) => {
 // ============ DB Helper Functions ============
 
 async function loadUserData(userId, email) {
+  // If DB is NOT available, use File System (even for demo user to support testing)
+  if (!IS_DB_AVAILABLE) {
+    const filePath = path.join(DATA_DIR, `${userId}.json`);
+    try {
+      const content = await fs.readFile(filePath, 'utf8');
+      return JSON.parse(content);
+    } catch (e) {
+      // Return default if file doesn't exist
+      return {
+        history: [],
+        mistakeBook: [],
+        weakTags: [],
+        nickname: userId === 'demo-user' ? 'Demo User' : null,
+        settings: {}
+      };
+    }
+  }
+
+  // Standard Demo Mode (when DB is available but user is demo)
   if (IS_DEMO_MODE || userId === 'demo-user') {
     return {
       history: [],
@@ -164,6 +187,13 @@ async function loadUserData(userId, email) {
 }
 
 async function saveUserData(userId, data) {
+  // Fallback to File System if DB unavailable
+  if (!IS_DB_AVAILABLE) {
+    const filePath = path.join(DATA_DIR, `${userId}.json`);
+    await fs.writeFile(filePath, JSON.stringify(data, null, 2));
+    return;
+  }
+
   if (IS_DEMO_MODE || userId === 'demo-user') return;
 
   // Filter out heavy objects like ttsCache to prevent DB bloat

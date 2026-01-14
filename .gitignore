@@ -31,3 +31,6 @@ server/server.log
 # Cache
 .cache/
 *.cache
+
+# Private project notes
+.project-notes.md
