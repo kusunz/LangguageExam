@@ -814,8 +814,29 @@
     const TTSManager = {
         audioQueue: [],      // Queue of audio blobs to play
         isPlaying: false,    // Currently playing audio
+        isPaused: false,     // Pause state for streaming
         currentIndex: 0,     // Current segment index
         totalSegments: 0,    // Total segments expected
+        combinedBlob: null,  // Combined audio for seek/timer (hybrid mode)
+        clientCache: new Map(), // Client-side TTS cache
+
+        // Simple hash for client cache
+        hashText(text) {
+            let hash = 0;
+            for (let i = 0; i < text.length; i++) {
+                const char = text.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash = hash & hash;
+            }
+            return hash.toString(16);
+        },
+
+        // Detect dialogue format (Speaker: text)
+        isDialogue(text) {
+            const dialoguePattern = /^([A-Za-z0-9\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff_]+)\s*[:：]\s*.+$/gm;
+            const matches = text.match(dialoguePattern);
+            return matches && matches.length >= 2;
+        },
 
         async playAudio(text, language) {
             const ttsMode = $('#tts-mode').value;
@@ -827,21 +848,41 @@
                 if (ttsMode === 'browser') {
                     await this.playBrowserTTS(text, language);
                 } else {
+                    const provider = ttsMode === 'auto' ? 'deepgram' : ttsMode;
+                    const textIsDialogue = this.isDialogue(text);
+
+                    // Check client cache first (for non-dialogue)
+                    const cacheKey = this.hashText(text + language);
+                    if (!textIsDialogue && this.clientCache.has(cacheKey)) {
+                        console.log('TTS: Client cache hit');
+                        statusEl.textContent = '';
+                        await this.playBlob(this.clientCache.get(cacheKey));
+                        return;
+                    }
+
                     try {
-                        // Try streaming TTS first (Deepgram with SSE - reduces delay)
-                        const provider = ttsMode === 'auto' ? 'deepgram' : ttsMode;
-                        await this.playStreamingTTS(text, language, provider);
-                    } catch (err) {
-                        console.warn('Streaming TTS failed, trying regular TTS:', err);
-                        try {
-                            // Fallback to regular TTS
-                            const provider = ttsMode === 'auto' ? 'deepgram' : ttsMode;
+                        if (textIsDialogue) {
+                            // Dialogue: use streaming + hybrid combine
+                            console.log('TTS: Dialogue mode → streaming');
+                            await this.playStreamingTTS(text, language, provider);
+                        } else {
+                            // Non-dialogue: use regular endpoint (server cached)
+                            console.log('TTS: Non-dialogue mode → regular endpoint');
                             const blob = await Api.getTts(text, language, provider);
+
+                            // Cache on client
+                            this.clientCache.set(cacheKey, blob);
+                            // Limit cache size
+                            if (this.clientCache.size > 20) {
+                                const oldestKey = this.clientCache.keys().next().value;
+                                this.clientCache.delete(oldestKey);
+                            }
+
                             await this.playBlob(blob);
-                        } catch (err2) {
-                            console.warn('Server TTS failed, falling back to browser:', err2);
-                            await this.playBrowserTTS(text, language);
                         }
+                    } catch (err) {
+                        console.warn('TTS failed, falling back to browser:', err);
+                        await this.playBrowserTTS(text, language);
                     }
                 }
 
@@ -910,7 +951,7 @@
             switch (data.type) {
                 case 'info':
                     this.totalSegments = data.total;
-                    statusEl.textContent = `Đang tải (0/${data.total})...`;
+                    statusEl.textContent = 'Đang tải...';
                     break;
 
                 case 'audio':
@@ -923,7 +964,10 @@
                     const blob = new Blob([audioArray], { type: 'audio/mpeg' });
 
                     this.audioQueue.push(blob);
-                    statusEl.textContent = `Đang tải (${this.audioQueue.length}/${this.totalSegments})...`;
+                    // Keep simple loading text
+                    if (!this.isPlaying) {
+                        statusEl.textContent = 'Đang tải...';
+                    }
 
                     // Start playing immediately when first segment arrives
                     if (!this.isPlaying && this.audioQueue.length === 1) {
@@ -934,7 +978,11 @@
                     break;
 
                 case 'done':
-                    // All segments received
+                    // All segments received - combine for seek/timer support
+                    if (this.audioQueue.length > 0) {
+                        this.combinedBlob = new Blob(this.audioQueue, { type: 'audio/mpeg' });
+                        console.log('TTS: Combined blob created for seek/timer');
+                    }
                     if (this.audioQueue.length === 0) {
                         resolve(); // No audio was generated
                     }
@@ -959,6 +1007,13 @@
                     this.isPlaying = false;
                     const btn = $('#btn-play-audio');
                     if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
+
+                    // Switch to combined blob for seek/timer support
+                    if (this.combinedBlob) {
+                        console.log('TTS: Switching to combined audio for seek/timer');
+                        this.setupCombinedAudio();
+                    }
+
                     resolve();
                 } else {
                     // Wait for more segments
@@ -1001,6 +1056,46 @@
                 this.currentIndex++;
                 this.playNextInQueue(resolve, reject);
             }
+        },
+
+        // Setup combined audio for seek/timer after streaming completes
+        setupCombinedAudio() {
+            if (!this.combinedBlob) return;
+
+            const url = URL.createObjectURL(this.combinedBlob);
+
+            if (State.ttsAudio) {
+                State.ttsAudio.pause();
+                if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
+            }
+
+            State.ttsAudio = new Audio(url);
+            State.ttsAudio.preload = 'metadata';
+
+            // Setup time update for seek bar
+            State.ttsAudio.ontimeupdate = () => {
+                const currentTime = State.ttsAudio.currentTime;
+                const duration = State.ttsAudio.duration;
+
+                const timeEl = $('#audio-time');
+                if (timeEl && !isNaN(duration)) {
+                    timeEl.textContent = `${this.formatTime(currentTime)} / ${this.formatTime(duration)}`;
+                }
+
+                const seek = $('#audio-seek');
+                if (seek && !isNaN(duration)) {
+                    seek.value = (currentTime / duration) * 100;
+                }
+            };
+
+            State.ttsAudio.onloadedmetadata = () => {
+                const timeEl = $('#audio-time');
+                if (timeEl) {
+                    timeEl.textContent = `00:00 / ${this.formatTime(State.ttsAudio.duration)}`;
+                }
+            };
+
+            // Don't auto-play - user will click "Nghe lại" to replay
         },
 
         async playBlob(blob) {
@@ -1099,15 +1194,33 @@
         stop() {
             if (State.ttsAudio) {
                 State.ttsAudio.pause();
+                if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
                 State.ttsAudio = null;
             }
             if ('speechSynthesis' in window) {
                 speechSynthesis.cancel();
             }
-            // Clear streaming queue
+            // Clear streaming queue and combined blob
             this.audioQueue = [];
             this.isPlaying = false;
+            this.isPaused = false;
             this.currentIndex = 0;
+            this.combinedBlob = null;
+        },
+
+        // Toggle pause for streaming TTS
+        togglePause() {
+            if (!State.ttsAudio) return false;
+
+            if (State.ttsAudio.paused) {
+                State.ttsAudio.play();
+                this.isPaused = false;
+                return true; // Now playing
+            } else {
+                State.ttsAudio.pause();
+                this.isPaused = true;
+                return false; // Now paused
+            }
         },
 
         // Helper for time format (MM:SS)
@@ -1387,7 +1500,16 @@
             const btn = $('#btn-play-audio');
             if (!btn) return;
 
-            // HTML5 Audio Handle
+            // Streaming TTS Handle (check first since it uses the same State.ttsAudio)
+            if (TTSManager.isPlaying || TTSManager.isPaused) {
+                if (State.ttsAudio && !State.ttsAudio.ended) {
+                    const isNowPlaying = TTSManager.togglePause();
+                    this.updateAudioButton(isNowPlaying ? 'playing' : 'paused');
+                    return;
+                }
+            }
+
+            // HTML5 Audio Handle (non-streaming)
             if (State.ttsAudio && State.ttsAudio.src && !State.ttsAudio.error) {
                 if (!State.ttsAudio.ended) {
                     if (State.ttsAudio.paused) {
@@ -1617,8 +1739,69 @@
                 this.renderCurrentMondai();
                 window.scrollTo({ top: 0 });
             } else {
-                this.submitTest();
+                // Last group - show confirmation before submit
+                this.confirmSubmitTest();
             }
+        },
+
+        // Show confirmation before submit
+        async confirmSubmitTest() {
+            const confirmed = await this.showConfirm(
+                'Nộp bài thi?',
+                'Bạn có chắc chắn muốn nộp bài? Sau khi nộp, bài thi sẽ được chấm điểm.'
+            );
+            if (confirmed) {
+                await this.submitTest();
+            }
+        },
+
+        // Quit test without grading
+        async quitTest() {
+            const confirmed = await this.showConfirm(
+                'Thoát bài thi?',
+                'Bạn có muốn thoát? Bài thi sẽ KHÔNG được chấm điểm và tiến độ sẽ bị mất.'
+            );
+            if (confirmed) {
+                Timer.stopAll();
+                TTSManager.stop();
+                State.test = null;
+                State.answers = {};
+                State.currentMondaiIndex = 0;
+                State.currentGroupIndex = 0;
+                showScreen('home-screen');
+                showToast('Đã thoát bài thi', 'info');
+            }
+        },
+
+        // Generic confirmation dialog
+        showConfirm(title, message) {
+            return new Promise((resolve) => {
+                const modal = $('#confirm-modal');
+                const titleEl = $('#confirm-title');
+                const messageEl = $('#confirm-message');
+                const btnYes = $('#btn-confirm-yes');
+                const btnNo = $('#btn-confirm-no');
+
+                titleEl.textContent = title;
+                messageEl.textContent = message;
+                modal.classList.remove('hidden');
+
+                const cleanup = () => {
+                    modal.classList.add('hidden');
+                    btnYes.onclick = null;
+                    btnNo.onclick = null;
+                };
+
+                btnYes.onclick = () => {
+                    cleanup();
+                    resolve(true);
+                };
+
+                btnNo.onclick = () => {
+                    cleanup();
+                    resolve(false);
+                };
+            });
         },
 
         async submitTest() {
@@ -2340,6 +2523,7 @@
         $('#btn-next-mondai').addEventListener('click', () => TestUI.navigateMondai(1));
         $('#btn-pause-test').addEventListener('click', () => TestUI.togglePause());
         $('#btn-submit-group').addEventListener('click', () => TestUI.moveToNextGroup());
+        $('#btn-quit-test')?.addEventListener('click', () => TestUI.quitTest());
 
         // Passage controls
         $('#btn-zoom-in').addEventListener('click', () => {

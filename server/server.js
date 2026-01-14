@@ -695,6 +695,45 @@ app.post('/api/prepare-tts-text', authMiddleware, async (req, res) => {
 
 // ============ TTS Endpoints ============
 
+// In-memory TTS cache with LRU eviction (max 50 entries, ~50MB assuming 1MB per audio)
+const TTS_CACHE = new Map();
+const TTS_CACHE_MAX = 50;
+
+function generateTextHash(text, language, voice) {
+  return crypto.createHash('md5').update(`${text}|${language}|${voice || 'default'}`).digest('hex');
+}
+
+function getTTSFromCache(hash) {
+  if (TTS_CACHE.has(hash)) {
+    const entry = TTS_CACHE.get(hash);
+    // Move to end (most recently used)
+    TTS_CACHE.delete(hash);
+    TTS_CACHE.set(hash, entry);
+    log('INFO', `TTS cache hit: ${hash.substring(0, 8)}...`);
+    return entry;
+  }
+  return null;
+}
+
+function setTTSCache(hash, audioBuffer) {
+  // Evict oldest if at capacity
+  if (TTS_CACHE.size >= TTS_CACHE_MAX) {
+    const oldestKey = TTS_CACHE.keys().next().value;
+    TTS_CACHE.delete(oldestKey);
+    log('INFO', `TTS cache evicted: ${oldestKey.substring(0, 8)}...`);
+  }
+  TTS_CACHE.set(hash, audioBuffer);
+  log('INFO', `TTS cached: ${hash.substring(0, 8)}... (${TTS_CACHE.size}/${TTS_CACHE_MAX})`);
+}
+
+// Detect if text contains dialogue format (Speaker: text)
+function isDialogue(text) {
+  const dialoguePattern = /^([A-Za-z0-9\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff_]+)\s*[:：]\s*.+$/gm;
+  const matches = text.match(dialoguePattern);
+  // Consider dialogue if at least 2 speaker lines found
+  return matches && matches.length >= 2;
+}
+
 // Available Deepgram Aura-2 voices: alternating male/female for dialogue
 const TTS_VOICES = {
   male: ['aura-2-fujin-ja', 'aura-2-ebisu-ja', 'aura-2-thalia-en'],
@@ -846,7 +885,7 @@ app.post('/api/tts/stream', authMiddleware, async (req, res) => {
   }
 });
 
-// Non-streaming TTS endpoint with smart dialogue support
+// Non-streaming TTS endpoint with smart dialogue detection + caching
 app.post('/api/tts', authMiddleware, async (req, res) => {
   try {
     const { text, language, provider, speed, voice } = req.body;
@@ -856,21 +895,53 @@ app.post('/api/tts', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Text is required' });
     }
 
+    const textIsDialogue = isDialogue(text);
+    const lang = language || 'ja-JP';
+
+    // For non-dialogue: check cache first
+    if (!textIsDialogue) {
+      const defaultVoice = lang === 'ja-JP' ? 'aura-2-fujin-ja' : 'aura-2-thalia-en';
+      const cacheKey = generateTextHash(text, lang, voice || defaultVoice);
+      const cachedAudio = getTTSFromCache(cacheKey);
+
+      if (cachedAudio) {
+        res.set({
+          'Content-Type': 'audio/mpeg',
+          'Content-Length': cachedAudio.length,
+          'X-TTS-Cached': 'true',
+          'X-TTS-Dialogue': 'false',
+        });
+        return res.send(cachedAudio);
+      }
+    }
+
     let audioBuffer;
 
     try {
       if (ttsProvider === 'deepgram') {
-        // Smart dialogue mode: parse and generate with different voices
-        const segments = parseDialogue(text);
-        const audioBuffers = [];
+        if (textIsDialogue) {
+          // Dialogue mode: parse and generate with different voices
+          log('INFO', 'TTS: Dialogue mode detected');
+          const segments = parseDialogue(text);
+          const audioBuffers = [];
 
-        for (const segment of segments) {
-          const segmentVoice = voice || getVoiceForSpeaker(segment, language || 'ja-JP');
-          const audio = await generateDeepgramAudio(segment.text, segmentVoice);
-          audioBuffers.push(audio);
+          for (const segment of segments) {
+            const segmentVoice = voice || getVoiceForSpeaker(segment, lang);
+            const audio = await generateDeepgramAudio(segment.text, segmentVoice);
+            audioBuffers.push(audio);
+          }
+
+          audioBuffer = Buffer.concat(audioBuffers);
+        } else {
+          // Non-dialogue: single voice, single segment
+          log('INFO', 'TTS: Single segment mode (non-dialogue)');
+          const defaultVoice = voice || (lang === 'ja-JP' ? 'aura-2-fujin-ja' : 'aura-2-thalia-en');
+          audioBuffer = await generateDeepgramAudio(text, defaultVoice);
+
+          // Cache the result
+          const cacheKey = generateTextHash(text, lang, defaultVoice);
+          setTTSCache(cacheKey, audioBuffer);
         }
-
-        audioBuffer = Buffer.concat(audioBuffers);
       } else if (ttsProvider === 'gemini') {
         audioBuffer = await generateGeminiTTS(text, language, speed, voice);
       } else {
@@ -882,20 +953,15 @@ app.post('/api/tts', authMiddleware, async (req, res) => {
       if (ttsProvider === 'deepgram') {
         audioBuffer = await generateGeminiTTS(text, language, speed, voice);
       } else {
-        const segments = parseDialogue(text);
-        const audioBuffers = [];
-        for (const segment of segments) {
-          const segmentVoice = voice || getVoiceForSpeaker(segment, language || 'ja-JP');
-          const audio = await generateDeepgramAudio(segment.text, segmentVoice);
-          audioBuffers.push(audio);
-        }
-        audioBuffer = Buffer.concat(audioBuffers);
+        const defaultVoice = voice || (lang === 'ja-JP' ? 'aura-2-fujin-ja' : 'aura-2-thalia-en');
+        audioBuffer = await generateDeepgramAudio(text, defaultVoice);
       }
     }
 
     res.set({
       'Content-Type': 'audio/mpeg',
       'Content-Length': audioBuffer.length,
+      'X-TTS-Dialogue': textIsDialogue ? 'true' : 'false',
     });
     res.send(audioBuffer);
   } catch (err) {

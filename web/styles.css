@@ -1887,3 +1887,27 @@ body::before {
   font-size: 0.9rem;
   color: var(--text-secondary);
 }
+
+/* Footer Buttons */
+.footer-buttons {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+  padding: var(--space-sm) var(--space-md);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+  border-color: var(--glass-border);
+}
+
+.btn-ghost i {
+  margin-right: var(--space-xs);
+}

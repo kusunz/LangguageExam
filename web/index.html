@@ -280,7 +280,11 @@
 
       <footer class="test-footer glass">
         <div class="question-dots" id="question-dots"></div>
-        <button id="btn-submit-group" class="btn btn-secondary">Nộp phần này</button>
+        <div class="footer-buttons">
+          <button id="btn-quit-test" class="btn btn-ghost" title="Thoát không chấm điểm"><i
+              class="fa-solid fa-xmark"></i> Thoát</button>
+          <button id="btn-submit-group" class="btn btn-secondary">Nộp phần này</button>
+        </div>
       </footer>
     </section>
 
@@ -412,6 +416,19 @@
           <button id="btn-cancel-email" class="btn btn-secondary">Hủy</button>
         </div>
         <p id="email-error" class="error-text hidden"></p>
+      </div>
+    </div>
+
+    <!-- Confirm Modal -->
+    <div id="confirm-modal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content glass">
+        <h3 id="confirm-title">Xác nhận</h3>
+        <p id="confirm-message">Bạn có chắc chắn muốn tiếp tục?</p>
+        <div class="modal-actions">
+          <button id="btn-confirm-yes" class="btn btn-primary">Có</button>
+          <button id="btn-confirm-no" class="btn btn-secondary">Không</button>
+        </div>
       </div>
     </div>
 
