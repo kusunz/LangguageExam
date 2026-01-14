@@ -823,8 +823,8 @@
                     await this.playBrowserTTS(text, language);
                 } else {
                     try {
-                        // Try server TTS first
-                        const provider = ttsMode === 'auto' ? 'gemini' : ttsMode;
+                        // Try server TTS first (Deepgram primary, falls back to Gemini on server)
+                        const provider = ttsMode === 'auto' ? 'deepgram' : ttsMode;
                         const blob = await Api.getTts(text, language, provider);
                         await this.playBlob(blob);
                     } catch (err) {
