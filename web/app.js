@@ -1343,11 +1343,11 @@
             return setInterval(() => {
                 // fast until 30%, then slower until 80%, then very slow until 90%
                 let increment = 0;
-                if (progress < 20) increment = 2;
-                else if (progress < 60) increment = 0.5;
-                else if (progress < 90) increment = 0.1;
+                if (progress < 50) increment = 5;
+                else if (progress < 85) increment = 2;
+                else if (progress < 90) increment = 1;
 
-                progress = Math.min(progress + increment, 97);
+                progress = Math.min(progress + increment, 99);
                 bar.style.width = `${progress}%`;
                 text.textContent = `${Math.round(progress)}%`;
             }, 200);
@@ -1744,14 +1744,138 @@
             }
         },
 
-        // Show confirmation before submit
+        // Show grading options modal
+        showGradingOptions() {
+            return new Promise((resolve) => {
+                const modal = $('#grading-modal');
+                const btnQuick = $('#btn-grade-quick');
+                const btnAI = $('#btn-grade-ai');
+                const btnCancel = $('#btn-grade-cancel');
+
+                modal.classList.remove('hidden');
+
+                const cleanup = () => {
+                    modal.classList.add('hidden');
+                    btnQuick.onclick = null;
+                    btnAI.onclick = null;
+                    btnCancel.onclick = null;
+                };
+
+                btnQuick.onclick = () => {
+                    cleanup();
+                    resolve('quick');
+                };
+
+                btnAI.onclick = () => {
+                    cleanup();
+                    resolve('ai');
+                };
+
+                btnCancel.onclick = () => {
+                    cleanup();
+                    resolve(null);
+                };
+            });
+        },
+
+        // Show grading options instead of simple confirm
         async confirmSubmitTest() {
-            const confirmed = await this.showConfirm(
-                'Nộp bài thi?',
-                'Bạn có chắc chắn muốn nộp bài? Sau khi nộp, bài thi sẽ được chấm điểm.'
-            );
-            if (confirmed) {
+            const choice = await this.showGradingOptions();
+
+            if (choice === 'quick') {
+                await this.quickGradeTest();
+            } else if (choice === 'ai') {
                 await this.submitTest();
+            }
+            // null = cancelled, do nothing
+        },
+
+        // Quick grading without AI - instant results
+        async quickGradeTest() {
+            Timer.stopAll();
+            TTSManager.stop();
+
+            // Calculate scores directly
+            const questionsWithAnswers = [];
+            let correctCount = 0;
+            let totalCount = 0;
+            const scoreByGroup = {};
+
+            State.test.groups.forEach(group => {
+                let groupCorrect = 0;
+                group.mondai.forEach(mondai => {
+                    mondai.items.forEach(item => {
+                        totalCount++;
+                        const userAnswer = State.answers[item.id];
+                        const isCorrect = userAnswer === item.answer_index;
+
+                        if (isCorrect) {
+                            correctCount++;
+                            groupCorrect++;
+                        }
+
+                        questionsWithAnswers.push({
+                            id: item.id,
+                            is_correct: isCorrect,
+                            user_answer_index: userAnswer !== undefined ? userAnswer : null,
+                            correct_index: item.answer_index,
+                            // Use existing explain_brief from question generation
+                            key_point_vi: item.explain_brief || '',
+                            tags: item.tags
+                        });
+                    });
+                });
+                scoreByGroup[group.group_id] = groupCorrect;
+            });
+
+            // Build feedback object compatible with ReviewUI
+            const feedback = {
+                score_summary: {
+                    total_score: correctCount,
+                    max_score: totalCount,
+                    score_by_group: scoreByGroup,
+                    weak_tags: [], // Could calculate from incorrect answers
+                    recommendation_vi: correctCount >= totalCount * 0.7
+                        ? 'Kết quả tốt! Tiếp tục luyện tập để cải thiện.'
+                        : 'Cần ôn tập thêm các phần còn yếu.'
+                },
+                by_question: questionsWithAnswers,
+                grading_mode: 'quick' // Flag for UI to know this was quick grading
+            };
+
+            State.feedback = feedback;
+
+            // Save to history (simplified)
+            await this.saveToHistory(feedback);
+
+            ReviewUI.render();
+            showScreen('review-screen');
+        },
+
+        // AI grading with detailed feedback
+        async submitTest() {
+            Timer.stopAll();
+            TTSManager.stop();
+
+            showScreen('loading-screen');
+            $('#loading-text').textContent = 'Đang chấm điểm...';
+            $('#loading-hint').textContent = 'AI đang phân tích và đánh giá câu trả lời của bạn...';
+
+            try {
+                const llmProvider = $('#llm-provider').value;
+                const feedback = await Api.gradeTest(State.test, State.answers, llmProvider);
+                feedback.grading_mode = 'ai'; // Flag for UI
+                State.feedback = feedback;
+
+                // Save to history
+                await this.saveToHistory(feedback);
+
+                ReviewUI.render();
+                showScreen('review-screen');
+            } catch (err) {
+                console.error('Grade test error:', err);
+                showToast('Không thể chấm điểm: ' + err.message, 'error');
+                showScreen('home-screen');
             }
         },
 
@@ -1802,31 +1926,6 @@
                     resolve(false);
                 };
             });
-        },
-
-        async submitTest() {
-            Timer.stopAll();
-            TTSManager.stop();
-
-            showScreen('loading-screen');
-            $('#loading-text').textContent = 'Đang chấm điểm...';
-            $('#loading-hint').textContent = 'AI đang phân tích và đánh giá câu trả lời của bạn...';
-
-            try {
-                const llmProvider = $('#llm-provider').value;
-                const feedback = await Api.gradeTest(State.test, State.answers, llmProvider);
-                State.feedback = feedback;
-
-                // Save to history
-                await this.saveToHistory(feedback);
-
-                ReviewUI.render();
-                showScreen('review-screen');
-            } catch (err) {
-                console.error('Grade test error:', err);
-                showToast('Không thể chấm điểm: ' + err.message, 'error');
-                showScreen('home-screen');
-            }
         },
 
         async saveToHistory(feedback) {

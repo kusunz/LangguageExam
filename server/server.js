@@ -1102,10 +1102,24 @@ function buildGenerateGroupPrompt(examSpec, mode, group, groupIndex) {
     return `  ${idx + 1}. ${g.group_id} (${g.title_vi})${marker}\n${groupMondai}`;
   }).join('\n');
 
-  // Current group details
+  // Reading type IDs for special handling
+  const readingTypes = ['reading_short', 'reading_mid', 'reading_long', 'reading_compare', 'reading_info'];
+
+  // Current group details with special handling for reading
   const mondaiInfo = group.mondai.map(m => {
-    const count = Math.max(1, Math.round(m.count_official * questionScale));
-    return `  - ${m.mondai_id} (${m.title_vi}): ${count} questions, types: ${m.types.join(', ')}`;
+    const totalQuestions = Math.max(1, Math.round(m.count_official * questionScale));
+    const isReading = m.types.some(t => readingTypes.includes(t));
+
+    if (isReading && totalQuestions > 2) {
+      // For reading: fewer passages, more questions each
+      // E.g., instead of 5 passages x 1 question, create 2 passages x 2-3 questions
+      const passageCount = Math.min(2, Math.ceil(totalQuestions / 3));
+      const questionsPerPassage = Math.ceil(totalQuestions / passageCount);
+      return `  - ${m.mondai_id} (${m.title_vi}): ${passageCount} passage(s), ${questionsPerPassage} questions each (total ${totalQuestions}), types: ${m.types.join(', ')}
+    *** IMPORTANT: Create FEWER passages with MORE questions per passage to reduce reading time ***`;
+    }
+
+    return `  - ${m.mondai_id} (${m.title_vi}): ${totalQuestions} questions, types: ${m.types.join(', ')}`;
   }).join('\n');
 
   return `You are an expert ${examSpec.display_name_vi} exam creator. You are generating a complete ${examSpec.display_name_vi} practice test GROUP BY GROUP.
@@ -1127,6 +1141,13 @@ IMPORTANT CONTEXT:
 - Maintain consistent difficulty throughout the exam
 - Questions should feel like they belong to the same cohesive test
 - Use appropriate vocabulary and grammar for ${examSpec.level} level
+
+*** READING COMPREHENSION OPTIMIZATION ***
+For reading types (reading_short, reading_mid, reading_long, reading_compare, reading_info):
+- Create FEWER passages but with MORE questions per passage
+- Example: Instead of 5 passages with 1 question each, create 2 passages with 2-3 questions each
+- This reduces total reading time while maintaining question count
+- Each passage should be rich enough to support multiple questions
 
 RULES:
 1. Generate 100% original questions. DO NOT copy real exam questions.

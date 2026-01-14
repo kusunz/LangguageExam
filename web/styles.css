@@ -1097,9 +1097,12 @@ body::before {
   flex-direction: column;
   gap: var(--space-sm);
   padding: var(--space-md);
+  /* Fill edges by using negative margin and compensating padding */
+  margin: 0 calc(-1 * var(--space-md)) var(--space-lg) calc(-1 * var(--space-md));
+  padding-left: var(--space-md);
+  padding-right: var(--space-md);
   background: var(--bg-tertiary);
   border-bottom: 1px solid var(--glass-border);
-  margin-bottom: var(--space-lg);
   backdrop-filter: blur(10px);
 }
 
@@ -1910,4 +1913,65 @@ body::before {
 
 .btn-ghost i {
   margin-right: var(--space-xs);
+}
+
+/* Grading Options Modal */
+.grading-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  margin: var(--space-lg) 0;
+}
+
+.grading-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  background: var(--bg-tertiary);
+  border: 2px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  text-align: left;
+  transition: all var(--transition-fast);
+  width: 100%;
+}
+
+.grading-option:hover {
+  border-color: var(--glass-border);
+  transform: translateY(-2px);
+}
+
+.grading-option .option-icon {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  font-size: var(--text-xl);
+  color: var(--accent-primary);
+}
+
+.grading-option .option-icon.ai {
+  background: var(--accent-gradient);
+  color: white;
+}
+
+.grading-option .option-info h4 {
+  font-size: var(--text-base);
+  margin-bottom: 2px;
+  color: var(--text-primary);
+}
+
+.grading-option .option-info p {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.btn-full {
+  width: 100%;
+  margin-top: var(--space-sm);
 }
