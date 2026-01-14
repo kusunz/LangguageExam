@@ -1153,11 +1153,11 @@ body::before {
 }
 
 .question-dot {
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
   border-radius: var(--radius-full);
   background: var(--bg-tertiary);
-  border: 1px solid var(--glass-border);
+  border: 2px solid var(--text-muted);
   cursor: pointer;
   transition: all var(--transition-fast);
 }
@@ -1165,6 +1165,7 @@ body::before {
 .question-dot.answered {
   background: var(--accent-primary);
   border-color: var(--accent-primary);
+  box-shadow: 0 0 6px rgba(99, 102, 241, 0.5);
 }
 
 .question-dot.current {
@@ -1412,6 +1413,33 @@ body::before {
   padding: var(--space-xs) 0;
 }
 
+/* Review Answer Styles */
+.review-choice {
+  cursor: default !important;
+}
+
+.review-choice.user-selected {
+  background: rgba(99, 102, 241, 0.15);
+}
+
+.review-choice.correct-answer {
+  border: 2px solid var(--success) !important;
+}
+
+.review-choice.correct-answer .choice-letter {
+  background: var(--success);
+  color: white;
+}
+
+.review-choice.wrong-answer {
+  border: 2px solid var(--error) !important;
+}
+
+.review-choice.wrong-answer .choice-letter {
+  background: var(--error);
+  color: white;
+}
+
 /* ============================================
    History Screen
    ============================================ */
@@ -1429,6 +1457,54 @@ body::before {
   display: flex;
   flex-direction: column;
   gap: var(--space-md);
+}
+
+/* Mistake Item Styles */
+.mistake-item {
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  border-left: 4px solid var(--error);
+}
+
+.mistake-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  margin-bottom: var(--space-sm);
+}
+
+.mistake-meta {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.expand-icon {
+  color: var(--text-muted);
+  transition: transform var(--transition-fast);
+}
+
+.mistake-prompt {
+  font-family: var(--font-jp);
+  margin-bottom: var(--space-sm);
+}
+
+.mistake-detail {
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--glass-border);
+  margin-top: var(--space-sm);
+}
+
+.mistake-detail.hidden {
+  display: none;
+}
+
+.mistake-feedback {
+  margin-top: var(--space-md);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
 }
 
 .history-item {
@@ -1787,8 +1863,27 @@ body::before {
 .error-text.hidden {
   display: none;
 }
+
 /* Audio Player Improvements */
-.audio-progress-container { width: 100%; margin-top: 8px; }
-.audio-seek { width: 100%; cursor: pointer; accent-color: var(--primary-color); }
-.audio-controls { display: flex; align-items: center; gap: 10px; }
-.audio-time { font-family: monospace; font-size: 0.9rem; color: var(--text-secondary); }
+.audio-progress-container {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.audio-seek {
+  width: 100%;
+  cursor: pointer;
+  accent-color: var(--primary-color);
+}
+
+.audio-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.audio-time {
+  font-family: monospace;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}

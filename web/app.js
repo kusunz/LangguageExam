@@ -799,6 +799,12 @@
                 clearInterval(State.timerIntervals.group);
                 State.timerIntervals.group = null;
             }
+        },
+
+        togglePause(isPaused) {
+            // Timer already handles pause via State.isTestPaused check in intervals
+            // This method exists for explicit pause control if needed
+            State.isTestPaused = isPaused;
         }
     };
 
@@ -1135,11 +1141,16 @@
             const language = test.meta.language;
             const isJapanese = language === 'ja-JP';
 
-            // Update navigation
+            // Update navigation - show position within current group
             const globalIndex = this.getGlobalMondaiIndex();
             const totalMondai = this.getTotalMondaiCount();
+            const currentGroup = State.test.groups[State.currentGroupIndex];
+            const mondaiInGroup = currentGroup.mondai.length;
+            const firstMondaiOfGroup = this.getFirstMondaiIndexOfGroup(State.currentGroupIndex);
+            const mondaiPosInGroup = globalIndex - firstMondaiOfGroup + 1;
 
-            $('#mondai-current').textContent = mondai.mondai_id;
+            $('#mondai-current').textContent = mondaiPosInGroup;
+            $('#mondai-total').textContent = mondaiInGroup;
             $('#btn-prev-mondai').disabled = globalIndex === 0;
             $('#btn-next-mondai').disabled = globalIndex === totalMondai - 1;
 
@@ -1387,6 +1398,14 @@
                 idx += group.mondai.length;
             }
             return 0;
+        },
+
+        getFirstMondaiIndexOfGroup(groupIndex) {
+            let idx = 0;
+            for (let gi = 0; gi < groupIndex; gi++) {
+                idx += State.test.groups[gi].mondai.length;
+            }
+            return idx;
         },
 
         async moveToNextGroup() {
@@ -1683,12 +1702,13 @@
             
             <div class="choices" style="margin-top: 12px;">
               ${questionData.choices.map((choice, idx) => {
-                    let classes = 'choice ' + (isJapanese ? '' : 'zh');
+                    let classes = 'choice review-choice ' + (isJapanese ? '' : 'zh');
+                    if (idx === userAnswer) classes += ' user-selected';
                     if (idx === correctAnswer) classes += ' correct-answer';
                     if (idx === userAnswer && !item.is_correct) classes += ' wrong-answer';
                     return `
-                  <div class="${classes}" style="cursor: default; ${idx === correctAnswer ? 'border-color: var(--success);' : ''} ${idx === userAnswer && !item.is_correct ? 'border-color: var(--error);' : ''}">
-                    <span class="choice-letter" style="${idx === correctAnswer ? 'background: var(--success);' : ''}">${String.fromCharCode(65 + idx)}</span>
+                  <div class="${classes}">
+                    <span class="choice-letter">${String.fromCharCode(65 + idx)}</span>
                     <span class="choice-text">${TestUI.escapeHtml(choice)}</span>
                   </div>
                 `;
@@ -1725,10 +1745,14 @@
             $('#review-list').innerHTML = html;
         },
 
-        saveGrammar(index) {
+        saveGrammar(questionId) {
             const feedback = State.feedback;
-            const item = feedback.by_question[index];
-            if (!item) return;
+            // Find the item by question ID
+            const item = feedback.by_question.find(q => q.id === questionId);
+            if (!item) {
+                showToast('Không tìm thấy dữ liệu câu hỏi', 'error');
+                return;
+            }
 
             const success = GrammarBook.save(
                 item.key_point_vi,
@@ -1744,18 +1768,18 @@
             }
         },
 
-        async saveToNotebook(questionIndex) {
-            // Find question data
-            // If questionIndex is ID, find it. If numeric, key access.
-            // Wait, generated questions might not have IDs if strictly generated.
-            // Using index from map if ID is missing.
+        async saveToNotebook(questionId) {
+            // Find question data by searching through test groups
             let question = null;
-            if (State.feedback?.by_question[questionIndex]) {
-                question = State.feedback.by_question[questionIndex].question;
-            } else {
-                // Fallback search
-                const found = State.feedback?.by_question.find(item => item.id == questionIndex || item.question.id == questionIndex);
-                if (found) question = found.question;
+            for (const group of State.test.groups) {
+                for (const mondai of group.mondai) {
+                    const found = mondai.items.find(q => q.id === questionId);
+                    if (found) {
+                        question = found;
+                        break;
+                    }
+                }
+                if (question) break;
             }
 
             if (!question) {
@@ -1855,25 +1879,74 @@
 
             emptyState.classList.add('hidden');
 
-            const html = mistakes.slice().reverse().slice(0, 50).map(item => {
+            const html = mistakes.slice().reverse().slice(0, 50).map((item, idx) => {
+                const realIdx = mistakes.length - 1 - idx;
                 const date = new Date(item.date).toLocaleDateString('vi-VN');
                 const question = item.question;
                 const feedback = item.feedback;
+                const userAnswer = item.userAnswer;
+                const correctAnswer = question.answer_index;
 
                 return `
-          <div class="review-item incorrect">
-            <div class="review-item-header">
-              <span class="review-item-id">${item.exam} - ${date}</span>
+          <div class="mistake-item" data-idx="${realIdx}">
+            <div class="mistake-header" onclick="MistakesUI.toggle(${realIdx})">
+              <span class="mistake-meta">${item.exam.toUpperCase()} - ${date}</span>
+              <i class="fa-solid fa-chevron-down expand-icon"></i>
             </div>
-            <div class="review-prompt">${TestUI.escapeHtml(question.prompt)}</div>
-            ${feedback.key_point_vi ? `<div class="review-feedback"><p>${feedback.key_point_vi}</p></div>` : ''}
+            <div class="mistake-prompt">${TestUI.escapeHtml(question.prompt)}</div>
+            
+            <div class="mistake-detail hidden">
+              <div class="choices" style="margin-top: 12px;">
+                ${question.choices.map((choice, cIdx) => {
+                    let classes = 'choice review-choice';
+                    if (cIdx === userAnswer) classes += ' user-selected';
+                    if (cIdx === correctAnswer) classes += ' correct-answer';
+                    if (cIdx === userAnswer && cIdx !== correctAnswer) classes += ' wrong-answer';
+                    return `
+                    <div class="${classes}">
+                      <span class="choice-letter">${String.fromCharCode(65 + cIdx)}</span>
+                      <span class="choice-text">${TestUI.escapeHtml(choice)}</span>
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+              
+              <div class="mistake-feedback">
+                ${feedback.why_wrong_vi ? `<div class="feedback-section"><h4>Tại sao sai:</h4><p>${feedback.why_wrong_vi}</p></div>` : ''}
+                ${feedback.key_point_vi ? `<div class="feedback-section"><h4>Điểm ngữ pháp:</h4><p>${feedback.key_point_vi}</p></div>` : ''}
+                ${feedback.mini_lesson_vi ? `<div class="feedback-section"><h4>Bài học nhỏ:</h4><p>${feedback.mini_lesson_vi}</p></div>` : ''}
+              </div>
+            </div>
           </div>
         `;
             }).join('');
 
             container.innerHTML = html;
+        },
+
+        toggle(idx) {
+            const container = $('#mistakes-list');
+            const item = container.querySelector(`[data-idx="${idx}"]`);
+            const detail = item?.querySelector('.mistake-detail');
+            const icon = item?.querySelector('.expand-icon');
+
+            if (!detail) return;
+
+            const isExpanded = !detail.classList.contains('hidden');
+
+            // Close all others
+            container.querySelectorAll('.mistake-detail').forEach(d => d.classList.add('hidden'));
+            container.querySelectorAll('.expand-icon').forEach(i => i.style.transform = 'rotate(0deg)');
+
+            if (!isExpanded) {
+                detail.classList.remove('hidden');
+                if (icon) icon.style.transform = 'rotate(180deg)';
+            }
         }
     };
+
+    // Expose for onclick handlers
+    window.MistakesUI = MistakesUI;
 
     // ============================================
     // Grammar Book Module
