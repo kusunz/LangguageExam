@@ -170,9 +170,9 @@
         },
 
         async gradeTest(test, answers, provider, model = null) {
-            // Set 90s timeout for grading
+            // Set 300s timeout for grading
             const controller = new AbortController();
-            const id = setTimeout(() => controller.abort(), 90000);
+            const id = setTimeout(() => controller.abort(), 300000);
 
             try {
                 const res = await this.request('/grade-test', {
@@ -1302,6 +1302,11 @@
                 selectedLevel = 'N2'; // Default fallback
             }
 
+            // Reset test flags
+            this.pendingGroups = [];
+            this.loadingGroupIndex = 0;
+            this.isSubmitting = false;
+
             // Debounce Start Button
             const startBtn = $('#btn-start-test');
             if (startBtn.disabled) return;
@@ -1407,6 +1412,11 @@
                         await new Promise(resolve => setTimeout(resolve, 200));
 
                         this.initializeTest();
+
+                        // Re-enable start button
+                        startBtn.disabled = false;
+                        startBtn.innerHTML = originalBtnText;
+
                         showScreen('test-screen');
 
                         // Continue loading remaining chunks in background
@@ -1435,6 +1445,11 @@
                 await new Promise(resolve => setTimeout(resolve, 300));
 
                 this.initializeTest();
+
+                // Re-enable start button
+                startBtn.disabled = false;
+                startBtn.innerHTML = originalBtnText;
+
                 showScreen('test-screen');
 
                 // Start loading remaining groups in background
@@ -1445,6 +1460,11 @@
                 progressBar.style.width = '0%';
                 console.error('Start test error:', err);
                 showToast('Không thể tạo đề thi: ' + err.message, 'error');
+
+                // Re-enable start button
+                startBtn.disabled = false;
+                startBtn.innerHTML = originalBtnText;
+
                 showScreen('home-screen');
             }
         },
