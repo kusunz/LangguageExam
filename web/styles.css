@@ -338,6 +338,13 @@ body::before {
   cursor: not-allowed;
 }
 
+/* Soft disable: Clickable but looks disabled */
+.btn-loading-wait {
+  opacity: 0.6;
+  cursor: pointer;
+  /* Allow click to show toast */
+}
+
 .btn-primary {
   background: var(--accent-gradient);
   color: white;

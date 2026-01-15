@@ -1384,13 +1384,9 @@
                     mondai: []
                 };
 
-                // For vocab/grammar in full exam: allow 2 initial chunks for faster start
-                const isVocabGrammarFirst = !isSingleSection &&
-                    (firstGroup.group_id === 'language_knowledge' ||
-                        firstGroup.group_id === 'vocab_grammar' ||
-                        firstGroup.title_vi?.includes('Từ vựng') ||
-                        firstGroup.title_vi?.includes('Ngữ pháp'));
-                const initialBatchSize = isVocabGrammarFirst ? 2 : 1;
+                // Universal Initial Batch: Always load 2 chunks (if not parallel-all) 
+                // to provide buffer for Full exams or Large Single exams of ALL languages/levels.
+                const initialBatchSize = 2;
 
                 const totalChunks = Math.ceil(firstGroup.mondai.length / chunkSize);
                 let previousMondai = [];
@@ -1455,68 +1451,80 @@
                     return;
                 }
 
-                // SEQUENTIAL LOADING: Standard approach for multi-section or 3-pro
-                for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-                    const chunkResult = await Api.generateMondaiChunk(
-                        State.examSpec,
-                        mode,
-                        0, // groupIndex
-                        chunkIndex,
-                        chunkSize,
-                        previousMondai,
-                        llmProvider,
-                        targetModel
-                    );
+                // BATCHED INITIAL LOADING: Load initialBatchSize chunks before showing test
+                // For vocab/grammar in full exam: load 2 chunks (4 mondai) in parallel first
+                console.log(`Initial batch loading: ${initialBatchSize} chunks before showing test`);
 
-                    // Collect meta from first chunk
-                    if (chunkResult.meta) {
-                        State.test.meta = chunkResult.meta;
-                    }
+                const initialChunks = Math.min(initialBatchSize, totalChunks);
+                const initialPromises = [];
 
-                    // Add generated mondai
-                    firstGroupResult.mondai.push(...chunkResult.mondai);
-                    previousMondai = [...firstGroupResult.mondai]; // Pass context to next chunk
-
-                    // Update progress based on actual mondai generated
-                    generatedMondai += chunkResult.generatedCount || chunkResult.mondai.length;
-                    const progress = Math.min(90, Math.round((generatedMondai / totalMondai) * 95));
-                    progressBar.style.width = `${progress}%`;
-                    progressText.textContent = `${progress}%`;
-
-                    // After first chunk, can start test immediately
-                    if (chunkIndex === 0 && chunkResult.mondai.length > 0) {
-                        // Initialize with partial data so user can start
-                        State.test.groups = [firstGroupResult];
-                        State.answers = {};
-                        State.currentGroupIndex = 0;
-                        State.currentMondaiIndex = 0;
-
-                        // Stop simulated progress and complete to 100%
-                        clearInterval(progressInterval);
-                        progressBar.style.width = '100%';
-                        progressText.textContent = '100%';
-                        await new Promise(resolve => setTimeout(resolve, 200));
-
-                        this.initializeTest();
-
-                        // Re-enable start button
-                        startBtn.disabled = false;
-                        startBtn.innerHTML = originalBtnText;
-
-                        showScreen('test-screen');
-
-                        // Continue loading remaining chunks in background
-                        this.loadRemainingChunksInBackground(
-                            firstGroupResult,
-                            chunkIndex + 1,
-                            totalChunks,
-                            previousMondai,
+                for (let chunkIndex = 0; chunkIndex < initialChunks; chunkIndex++) {
+                    initialPromises.push(
+                        Api.generateMondaiChunk(
+                            State.examSpec,
+                            mode,
+                            0, // groupIndex
+                            chunkIndex,
+                            chunkSize,
+                            [], // No previous context for parallel initial batch
                             llmProvider,
-                            targetModel,
-                            concurrency
-                        );
-                        return;
+                            targetModel
+                        ).then(result => ({ chunkIndex, result }))
+                            .catch(err => ({ chunkIndex, error: err }))
+                    );
+                }
+
+                // Wait for initial batch to complete
+                const initialResults = await Promise.all(initialPromises);
+                initialResults.sort((a, b) => a.chunkIndex - b.chunkIndex);
+
+                for (const { chunkIndex, result, error } of initialResults) {
+                    if (result) {
+                        if (result.meta && !State.test.meta) {
+                            State.test.meta = result.meta;
+                        }
+                        firstGroupResult.mondai.push(...result.mondai);
+                    } else if (error) {
+                        console.error(`Initial chunk ${chunkIndex} failed:`, error);
                     }
+                }
+
+                // Update progress
+                generatedMondai = firstGroupResult.mondai.length;
+                const progress = Math.min(90, Math.round((generatedMondai / totalMondai) * 95));
+                progressBar.style.width = `${progress}%`;
+                progressText.textContent = `${progress}%`;
+
+                // Initialize with initial batch data
+                State.test.groups = [firstGroupResult];
+                State.answers = {};
+                State.currentGroupIndex = 0;
+                State.currentMondaiIndex = 0;
+
+                // Stop simulated progress and complete to 100%
+                clearInterval(progressInterval);
+                progressBar.style.width = '100%';
+                progressText.textContent = '100%';
+                await new Promise(resolve => setTimeout(resolve, 200));
+
+                this.initializeTest();
+                startBtn.disabled = false;
+                startBtn.innerHTML = originalBtnText;
+                showScreen('test-screen');
+
+                console.log(`Initial batch complete: ${firstGroupResult.mondai.length} mondai ready`);
+
+                // Continue loading remaining chunks in background
+                if (initialChunks < totalChunks) {
+                    this.loadRemainingChunksInBackground(
+                        firstGroupResult,
+                        initialChunks,
+                        totalChunks,
+                        [...firstGroupResult.mondai], // Pass context
+                        llmProvider,
+                        targetModel,
+                        concurrency
+                    );
                 }
 
                 // Fallback: if first chunk didn't work, use full result
@@ -1793,7 +1801,21 @@
             // Block navigation to unloaded mondai
             const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
             $('#btn-prev-mondai').disabled = globalIndex === 0;
-            $('#btn-next-mondai').disabled = globalIndex === totalMondaiFromSpec - 1 || !nextMondaiLoaded;
+
+            // Soft disable for Next button if loading (allow click for toast)
+            const btnNext = $('#btn-next-mondai');
+            const isLast = globalIndex === totalMondaiFromSpec - 1;
+
+            if (isLast) {
+                btnNext.disabled = true;
+                btnNext.classList.remove('btn-loading-wait');
+            } else if (!nextMondaiLoaded) {
+                btnNext.disabled = false; // Clickable
+                btnNext.classList.add('btn-loading-wait'); // Visual only
+            } else {
+                btnNext.disabled = false;
+                btnNext.classList.remove('btn-loading-wait');
+            }
 
             // Update header
             $('#mondai-title').textContent = mondai.title_vi;
@@ -1982,9 +2004,19 @@
             const globalIndex = this.getGlobalMondaiIndex();
             const totalMondaiFromSpec = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
             const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
-            const wasDisabled = $('#btn-next-mondai').disabled;
+            const btnNext = $('#btn-next-mondai');
+            const isLast = globalIndex === totalMondaiFromSpec - 1;
 
-            $('#btn-next-mondai').disabled = globalIndex === totalMondaiFromSpec - 1 || !nextMondaiLoaded;
+            if (isLast) {
+                btnNext.disabled = true;
+                btnNext.classList.remove('btn-loading-wait');
+            } else if (!nextMondaiLoaded) {
+                btnNext.disabled = false;
+                btnNext.classList.add('btn-loading-wait');
+            } else {
+                btnNext.disabled = false;
+                btnNext.classList.remove('btn-loading-wait');
+            }
 
             // Update loading indicator
             const loadingIndicator = $('#nav-loading-indicator');
@@ -2079,7 +2111,7 @@
 
             // Block forward navigation to unloaded mondai
             if (direction > 0 && !this.isMondaiLoaded(newIndex)) {
-                showToast('Đang tải câu hỏi tiếp theo...', 'info');
+                showToast('Vui lòng đợi chút, vẫn đang tạo đề...', 'info');
                 return;
             }
 
