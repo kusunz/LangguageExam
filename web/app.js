@@ -170,10 +170,25 @@
         },
 
         async gradeTest(test, answers, provider, model = null) {
-            return this.request('/grade-test', {
-                method: 'POST',
-                body: { test, answers, provider, model }
-            });
+            // Set 90s timeout for grading
+            const controller = new AbortController();
+            const id = setTimeout(() => controller.abort(), 90000);
+
+            try {
+                const res = await this.request('/grade-test', {
+                    method: 'POST',
+                    body: { test, answers, provider, model },
+                    signal: controller.signal
+                });
+                clearTimeout(id);
+                return res;
+            } catch (err) {
+                clearTimeout(id);
+                if (err.name === 'AbortError') {
+                    throw new Error('Chấm điểm quá lâu (timeout). Vui lòng thử lại.');
+                }
+                throw err;
+            }
         },
 
         async prepareTtsText(text, language, provider) {
@@ -2157,6 +2172,11 @@
                 console.error('Grade test error:', err);
                 showToast('Không thể chấm điểm: ' + err.message, 'error');
                 showScreen('home-screen');
+            } finally {
+                // Ensure loading screen is removed if it's still active
+                if ($('#loading-screen').classList.contains('active') && !$('#review-screen').classList.contains('active')) {
+                    showScreen('home-screen');
+                }
             }
         },
 
