@@ -1268,6 +1268,7 @@
     const TestUI = {
         pendingGroups: [], // Track groups being loaded in background
         loadingGroupIndex: 0, // Current group being loaded
+        isSubmitting: false, // Prevent duplicate submissions
 
         async startTest() {
             const examType = State.currentExam; // e.g., "jlpt" or "hsk"
@@ -1870,6 +1871,12 @@
         },
 
         async moveToNextGroup() {
+            // Prevent duplicate submissions
+            if (this.isSubmitting) return;
+
+            const submitBtn = $('#btn-submit-group');
+            const originalText = submitBtn.textContent;
+
             const currentGroupIdx = State.currentGroupIndex;
             const nextGroupIdx = currentGroupIdx + 1;
             const totalGroups = State.examSpec.groups.length;
@@ -1877,13 +1884,19 @@
             if (nextGroupIdx < totalGroups) {
                 // Check if next group is ready
                 if (!this.isGroupReady(nextGroupIdx)) {
-                    // Show loading indicator while waiting for group
+                    // Disable button and show loading state
+                    submitBtn.disabled = true;
+                    submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang tải...';
                     showToast('Đang tải phần tiếp theo...', 'info');
 
                     // Wait for group to load (poll every 500ms)
                     while (!this.isGroupReady(nextGroupIdx) && this.loadingGroupIndex >= 0) {
                         await new Promise(resolve => setTimeout(resolve, 500));
                     }
+
+                    // Re-enable button after loading
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = originalText;
 
                     // Check if group failed to load
                     if (this.pendingGroups[nextGroupIdx]?.error) {
@@ -1911,10 +1924,24 @@
                 this.renderCurrentMondai();
                 window.scrollTo({ top: 0 });
             } else {
-                // Last group - show confirmation before submit
-                this.confirmSubmitTest();
+                // Last group - set submitting state and show grading options
+                this.isSubmitting = true;
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang xử lý...';
+
+                try {
+                    await this.confirmSubmitTest();
+                } finally {
+                    // Re-enable on cancel or error (not on successful submit)
+                    if (State.test) { // If still on test screen
+                        this.isSubmitting = false;
+                        submitBtn.disabled = false;
+                        submitBtn.textContent = 'Nộp bài';
+                    }
+                }
             }
         },
+
 
         // Show grading options modal
         showGradingOptions() {
