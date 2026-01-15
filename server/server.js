@@ -218,8 +218,10 @@ async function manageSession(userId, existingSessionId) {
   // 1. Clean up expired sessions
   await db.pool.query('DELETE FROM sessions WHERE expires_at < NOW()');
 
-  // 2. Check if existing session is valid
-  if (existingSessionId) {
+  // 2. Check if existing session is valid (must be a valid UUID)
+  const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(existingSessionId);
+
+  if (existingSessionId && isUUID) {
     const res = await db.pool.query('SELECT id FROM sessions WHERE id = $1 AND user_id = $2', [existingSessionId, userId]);
     if (res.rows.length > 0) {
       // Refresh expiry (extend by 7 days)
