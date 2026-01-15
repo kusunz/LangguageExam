@@ -2318,11 +2318,28 @@
             $('#loading-text').textContent = 'Đang chấm điểm...';
             $('#loading-hint').textContent = 'AI đang phân tích và đánh giá câu trả lời của bạn...';
 
+            // Get progress bar elements
+            const progressBar = $('#loading-progress-inner');
+            const progressText = $('#loading-progress-text');
+
+            // Reset progress
+            if (progressBar) progressBar.style.width = '0%';
+            if (progressText) progressText.textContent = '0%';
+
+            // Start simulated progress (same as question generation)
+            const progressInterval = this.simulateProgress(progressBar, progressText);
+
             try {
                 const llmProvider = $('#llm-provider').value;
                 const feedback = await Api.gradeTest(State.test, State.answers, llmProvider);
                 feedback.grading_mode = 'ai'; // Flag for UI
                 State.feedback = feedback;
+
+                // Stop progress and complete to 100%
+                clearInterval(progressInterval);
+                if (progressBar) progressBar.style.width = '100%';
+                if (progressText) progressText.textContent = '100%';
+                await new Promise(resolve => setTimeout(resolve, 300));
 
                 // Save to history
                 await this.saveToHistory(feedback);
@@ -2330,14 +2347,10 @@
                 ReviewUI.render();
                 showScreen('review-screen');
             } catch (err) {
+                clearInterval(progressInterval);
                 console.error('Grade test error:', err);
                 showToast('Không thể chấm điểm: ' + err.message, 'error');
                 showScreen('home-screen');
-            } finally {
-                // Ensure loading screen is removed if it's still active
-                if ($('#loading-screen').classList.contains('active') && !$('#review-screen').classList.contains('active')) {
-                    showScreen('home-screen');
-                }
             }
         },
 
