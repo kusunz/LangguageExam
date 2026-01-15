@@ -424,15 +424,15 @@ async function callOpenAI(messages, options = {}) {
 
 // Gemini model fallback order (full list)
 const GEMINI_MODELS = [
-  'gemini-3-pro',
-  'gemini-3-flash',
+  'gemini-3-pro-preview',
+  'gemini-3-flash-preview',
   'gemini-2.5-pro',
   'gemini-2.5-flash'
 ];
 
-// Pro-only models for high-quality generation (no Flash fallback)
+// Pro-only models for high-quality generation (Flash only on quota/rate limit)
 const GEMINI_MODELS_PRO = [
-  'gemini-3-pro',
+  'gemini-3-pro-preview',
   'gemini-2.5-pro'
 ];
 
@@ -665,11 +665,11 @@ async function callGemini(prompt, options = {}) {
         throw err;
       }
 
-      // For proOnly mode: only fallback on rate limit/quota (429/403)
+      // For proOnly mode: only fallback on rate limit/quota (429/403) or model-not-found (400)
       // For other errors, stop and throw
       if (options.proOnly) {
-        if (err.status === 429 || err.status === 403) {
-          log('INFO', `Rate limit/quota issue on Pro model, trying Flash fallback...`);
+        if (err.status === 429 || err.status === 403 || err.status === 400) {
+          log('INFO', `Model issue (${err.status}) on Pro model, trying Flash fallback...`);
           // Add Flash models to try list if not already there
           if (i === models.length - 1) {
             const flashModels = GEMINI_MODELS.filter(m => m.includes('flash') && !models.includes(m));
