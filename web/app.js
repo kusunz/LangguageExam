@@ -1515,6 +1515,7 @@
                 console.log(`Initial batch complete: ${firstGroupResult.mondai.length} mondai ready`);
 
                 // Continue loading remaining chunks in background
+                // Continue loading remaining chunks in background
                 if (initialChunks < totalChunks) {
                     this.loadRemainingChunksInBackground(
                         firstGroupResult,
@@ -1525,6 +1526,9 @@
                         targetModel,
                         concurrency
                     );
+                } else {
+                    // If all chunks of first group are loaded, start remaining groups directly
+                    this.loadRemainingGroupsInBackground(llmProvider, targetModel, concurrency);
                 }
 
                 // Fallback: if first chunk didn't work, use full result
@@ -1545,9 +1549,6 @@
                 startBtn.innerHTML = originalBtnText;
 
                 showScreen('test-screen');
-
-                // Start loading remaining groups in background
-                this.loadRemainingGroupsInBackground(llmProvider, targetModel, concurrency);
 
             } catch (err) {
                 clearInterval(progressInterval);
