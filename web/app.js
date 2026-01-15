@@ -295,8 +295,6 @@
             try {
                 const configRes = await fetch('/api/config');
                 config = await configRes.json();
-                const configRes = await fetch('/api/config');
-                config = await configRes.json();
                 // console.log('Privy config loaded'); // Security: Do not log config object
             } catch (err) {
                 console.error('Failed to load config:', err);
