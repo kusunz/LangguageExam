@@ -1351,10 +1351,21 @@
                 const isLowLevel = ['N5', 'N4'].includes(selectedLevel);
                 const targetModel = isLowLevel ? 'gemini-2.5-pro' : null; // null = default 3-pro
 
-                // Concurrency based on model RPM limits:
-                // - gemini-2.5-pro: 250 RPM → can send 7 parallel requests safely
-                // - gemini-3-pro: 25 RPM → max 5 parallel to stay under limit
-                const concurrency = (targetModel === 'gemini-2.5-pro') ? 7 : 5;
+                // Check if this is a single-section exam (only 1 group)
+                const isSingleSection = State.examSpec.groups.length === 1;
+
+                // Concurrency strategy:
+                // 2.5-pro (N4/N5): 7 parallel for BOTH single and full exam (250 RPM allows this)
+                // 3-pro (N1/N2/N3):
+                //   - Single-section: 5 parallel (safe under 25 RPM)
+                //   - Full exam: 4 parallel (1 per section to ensure coherence)
+                let concurrency;
+                if (targetModel === 'gemini-2.5-pro') {
+                    concurrency = 7; // High RPM allows full parallelism
+                } else {
+                    // 3-pro: more conservative due to 25 RPM limit
+                    concurrency = isSingleSection ? 5 : 4;
+                }
 
                 const chunkSize = 2; // 2 mondai per chunk for faster response
                 let generatedMondai = 0;
@@ -1373,10 +1384,78 @@
                     mondai: []
                 };
 
-                // Generate first chunk (3 mondai) - this gives user questions quickly
+                // For vocab/grammar in full exam: allow 2 initial chunks for faster start
+                const isVocabGrammarFirst = !isSingleSection &&
+                    (firstGroup.group_id === 'language_knowledge' ||
+                        firstGroup.group_id === 'vocab_grammar' ||
+                        firstGroup.title_vi?.includes('Từ vựng') ||
+                        firstGroup.title_vi?.includes('Ngữ pháp'));
+                const initialBatchSize = isVocabGrammarFirst ? 2 : 1;
+
                 const totalChunks = Math.ceil(firstGroup.mondai.length / chunkSize);
                 let previousMondai = [];
 
+                // Determine max parallel chunks for single-section parallel loading
+                const maxParallelChunks = (targetModel === 'gemini-2.5-pro') ? 7 : 5;
+                const canParallelLoadAll = isSingleSection && totalChunks <= maxParallelChunks;
+
+                if (canParallelLoadAll) {
+                    // PARALLEL LOADING: Send ALL chunks at once for single-section exams
+                    console.log(`Parallel loading (${targetModel || '3-pro'}): Sending ALL ${totalChunks} chunks simultaneously for single-section exam`);
+
+                    const chunkPromises = [];
+                    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                        chunkPromises.push(
+                            Api.generateMondaiChunk(
+                                State.examSpec,
+                                mode,
+                                0, // groupIndex
+                                chunkIndex,
+                                chunkSize,
+                                [], // No previous context for parallel
+                                llmProvider,
+                                targetModel
+                            ).then(result => ({ chunkIndex, result }))
+                                .catch(err => ({ chunkIndex, error: err }))
+                        );
+                    }
+
+                    // Wait for ALL chunks to complete
+                    const results = await Promise.all(chunkPromises);
+                    results.sort((a, b) => a.chunkIndex - b.chunkIndex);
+
+                    for (const { chunkIndex, result, error } of results) {
+                        if (result) {
+                            if (result.meta && !State.test.meta) {
+                                State.test.meta = result.meta;
+                            }
+                            firstGroupResult.mondai.push(...result.mondai);
+                        } else if (error) {
+                            console.error(`Chunk ${chunkIndex} failed:`, error);
+                        }
+                    }
+
+                    // All chunks loaded - show test immediately
+                    State.test.groups = [firstGroupResult];
+                    State.answers = {};
+                    State.currentGroupIndex = 0;
+                    State.currentMondaiIndex = 0;
+
+                    clearInterval(progressInterval);
+                    progressBar.style.width = '100%';
+                    progressText.textContent = '100%';
+                    await new Promise(resolve => setTimeout(resolve, 200));
+
+                    this.initializeTest();
+                    startBtn.disabled = false;
+                    startBtn.innerHTML = originalBtnText;
+                    showScreen('test-screen');
+
+                    console.log('Parallel loading complete: All mondai ready');
+                    return;
+                }
+
+                // SEQUENTIAL LOADING: Standard approach for multi-section or 3-pro
                 for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
                     const chunkResult = await Api.generateMondaiChunk(
                         State.examSpec,
