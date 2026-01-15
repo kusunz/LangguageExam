@@ -1584,19 +1584,28 @@
             const language = test.meta.language;
             const isJapanese = language === 'ja-JP';
 
-            // Update navigation - show position within current group using EXAM SPEC total, not generated chunks
+            // Update navigation
+            // globalIndex is based on State.test.groups (generated mondai)
             const globalIndex = this.getGlobalMondaiIndex();
-            const currentGroupSpec = State.examSpec.groups[State.currentGroupIndex];
-            const totalMondaiInGroup = currentGroupSpec ? currentGroupSpec.mondai.length : 1;
 
-            // Calculate position within group based on spec
+            // Get current group from GENERATED test (for position within loaded mondai)
+            const currentGroup = State.test.groups[State.currentGroupIndex];
+            if (!currentGroup) return;
+
+            // Calculate position within current group using GENERATED test
             let firstMondaiOfGroup = 0;
             for (let i = 0; i < State.currentGroupIndex; i++) {
-                firstMondaiOfGroup += State.examSpec.groups[i].mondai.length;
+                if (State.test.groups[i]) {
+                    firstMondaiOfGroup += State.test.groups[i].mondai.length;
+                }
             }
             const mondaiPosInGroup = globalIndex - firstMondaiOfGroup + 1;
 
-            $('#mondai-current').textContent = mondaiPosInGroup;
+            // Total uses EXAM SPEC for the full intended count
+            const currentGroupSpec = State.examSpec.groups[State.currentGroupIndex];
+            const totalMondaiInGroup = currentGroupSpec ? currentGroupSpec.mondai.length : currentGroup.mondai.length;
+
+            $('#mondai-current').textContent = Math.min(mondaiPosInGroup, totalMondaiInGroup); // Cap at total
             $('#mondai-total').textContent = totalMondaiInGroup;
 
             // Calculate total mondai from exam spec for navigation buttons
@@ -1652,6 +1661,26 @@
 
             // Render question dots
             this.renderQuestionDots(mondai.items);
+
+            // Update submit button text to clarify what is being submitted
+            const submitBtn = $('#btn-submit-group');
+            if (submitBtn) {
+                const currentGroupTitle = this.getGroupLabel(State.currentGroupIndex);
+                const isLastGroup = State.currentGroupIndex === State.examSpec.groups.length - 1;
+
+                // Only update text if not currently submitting/loading
+                if (!submitBtn.disabled || submitBtn.textContent.includes('phần')) {
+                    if (isLastGroup) {
+                        submitBtn.innerHTML = '<span class="btn-icon"><i class="fa-solid fa-flag-checkered"></i></span> Nộp bài thi';
+                        submitBtn.classList.remove('btn-secondary');
+                        submitBtn.classList.add('btn-primary');
+                    } else {
+                        submitBtn.innerHTML = `Nộp phần ${currentGroupTitle}`;
+                        submitBtn.classList.remove('btn-primary');
+                        submitBtn.classList.add('btn-secondary');
+                    }
+                }
+            }
         },
 
         updateAudioButton(state) {
