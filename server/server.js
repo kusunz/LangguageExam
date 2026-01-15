@@ -13,7 +13,7 @@ const crypto = require('crypto');
 const { createRemoteJWKSet, jwtVerify } = require('jose');
 const db = require('./db');
 const { createClient } = require('@deepgram/sdk');
-const DEFAULT_GEMINI_MODEL = process.env.DEFAULT_GEMINI_MODEL || 'gemini-3-pro';
+const DEFAULT_GEMINI_MODEL = process.env.DEFAULT_GEMINI_MODEL || 'gemini-3-pro-preview';
 
 // Initialize Database
 let IS_DB_AVAILABLE = false;
