@@ -1419,27 +1419,51 @@
 
         async loadRemainingChunksInBackground(groupResult, startChunkIndex, totalChunks, previousMondai, llmProvider) {
             const chunkSize = 2; // Match startTest chunk size
+            const batchSize = 2; // Number of concurrent requests
 
-            // Continue loading remaining chunks of first group
-            for (let chunkIndex = startChunkIndex; chunkIndex < totalChunks; chunkIndex++) {
-                try {
-                    console.log(`Background loading chunk ${chunkIndex + 1}/${totalChunks}...`);
-                    const chunkResult = await Api.generateMondaiChunk(
+            // Create batches of chunks to load
+            const chunksToLoad = [];
+            for (let i = startChunkIndex; i < totalChunks; i++) {
+                chunksToLoad.push(i);
+            }
+
+            console.log(`Starting background load for ${chunksToLoad.length} chunks in batches of ${batchSize}...`);
+
+            // Process batches
+            while (chunksToLoad.length > 0) {
+                const batch = chunksToLoad.splice(0, batchSize);
+                const promises = batch.map(chunkIndex => {
+                    console.log(`Background loading chunk ${chunkIndex + 1}/${totalChunks} (Provider: ${llmProvider})...`);
+                    return Api.generateMondaiChunk(
                         State.examSpec,
                         State.currentMode,
                         0, // groupIndex
                         chunkIndex,
                         chunkSize,
-                        previousMondai,
+                        previousMondai, // Use context from previous completed batches
                         llmProvider
-                    );
+                    ).then(result => ({ chunkIndex, result }))
+                        .catch(err => ({ chunkIndex, error: err }));
+                });
 
-                    groupResult.mondai.push(...chunkResult.mondai);
-                    previousMondai = [...groupResult.mondai];
-                    console.log(`Chunk ${chunkIndex + 1} loaded: ${chunkResult.mondai.length} mondai`);
-                } catch (err) {
-                    console.error(`Failed to load chunk ${chunkIndex + 1}:`, err);
+                // Wait for entire batch to complete
+                const results = await Promise.all(promises);
+
+                // Process results in order
+                results.sort((a, b) => a.chunkIndex - b.chunkIndex);
+
+                for (const { chunkIndex, result, error } of results) {
+                    if (error) {
+                        console.error(`Failed to load chunk ${chunkIndex + 1}:`, error);
+                        // Continue even if one chunk fails, though content will be missing
+                    } else if (result) {
+                        groupResult.mondai.push(...result.mondai);
+                        console.log(`Chunk ${chunkIndex + 1} loaded: ${result.mondai.length} mondai`);
+                    }
                 }
+
+                // Update context for next batch
+                previousMondai = [...groupResult.mondai];
             }
 
             console.log('First group fully loaded, loading remaining groups...');
