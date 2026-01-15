@@ -162,17 +162,17 @@
             });
         },
 
-        async generateMondaiChunk(examSpec, mode, groupIndex, chunkIndex, chunkSize = 3, previousMondai = [], provider) {
+        async generateMondaiChunk(examSpec, mode, groupIndex, chunkIndex, chunkSize = 3, previousMondai = [], provider, model = null) {
             return this.request('/generate-mondai-chunk', {
                 method: 'POST',
-                body: { examSpec, mode, groupIndex, chunkIndex, chunkSize, previousMondai, provider }
+                body: { examSpec, mode, groupIndex, chunkIndex, chunkSize, previousMondai, provider, model }
             });
         },
 
-        async gradeTest(test, answers, provider) {
+        async gradeTest(test, answers, provider, model = null) {
             return this.request('/grade-test', {
                 method: 'POST',
-                body: { test, answers, provider }
+                body: { test, answers, provider, model }
             });
         },
 
@@ -1315,6 +1315,13 @@
 
                 // Calculate total mondai for progress tracking
                 const totalMondai = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
+
+                // Determine model and concurrency based on level (Adaptive Optimization)
+                // N5/N4 are simple enough for 2.5-pro/flash and can be generated faster (concurrency 4)
+                const isLowLevel = ['N5', 'N4'].includes(selectedLevel);
+                const targetModel = isLowLevel ? 'gemini-2.5-pro' : null;
+                const concurrency = isLowLevel ? 4 : 3;
+
                 const chunkSize = 2; // 2 mondai per chunk for faster response
                 let generatedMondai = 0;
 
@@ -1344,7 +1351,8 @@
                         chunkIndex,
                         chunkSize,
                         previousMondai,
-                        llmProvider
+                        llmProvider,
+                        targetModel
                     );
 
                     // Collect meta from first chunk
@@ -1385,7 +1393,9 @@
                             chunkIndex + 1,
                             totalChunks,
                             previousMondai,
-                            llmProvider
+                            llmProvider,
+                            targetModel,
+                            concurrency
                         );
                         return;
                     }
@@ -1406,7 +1416,7 @@
                 showScreen('test-screen');
 
                 // Start loading remaining groups in background
-                this.loadRemainingGroupsInBackground(llmProvider);
+                this.loadRemainingGroupsInBackground(llmProvider, targetModel, concurrency);
 
             } catch (err) {
                 clearInterval(progressInterval);
@@ -1417,15 +1427,15 @@
             }
         },
 
-        async loadRemainingChunksInBackground(groupResult, startChunkIndex, totalChunks, previousMondai, llmProvider) {
+        async loadRemainingChunksInBackground(groupResult, startChunkIndex, totalChunks, previousMondai, llmProvider, targetModel = null, concurrency = 3) {
             // STREAM C START: Fire off remaining groups (Listening, etc.) IMMEDIATELY
             // Do not await this. Let it run in parallel with the current group loading.
             console.log('Starting Stream C: Loading remaining groups (Listening) in background...');
-            this.loadRemainingGroupsInBackground(llmProvider);
+            this.loadRemainingGroupsInBackground(llmProvider, targetModel, concurrency);
 
             // STREAM A + B START: Load current group chunks
             const chunkSize = 2; // Match startTest chunk size
-            const batchSize = 3; // Number of concurrent requests
+            const batchSize = concurrency; // Dynamic batch size
 
             // Create batches of chunks to load
             const chunksToLoad = [];
@@ -1446,7 +1456,8 @@
                         chunkIndex,
                         chunkSize,
                         previousMondai,
-                        llmProvider
+                        llmProvider,
+                        targetModel
                     ).then(result => ({ chunkIndex, result }))
                         .catch(err => ({ chunkIndex, error: err }));
                 });
@@ -1466,7 +1477,7 @@
             console.log('Stream A/B Complete: First group fully loaded.');
         },
 
-        async loadRemainingGroupsInBackground(llmProvider) {
+        async loadRemainingGroupsInBackground(llmProvider, targetModel = null, concurrency = 3) {
             const totalGroups = State.examSpec.groups.length;
             const chunkSize = 2;
 
@@ -1492,7 +1503,7 @@
                         // Load chunks for this group (also parallel batched)
                         const chunks = [];
                         for (let i = 0; i < totalChunks; i++) chunks.push(i);
-                        const batchSize = 2; // Conservative batch for background groups
+                        const batchSize = concurrency; // Use dynamic concurrency (req 4 for 2.5-pro)
 
                         while (chunks.length > 0) {
                             const batch = chunks.splice(0, batchSize);
@@ -1504,7 +1515,8 @@
                                     chunkIndex,
                                     chunkSize,
                                     previousMondai,
-                                    llmProvider
+                                    llmProvider,
+                                    targetModel
                                 );
                                 // Note: push order might be mixed within batch, but sorting ideally happens 
                                 // if we stored by index. For simplicity in this stream, simple push is used 
