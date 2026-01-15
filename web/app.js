@@ -1583,18 +1583,25 @@
             const language = test.meta.language;
             const isJapanese = language === 'ja-JP';
 
-            // Update navigation - show position within current group
+            // Update navigation - show position within current group using EXAM SPEC total, not generated chunks
             const globalIndex = this.getGlobalMondaiIndex();
-            const totalMondai = this.getTotalMondaiCount();
-            const currentGroup = State.test.groups[State.currentGroupIndex];
-            const mondaiInGroup = currentGroup.mondai.length;
-            const firstMondaiOfGroup = this.getFirstMondaiIndexOfGroup(State.currentGroupIndex);
+            const currentGroupSpec = State.examSpec.groups[State.currentGroupIndex];
+            const totalMondaiInGroup = currentGroupSpec ? currentGroupSpec.mondai.length : 1;
+
+            // Calculate position within group based on spec
+            let firstMondaiOfGroup = 0;
+            for (let i = 0; i < State.currentGroupIndex; i++) {
+                firstMondaiOfGroup += State.examSpec.groups[i].mondai.length;
+            }
             const mondaiPosInGroup = globalIndex - firstMondaiOfGroup + 1;
 
             $('#mondai-current').textContent = mondaiPosInGroup;
-            $('#mondai-total').textContent = mondaiInGroup;
+            $('#mondai-total').textContent = totalMondaiInGroup;
+
+            // Calculate total mondai from exam spec for navigation buttons
+            const totalMondaiFromSpec = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
             $('#btn-prev-mondai').disabled = globalIndex === 0;
-            $('#btn-next-mondai').disabled = globalIndex === totalMondai - 1;
+            $('#btn-next-mondai').disabled = globalIndex === totalMondaiFromSpec - 1;
 
             // Update header
             $('#mondai-title').textContent = mondai.title_vi;
