@@ -1975,3 +1975,23 @@ body::before {
   width: 100%;
   margin-top: var(--space-sm);
 }
+
+/* Nickname Input */
+.modal-input {
+  width: 100%;
+  padding: var(--space-md);
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-md);
+  color: var(--input-text);
+  font-size: var(--text-lg);
+  text-align: center;
+  margin-bottom: var(--space-md);
+  transition: all var(--transition-fast);
+}
+
+.modal-input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
+}

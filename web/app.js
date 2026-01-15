@@ -295,7 +295,9 @@
             try {
                 const configRes = await fetch('/api/config');
                 config = await configRes.json();
-                console.log('Privy config loaded:', config);
+                const configRes = await fetch('/api/config');
+                config = await configRes.json();
+                // console.log('Privy config loaded'); // Security: Do not log config object
             } catch (err) {
                 console.error('Failed to load config:', err);
             }
@@ -464,7 +466,7 @@
         },
 
         async loginDemo() {
-            this.handleAuthSuccess({ email: 'demo@example.com', token: 'demo-token' });
+            return this.handleAuthSuccess({ email: 'demo@example.com', token: 'demo-token' });
         },
 
         async handleAuthSuccess(user, isRestore = false) {
@@ -488,8 +490,8 @@
 
                 State.userData = await Api.getUserData();
 
-                // Check nickname
-                if (State.userData && State.userData.nickname === null && !State.isDemoMode) {
+                // Check nickname (Skip for demo user)
+                if (State.userData && State.userData.nickname === null && State.user.token !== 'demo-token') {
                     this.showNicknameModal();
                 }
 
@@ -1286,6 +1288,13 @@
             } else {
                 selectedLevel = 'N2'; // Default fallback
             }
+
+            // Debounce Start Button
+            const startBtn = $('#btn-start-test');
+            if (startBtn.disabled) return;
+            startBtn.disabled = true;
+            const originalBtnText = startBtn.innerHTML;
+            startBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang khởi tạo...';
 
             showScreen('loading-screen');
             $('#loading-text').textContent = 'Đang tạo đề thi...';
@@ -2857,7 +2866,26 @@
     function initEventHandlers() {
         // Auth
         $('#btn-email-login').addEventListener('click', () => Auth.loginWithEmail());
-        $('#btn-demo-login').addEventListener('click', () => Auth.loginDemo());
+
+        $('#btn-demo-login').addEventListener('click', async (e) => {
+            const btn = e.target.closest('button');
+            if (btn.disabled) return;
+
+            btn.disabled = true;
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang vào...';
+
+            try {
+                await Auth.loginDemo();
+                // Success will change screen, no need to revert
+            } catch (err) {
+                console.error(err);
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+                showToast('Lỗi đăng nhập demo', 'error');
+            }
+        });
+
         $('#btn-logout').addEventListener('click', () => Auth.logout());
 
         // Theme toggle
