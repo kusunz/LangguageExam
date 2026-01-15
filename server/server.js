@@ -13,6 +13,7 @@ const crypto = require('crypto');
 const { createRemoteJWKSet, jwtVerify } = require('jose');
 const db = require('./db');
 const { createClient } = require('@deepgram/sdk');
+const DEFAULT_GEMINI_MODEL = process.env.DEFAULT_GEMINI_MODEL || 'gemini-3-pro';
 
 // Initialize Database
 let IS_DB_AVAILABLE = false;
@@ -424,9 +425,10 @@ async function callOpenAI(messages, options = {}) {
 // Gemini model fallback order
 // Gemini model fallback order
 const GEMINI_MODELS = [
-  'gemini-2.0-flash-exp',
-  'gemini-1.5-flash',
-  'gemini-1.5-pro'
+  'gemini-3-pro',
+  'gemini-3-flash',
+  'gemini-2.5-pro',
+  'gemini-2.5-flash'
 ];
 
 async function callGeminiWithModel(prompt, model, options = {}) {
@@ -438,11 +440,12 @@ async function callGeminiWithModel(prompt, model, options = {}) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: {
-        temperature: options.temperature || 0.7,
-        maxOutputTokens: options.maxTokens || 65536,  // Increased for large responses
-        responseMimeType: 'application/json'
+        temperature: typeof options.temperature === 'number' ? options.temperature : 0.4,
+        maxOutputTokens: options.maxTokens || 16384,
+        responseMimeType: 'application/json',
+        topP: typeof options.topP === 'number' ? options.topP : 0.95
       }
     })
   });
@@ -479,6 +482,96 @@ async function callGeminiWithModel(prompt, model, options = {}) {
 
     throw parseErr;
   }
+}
+
+function validateQuestionItem(item) {
+  const errors = [];
+  if (!item || typeof item !== 'object') return ['item_not_object'];
+  if (!item.id || typeof item.id !== 'string') errors.push('missing_id');
+  if (!item.type || typeof item.type !== 'string') errors.push('missing_type');
+  if (!item.prompt || typeof item.prompt !== 'string') errors.push('missing_prompt');
+  if (!Array.isArray(item.choices) || item.choices.length !== 4) errors.push('choices_not_4');
+  if (Array.isArray(item.choices)) {
+    for (let i = 0; i < item.choices.length; i++) {
+      if (typeof item.choices[i] !== 'string' || item.choices[i].trim() === '') {
+        errors.push(`choice_${i}_invalid`);
+      }
+      if (item.choices[i] === 'A' || item.choices[i] === 'B' || item.choices[i] === 'C' || item.choices[i] === 'D') {
+        errors.push('choices_are_letters');
+        break;
+      }
+    }
+  }
+  if (typeof item.answer_index !== 'number' || item.answer_index < 0 || item.answer_index > 3) errors.push('answer_index_invalid');
+  if (!item.explain_brief || typeof item.explain_brief !== 'string') errors.push('missing_explain_brief');
+  if (!Array.isArray(item.tags) || item.tags.length === 0) errors.push('missing_tags');
+  if (item.media && typeof item.media !== 'object') errors.push('media_invalid');
+  return errors;
+}
+
+function validateGroupResult(group) {
+  const errors = [];
+  const ids = new Set();
+  if (!group || typeof group !== 'object') return ['group_not_object'];
+  if (!group.group_id || typeof group.group_id !== 'string') errors.push('missing_group_id');
+  if (!group.title_vi || typeof group.title_vi !== 'string') errors.push('missing_title_vi');
+  if (!Array.isArray(group.mondai) || group.mondai.length === 0) errors.push('missing_mondai');
+  if (!Array.isArray(group.mondai)) return errors;
+
+  for (let mi = 0; mi < group.mondai.length; mi++) {
+    const m = group.mondai[mi];
+    if (!m || typeof m !== 'object') {
+      errors.push(`mondai_${mi}_not_object`);
+      continue;
+    }
+    if (!m.mondai_id || typeof m.mondai_id !== 'string') errors.push(`mondai_${mi}_missing_mondai_id`);
+    if (!m.title_vi || typeof m.title_vi !== 'string') errors.push(`mondai_${mi}_missing_title_vi`);
+    if (!m.instructions_vi || typeof m.instructions_vi !== 'string') errors.push(`mondai_${mi}_missing_instructions_vi`);
+    if (!Array.isArray(m.items) || m.items.length === 0) errors.push(`mondai_${mi}_missing_items`);
+
+    if (!Array.isArray(m.items)) continue;
+    for (let ii = 0; ii < m.items.length; ii++) {
+      const item = m.items[ii];
+      const itemErrors = validateQuestionItem(item);
+      if (itemErrors.length) errors.push(`mondai_${mi}_item_${ii}:${itemErrors.join(',')}`);
+      if (item && typeof item.id === 'string') {
+        if (ids.has(item.id)) errors.push(`duplicate_id:${item.id}`);
+        ids.add(item.id);
+      }
+      const needsScript = item && item.media && Object.prototype.hasOwnProperty.call(item.media, 'script_text');
+      if (needsScript && item.media.script_text !== null && typeof item.media.script_text !== 'string') {
+        errors.push(`mondai_${mi}_item_${ii}:script_text_invalid`);
+      }
+    }
+  }
+  return errors;
+}
+
+function buildFixGroupPrompt(examSpec, mode, group, groupIndex, errors) {
+  return `You are fixing a JSON output for a ${examSpec.display_name_vi} practice test group.
+
+EXAM: ${examSpec.display_name_vi}
+LEVEL: ${examSpec.level}
+LANGUAGE: ${examSpec.language}
+MODE: ${mode}
+GROUP INDEX: ${groupIndex + 1}
+
+The JSON has validation errors. Fix ONLY what is necessary to satisfy the schema and errors below.
+Do NOT change the overall intent/difficulty, do NOT remove questions unless absolutely required to satisfy schema.
+
+VALIDATION ERRORS:
+${errors.slice(0, 40).join('\n')}
+
+RULES:
+1. Return RAW JSON only.
+2. Ensure choices are full answer texts (NOT letters "A/B/C/D").
+3. Each item must have 4 non-empty string choices and exactly 1 correct answer_index (0-3).
+4. Keep existing ids where possible; if you must change, keep uniqueness.
+
+INPUT JSON:
+${JSON.stringify(group)}
+
+RETURN FIXED JSON ONLY.`;
 }
 
 // Attempt to repair truncated JSON by closing open brackets
@@ -539,7 +632,8 @@ function repairTruncatedJSON(text) {
 }
 
 async function callGemini(prompt, options = {}) {
-  const models = options.model ? [options.model] : GEMINI_MODELS;
+  const requested = options.model ? [options.model] : [];
+  const models = [...requested, ...GEMINI_MODELS].filter((v, i, a) => a.indexOf(v) === i);
   let lastError = null;
 
   for (const model of models) {
@@ -558,12 +652,12 @@ async function callGemini(prompt, options = {}) {
         continue;
       }
 
-      // If it's an auth error (401) or invalid request (400), no point retrying with different model
-      if (err.status === 401 || err.status === 400) {
+      // If it's an auth error (401), no point retrying with different model
+      if (err.status === 401) {
         throw err;
       }
 
-      // For other errors, try next model
+      // For other errors (including 400/404 which might be model-specific), try next model
       continue;
     }
   }
@@ -572,10 +666,30 @@ async function callGemini(prompt, options = {}) {
   throw lastError || new Error('All Gemini models failed');
 }
 
+async function generateGroupWithIntegrity(examSpec, mode, group, groupIndex, options = {}) {
+  const model = options.model || DEFAULT_GEMINI_MODEL;
+  const maxTokens = options.maxTokens || 16384;
+  const temperature = typeof options.temperature === 'number' ? options.temperature : 0.4;
+
+  const prompt = buildGenerateGroupPrompt(examSpec, mode, group, groupIndex);
+  const first = await callGemini(prompt, { model, maxTokens, temperature });
+  const errors1 = validateGroupResult(first);
+  if (errors1.length === 0) return first;
+
+  const fixPrompt = buildFixGroupPrompt(examSpec, mode, first, groupIndex, errors1);
+  const fixed = await callGemini(fixPrompt, { model, maxTokens: Math.min(8192, maxTokens), temperature: 0 });
+  const errors2 = validateGroupResult(fixed);
+  if (errors2.length === 0) return fixed;
+
+  const hardFail = new Error(`Group validation failed after fix: ${errors2.slice(0, 10).join(' | ')}`);
+  hardFail.validationErrors = errors2;
+  throw hardFail;
+}
+
 // Generate test
 app.post('/api/generate-test', authMiddleware, async (req, res) => {
   try {
-    const { examSpec, mode, provider, userHistory } = req.body;
+    const { examSpec, mode, provider, userHistory, model } = req.body;
     const llmProvider = provider || process.env.DEFAULT_LLM_PROVIDER || 'gemini';
 
     const prompt = buildGenerateTestPrompt(examSpec, mode, userHistory);
@@ -584,7 +698,7 @@ app.post('/api/generate-test', authMiddleware, async (req, res) => {
     if (llmProvider === 'openai') {
       result = await callOpenAI([{ role: 'user', content: prompt }]);
     } else {
-      result = await callGemini(prompt);
+      result = await callGemini(prompt, { model: model || DEFAULT_GEMINI_MODEL, maxTokens: 16384, temperature: 0.4 });
     }
 
     // Async save generated questions to Knowledge Bank
@@ -600,7 +714,7 @@ app.post('/api/generate-test', authMiddleware, async (req, res) => {
 // Generate a single group (for progressive loading)
 app.post('/api/generate-group', authMiddleware, async (req, res) => {
   try {
-    const { examSpec, mode, groupIndex, provider, existingMeta } = req.body;
+    const { examSpec, mode, groupIndex, provider, existingMeta, model } = req.body;
     const llmProvider = provider || process.env.DEFAULT_LLM_PROVIDER || 'gemini';
 
     const group = examSpec.groups[groupIndex];
@@ -608,13 +722,16 @@ app.post('/api/generate-group', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Invalid group index' });
     }
 
-    const prompt = buildGenerateGroupPrompt(examSpec, mode, group, groupIndex);
-
     let result;
     if (llmProvider === 'openai') {
+      const prompt = buildGenerateGroupPrompt(examSpec, mode, group, groupIndex);
       result = await callOpenAI([{ role: 'user', content: prompt }]);
     } else {
-      result = await callGemini(prompt);
+      result = await generateGroupWithIntegrity(examSpec, mode, group, groupIndex, {
+        model: model || DEFAULT_GEMINI_MODEL,
+        maxTokens: 16384,
+        temperature: 0.4
+      });
     }
 
     // Async save generated questions (group) to Knowledge Bank
@@ -1061,6 +1178,10 @@ RULES:
 5. For ${mode} mode, scale passage lengths proportionally (shorter for basic/standard).
 6. Include meaningful tags and brief explanations for each question.
 7. For listening items, include script_text for audio generation.
+8. Ensure difficulty distribution within each mondai: easy 20%, medium 60%, hard 20%.
+9. Distractors must be plausible (same part-of-speech/category), but clearly wrong for a single, verifiable reason.
+10. Never create ambiguous items with multiple correct answers.
+11. "choices" must be full answer texts, NOT letters "A/B/C/D".
 
 PERSONALIZATION INSTRUCTIONS:
 ${userHistory?.weakTags?.length > 0 ? `The user is weak in: ${userHistory.weakTags.join(', ')}. Please include more questions covering these topics.` : 'Generate a balanced mix of questions.'}
@@ -1098,7 +1219,7 @@ OUTPUT JSON ONLY matching this schema:
               "id": "<unique_id>",
               "type": "<question_type>",
               "prompt": "<question in ${examSpec.language}>",
-              "choices": ["A", "B", "C", "D"],
+              "choices": ["<choiceA text>", "<choiceB text>", "<choiceC text>", "<choiceD text>"],
               "answer_index": 0,
               "explain_brief": "<brief explanation>",
               "tags": ["<tag1>", "<tag2>"],
@@ -1187,6 +1308,7 @@ RULES:
 4. For reading/listening questions, include appropriate passages/scripts.
 5. Include meaningful tags and brief explanations for each question.
 6. For listening items, include script_text for audio generation.
+7. "choices" must be full answer texts, NOT letters "A/B/C/D".
 
 OUTPUT JSON ONLY matching the following schema.
 IMPORTANT:
@@ -1209,7 +1331,7 @@ Schema:
           "id": "<unique_id>",
           "type": "<question_type>",
           "prompt": "<question in ${examSpec.language}>",
-          "choices": ["A", "B", "C", "D"],
+          "choices": ["<choiceA text>", "<choiceB text>", "<choiceC text>", "<choiceD text>"],
           "answer_index": 0,
           "explain_brief": "<brief explanation>",
           "tags": ["<tag1>", "<tag2>"],
