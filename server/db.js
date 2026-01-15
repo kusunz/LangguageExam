@@ -1,26 +1,16 @@
 const { Pool } = require('pg');
 
-let pool = null;
-
-function getPool() {
-  if (!pool) {
-    if (!process.env.DATABASE_URL) {
-      console.error('DATABASE_URL environment variable is not set!');
-      throw new Error('DATABASE_URL is required');
-    }
-    pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: {
-        rejectUnauthorized: false // Required for Neon
-      }
-    });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DB_SSL === 'false' ? undefined : {
+    rejectUnauthorized: false // Required for Neon
   }
-  return pool;
-}
+});
 
 async function initDb() {
-  const client = await getPool().connect();
+  let client;
   try {
+    client = await pool.connect();
     await client.query('BEGIN');
 
     // Users table
@@ -59,19 +49,40 @@ async function initDb() {
       );
     `);
 
+    // Questions Bank table (Deduplicated)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS questions (
+        hash TEXT PRIMARY KEY,
+        content JSONB NOT NULL,
+        keywords JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // User Notebook table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS user_notebook (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id TEXT REFERENCES users(id),
+        question_hash TEXT REFERENCES questions(hash),
+        note TEXT,
+        tags JSONB DEFAULT '[]',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, question_hash)
+      );
+    `);
+
     await client.query('COMMIT');
     console.log('Database initialized successfully');
+    return true;
   } catch (e) {
-    await client.query('ROLLBACK');
-    console.error('Failed to initialize database:', e);
-    throw e;
+    if (client) await client.query('ROLLBACK');
+    console.warn('Failed to initialize database (running in filesystem fallback mode):', e.message);
+    // Do not throw, return false to indicate DB is not available
+    return false;
   } finally {
-    client.release();
+    if (client) client.release();
   }
 }
 
-// Export with getter for lazy initialization
-module.exports = {
-  get pool() { return getPool(); },
-  initDb
-};
+module.exports = { pool, initDb };

@@ -25,7 +25,7 @@
         userData: null,
         currentExam: 'jlpt',
         currentMode: 'official',
-        currentSection: 'full', // full, vocab-grammar, reading, listening
+        currentSection: 'full',
         examSpec: null,
         test: null,
         answers: {},
@@ -116,6 +116,21 @@
                 method: 'POST',
                 body: { sessionId }
             });
+
+            // Client-side storage for Demo User
+            if (State.user?.token === 'demo-token') {
+                try {
+                    const local = localStorage.getItem('demo_userData');
+                    if (local) {
+                        const parsed = JSON.parse(local);
+                        // Merge local data with server response (which is mostly empty for demo)
+                        return { ...data, ...parsed, sessionId: data.sessionId };
+                    }
+                } catch (e) {
+                    console.error('Error loading demo local data:', e);
+                }
+            }
+
             if (data.sessionId) {
                 localStorage.setItem('app_session_id', data.sessionId);
             }
@@ -123,6 +138,13 @@
         },
 
         async saveUserData(data) {
+            // Client-side storage for Demo User
+            if (State.user?.token === 'demo-token') {
+                // Save the FULL current state, as 'data' might be partial
+                if (State.userData) {
+                    localStorage.setItem('demo_userData', JSON.stringify(State.userData));
+                }
+            }
             return this.request('/user-data', { method: 'PUT', body: data });
         },
 
@@ -140,11 +162,33 @@
             });
         },
 
-        async gradeTest(test, answers, provider) {
-            return this.request('/grade-test', {
+        async generateMondaiChunk(examSpec, mode, groupIndex, chunkIndex, chunkSize = 3, previousMondai = [], provider, model = null) {
+            return this.request('/generate-mondai-chunk', {
                 method: 'POST',
-                body: { test, answers, provider }
+                body: { examSpec, mode, groupIndex, chunkIndex, chunkSize, previousMondai, provider, model }
             });
+        },
+
+        async gradeTest(test, answers, provider, model = null) {
+            // Set 300s timeout for grading
+            const controller = new AbortController();
+            const id = setTimeout(() => controller.abort(), 300000);
+
+            try {
+                const res = await this.request('/grade-test', {
+                    method: 'POST',
+                    body: { test, answers, provider, model },
+                    signal: controller.signal
+                });
+                clearTimeout(id);
+                return res;
+            } catch (err) {
+                clearTimeout(id);
+                if (err.name === 'AbortError') {
+                    throw new Error('Chấm điểm quá lâu (timeout). Vui lòng thử lại.');
+                }
+                throw err;
+            }
         },
 
         async prepareTtsText(text, language, provider) {
@@ -169,6 +213,87 @@
             }
 
             return response.blob();
+        },
+
+        async saveToNotebook(question, note = '', tags = []) {
+            // Client-side storage for Demo User
+            if (State.user?.token === 'demo-token') {
+                try {
+                    const local = localStorage.getItem('demo_notebook') || '[]';
+                    const notebook = JSON.parse(local);
+                    // Generate local ID
+                    const id = question.id || 'demo_' + Date.now();
+                    const entry = {
+                        question_hash: id,
+                        note,
+                        tags,
+                        created_at: new Date().toISOString(),
+                        question: question,
+                        hash: id, // Mimic server response
+                        content: question // Mimic joined query
+                    };
+
+                    // Simple dedupe by hash/id (remove old if exists)
+                    const idx = notebook.findIndex(n => n.question_hash === id);
+                    if (idx >= 0) notebook.splice(idx, 1);
+
+                    notebook.unshift(entry);
+                    localStorage.setItem('demo_notebook', JSON.stringify(notebook));
+                    return { success: true, hash: id };
+                } catch (e) {
+                    console.error('Error saving demo notebook:', e);
+                    throw e;
+                }
+            }
+
+            const token = State.user?.token || 'demo-token';
+            const res = await fetch('/api/notebook', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ question, note, tags })
+            });
+            if (!res.ok) throw new Error('Failed to save to notebook');
+            return await res.json();
+        },
+
+        async removeFromNotebook(question) {
+            // Client-side storage for Demo User
+            if (State.user?.token === 'demo-token') {
+                try {
+                    const local = localStorage.getItem('demo_notebook') || '[]';
+                    let notebook = JSON.parse(local);
+                    const id = question.hash || question.question_hash || question.id;
+                    notebook = notebook.filter(n => n.question_hash !== id && n.hash !== id);
+                    localStorage.setItem('demo_notebook', JSON.stringify(notebook));
+                    return { success: true };
+                } catch (e) { console.error('Error removing demo notebook:', e); }
+            }
+
+            const token = State.user?.token || 'demo-token';
+            const res = await fetch('/api/notebook', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ question, action: 'remove' })
+            });
+            if (!res.ok) throw new Error('Failed to remove from notebook');
+            return await res.json();
+        },
+
+        async getNotebook() {
+            // Client-side storage for Demo User
+            if (State.user?.token === 'demo-token') {
+                try {
+                    const local = localStorage.getItem('demo_notebook') || '[]';
+                    return { items: JSON.parse(local) };
+                } catch (e) { return { items: [] }; }
+            }
+
+            const token = State.user?.token || 'demo-token';
+            const res = await fetch('/api/notebook', {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (!res.ok) throw new Error('Failed to fetch notebook');
+            return await res.json();
         }
     };
 
@@ -185,7 +310,7 @@
             try {
                 const configRes = await fetch('/api/config');
                 config = await configRes.json();
-                console.log('Privy config loaded:', config);
+                // console.log('Privy config loaded'); // Security: Do not log config object
             } catch (err) {
                 console.error('Failed to load config:', err);
             }
@@ -354,7 +479,7 @@
         },
 
         async loginDemo() {
-            this.handleAuthSuccess({ email: 'demo@example.com', token: 'demo-token' });
+            return this.handleAuthSuccess({ email: 'demo@example.com', token: 'demo-token' });
         },
 
         async handleAuthSuccess(user, isRestore = false) {
@@ -378,8 +503,8 @@
 
                 State.userData = await Api.getUserData();
 
-                // Check nickname
-                if (State.userData && State.userData.nickname === null && !State.isDemoMode) {
+                // Check nickname (Skip for demo user)
+                if (State.userData && State.userData.nickname === null && State.user.token !== 'demo-token') {
                     this.showNicknameModal();
                 }
 
@@ -509,7 +634,7 @@
             return scaledSpec;
         },
 
-        filterBySection(spec, section) {
+        filterBySection(spec, section, mode = 'standard') {
             if (section === 'full') return spec;
 
             const filteredSpec = JSON.parse(JSON.stringify(spec));
@@ -521,7 +646,31 @@
                 'listening': ['L1', 'L2', 'L3', 'L4', 'L5']
             };
 
-            const allowedMondai = sectionMondaiMap[section] || [];
+            let allowedMondai = sectionMondaiMap[section] || [];
+
+            // For reading section: randomly select mondai based on mode
+            if (section === 'reading') {
+                const readingMondai = ['M8', 'M9', 'M10', 'M11', 'M12'];
+                let mondaiCount;
+
+                switch (mode) {
+                    case 'basic':
+                        mondaiCount = Math.floor(Math.random() * 2) + 1; // 1-2
+                        break;
+                    case 'standard':
+                        mondaiCount = Math.floor(Math.random() * 2) + 3; // 3-4
+                        break;
+                    case 'official':
+                    default:
+                        mondaiCount = readingMondai.length; // All 5
+                        break;
+                }
+
+                // Shuffle and pick random mondai
+                const shuffled = [...readingMondai].sort(() => Math.random() - 0.5);
+                allowedMondai = shuffled.slice(0, mondaiCount);
+                console.log(`Reading mode ${mode}: selected ${mondaiCount} mondai:`, allowedMondai);
+            }
 
             // Filter groups based on section
             if (section === 'listening') {
@@ -696,6 +845,12 @@
                 clearInterval(State.timerIntervals.group);
                 State.timerIntervals.group = null;
             }
+        },
+
+        togglePause(isPaused) {
+            // Timer already handles pause via State.isTestPaused check in intervals
+            // This method exists for explicit pause control if needed
+            State.isTestPaused = isPaused;
         }
     };
 
@@ -703,6 +858,32 @@
     // TTS Manager
     // ============================================
     const TTSManager = {
+        audioQueue: [],      // Queue of audio blobs to play
+        isPlaying: false,    // Currently playing audio
+        isPaused: false,     // Pause state for streaming
+        currentIndex: 0,     // Current segment index
+        totalSegments: 0,    // Total segments expected
+        combinedBlob: null,  // Combined audio for seek/timer (hybrid mode)
+        clientCache: new Map(), // Client-side TTS cache
+
+        // Simple hash for client cache
+        hashText(text) {
+            let hash = 0;
+            for (let i = 0; i < text.length; i++) {
+                const char = text.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash = hash & hash;
+            }
+            return hash.toString(16);
+        },
+
+        // Detect dialogue format (Speaker: text)
+        isDialogue(text) {
+            const dialoguePattern = /^([A-Za-z0-9\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff_]+)\s*[:：]\s*.+$/gm;
+            const matches = text.match(dialoguePattern);
+            return matches && matches.length >= 2;
+        },
+
         async playAudio(text, language) {
             const ttsMode = $('#tts-mode').value;
             const statusEl = $('#audio-status');
@@ -713,13 +894,40 @@
                 if (ttsMode === 'browser') {
                     await this.playBrowserTTS(text, language);
                 } else {
+                    const provider = ttsMode === 'auto' ? 'deepgram' : ttsMode;
+                    const textIsDialogue = this.isDialogue(text);
+
+                    // Check client cache first (for non-dialogue)
+                    const cacheKey = this.hashText(text + language);
+                    if (!textIsDialogue && this.clientCache.has(cacheKey)) {
+                        console.log('TTS: Client cache hit');
+                        statusEl.textContent = '';
+                        await this.playBlob(this.clientCache.get(cacheKey));
+                        return;
+                    }
+
                     try {
-                        // Try server TTS first
-                        const provider = ttsMode === 'auto' ? 'gemini' : ttsMode;
-                        const blob = await Api.getTts(text, language, provider);
-                        await this.playBlob(blob);
+                        if (textIsDialogue) {
+                            // Dialogue: use streaming + hybrid combine
+                            console.log('TTS: Dialogue mode → streaming');
+                            await this.playStreamingTTS(text, language, provider);
+                        } else {
+                            // Non-dialogue: use regular endpoint (server cached)
+                            console.log('TTS: Non-dialogue mode → regular endpoint');
+                            const blob = await Api.getTts(text, language, provider);
+
+                            // Cache on client
+                            this.clientCache.set(cacheKey, blob);
+                            // Limit cache size
+                            if (this.clientCache.size > 20) {
+                                const oldestKey = this.clientCache.keys().next().value;
+                                this.clientCache.delete(oldestKey);
+                            }
+
+                            await this.playBlob(blob);
+                        }
                     } catch (err) {
-                        console.warn('Server TTS failed, falling back to browser:', err);
+                        console.warn('TTS failed, falling back to browser:', err);
                         await this.playBrowserTTS(text, language);
                     }
                 }
@@ -731,31 +939,270 @@
             }
         },
 
+        // Streaming TTS using SSE - plays audio as segments arrive
+        async playStreamingTTS(text, language, provider) {
+            return new Promise((resolve, reject) => {
+                this.audioQueue = [];
+                this.currentIndex = 0;
+                this.totalSegments = 0;
+                this.isPlaying = false;
+
+                const statusEl = $('#audio-status');
+
+                // Create EventSource-like connection using fetch
+                fetch(`${CONFIG.apiBase}/tts/stream`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
+                    },
+                    body: JSON.stringify({ text, language, provider })
+                }).then(response => {
+                    if (!response.ok) {
+                        throw new Error('Streaming TTS request failed');
+                    }
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+
+                    const processStream = async () => {
+                        try {
+                            while (true) {
+                                const { done, value } = await reader.read();
+                                if (done) break;
+
+                                buffer += decoder.decode(value, { stream: true });
+                                const lines = buffer.split('\n\n');
+                                buffer = lines.pop() || '';
+
+                                for (const line of lines) {
+                                    if (line.startsWith('data: ')) {
+                                        const data = JSON.parse(line.slice(6));
+                                        await this.handleStreamEvent(data, statusEl, resolve, reject);
+                                    }
+                                }
+                            }
+                        } catch (err) {
+                            reject(err);
+                        }
+                    };
+
+                    processStream();
+                }).catch(reject);
+            });
+        },
+
+        async handleStreamEvent(data, statusEl, resolve, reject) {
+            switch (data.type) {
+                case 'info':
+                    this.totalSegments = data.total;
+                    statusEl.textContent = 'Đang tải...';
+                    break;
+
+                case 'audio':
+                    // Convert base64 to blob
+                    const audioData = atob(data.audio);
+                    const audioArray = new Uint8Array(audioData.length);
+                    for (let i = 0; i < audioData.length; i++) {
+                        audioArray[i] = audioData.charCodeAt(i);
+                    }
+                    const blob = new Blob([audioArray], { type: 'audio/mpeg' });
+
+                    this.audioQueue.push(blob);
+                    // Keep simple loading text
+                    if (!this.isPlaying) {
+                        statusEl.textContent = 'Đang tải...';
+                    }
+
+                    // Start playing immediately when first segment arrives
+                    if (!this.isPlaying && this.audioQueue.length === 1) {
+                        this.isPlaying = true;
+                        statusEl.textContent = 'Đang phát...';
+                        this.playNextInQueue(resolve, reject);
+                    }
+                    break;
+
+                case 'done':
+                    // All segments received - combine for seek/timer support
+                    if (this.audioQueue.length > 0) {
+                        this.combinedBlob = new Blob(this.audioQueue, { type: 'audio/mpeg' });
+                        console.log('TTS: Combined blob created for seek/timer');
+                    }
+                    if (this.audioQueue.length === 0) {
+                        resolve(); // No audio was generated
+                    }
+                    // Otherwise, playback will resolve when queue is empty
+                    break;
+
+                case 'error':
+                    reject(new Error(data.message));
+                    break;
+
+                case 'segment_error':
+                    console.warn(`Segment ${data.index} failed: ${data.message}`);
+                    // Continue with other segments
+                    break;
+            }
+        },
+
+        async playNextInQueue(resolve, reject) {
+            if (this.currentIndex >= this.audioQueue.length) {
+                // Check if more segments are coming
+                if (this.currentIndex >= this.totalSegments) {
+                    this.isPlaying = false;
+                    const btn = $('#btn-play-audio');
+                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
+
+                    // Switch to combined blob for seek/timer support
+                    if (this.combinedBlob) {
+                        console.log('TTS: Switching to combined audio for seek/timer');
+                        this.setupCombinedAudio();
+                    }
+
+                    resolve();
+                } else {
+                    // Wait for more segments
+                    setTimeout(() => this.playNextInQueue(resolve, reject), 100);
+                }
+                return;
+            }
+
+            const blob = this.audioQueue[this.currentIndex];
+            const url = URL.createObjectURL(blob);
+
+            if (State.ttsAudio) {
+                State.ttsAudio.pause();
+                if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
+            }
+
+            State.ttsAudio = new Audio(url);
+
+            State.ttsAudio.onended = () => {
+                URL.revokeObjectURL(url);
+                this.currentIndex++;
+                this.playNextInQueue(resolve, reject);
+            };
+
+            State.ttsAudio.onerror = (err) => {
+                URL.revokeObjectURL(url);
+                this.currentIndex++;
+                // Try next segment instead of failing completely
+                this.playNextInQueue(resolve, reject);
+            };
+
+            State.ttsAudio.onplay = () => {
+                const btn = $('#btn-play-audio');
+                if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
+            };
+
+            try {
+                await State.ttsAudio.play();
+            } catch (err) {
+                this.currentIndex++;
+                this.playNextInQueue(resolve, reject);
+            }
+        },
+
+        // Setup combined audio for seek/timer after streaming completes
+        setupCombinedAudio() {
+            if (!this.combinedBlob) return;
+
+            const url = URL.createObjectURL(this.combinedBlob);
+
+            if (State.ttsAudio) {
+                State.ttsAudio.pause();
+                if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
+            }
+
+            State.ttsAudio = new Audio(url);
+            State.ttsAudio.preload = 'metadata';
+
+            // Setup time update for seek bar
+            State.ttsAudio.ontimeupdate = () => {
+                const currentTime = State.ttsAudio.currentTime;
+                const duration = State.ttsAudio.duration;
+
+                const timeEl = $('#audio-time');
+                if (timeEl && !isNaN(duration)) {
+                    timeEl.textContent = `${this.formatTime(currentTime)} / ${this.formatTime(duration)}`;
+                }
+
+                const seek = $('#audio-seek');
+                if (seek && !isNaN(duration)) {
+                    seek.value = (currentTime / duration) * 100;
+                }
+            };
+
+            State.ttsAudio.onloadedmetadata = () => {
+                const timeEl = $('#audio-time');
+                if (timeEl) {
+                    timeEl.textContent = `00:00 / ${this.formatTime(State.ttsAudio.duration)}`;
+                }
+            };
+
+            // Don't auto-play - user will click "Nghe lại" to replay
+        },
+
         async playBlob(blob) {
             return new Promise((resolve, reject) => {
                 const url = URL.createObjectURL(blob);
 
                 if (State.ttsAudio) {
                     State.ttsAudio.pause();
-                    URL.revokeObjectURL(State.ttsAudio.src);
+                    if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
                 }
 
                 State.ttsAudio = new Audio(url);
+
+                // Time update & Seek integration
+                State.ttsAudio.ontimeupdate = () => {
+                    const currentTime = State.ttsAudio.currentTime;
+                    const duration = State.ttsAudio.duration;
+
+                    // Update time display
+                    const timeEl = $('#audio-time');
+                    if (timeEl && !isNaN(duration)) {
+                        timeEl.textContent = `${this.formatTime(currentTime)} / ${this.formatTime(duration)}`;
+                    }
+
+                    // Update seek bar
+                    const seek = $('#audio-seek');
+                    if (seek && !isNaN(duration)) {
+                        seek.value = (currentTime / duration) * 100;
+                    }
+                };
+
                 State.ttsAudio.onended = () => {
                     URL.revokeObjectURL(url);
+                    TTSManager.isPlaying = false;
                     const btn = $('#btn-play-audio');
                     if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
-                    resolve();
+
+                    // Reset seek
+                    const seek = $('#audio-seek');
+                    if (seek) seek.value = 100;
                 };
+
                 State.ttsAudio.onerror = reject;
 
-                // Update UI when playing starts
+                // Resolve promise when playback STARTS so UI is interactive
                 State.ttsAudio.onplay = () => {
+                    TTSManager.isPlaying = true;
                     const btn = $('#btn-play-audio');
                     if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
+                    resolve();
                 };
 
-                State.ttsAudio.play();
+                // Also resolve on canplay through to ensure we don't block
+                State.ttsAudio.oncanplaythrough = () => {
+                    // Optional: enable controls
+                };
+
+                State.ttsAudio.play().then(() => {
+                    // Modern browsers return promise
+                    // Resolve handled in onplay
+                }).catch(reject);
             });
         },
 
@@ -766,6 +1213,9 @@
                     return;
                 }
 
+                // Stop any existing
+                speechSynthesis.cancel();
+
                 const utterance = new SpeechSynthesisUtterance(text);
                 utterance.lang = language;
                 utterance.rate = 0.9;
@@ -773,17 +1223,15 @@
                 utterance.onstart = () => {
                     const btn = $('#btn-play-audio');
                     if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
+                    resolve(); // Resolve immediately
                 };
 
                 utterance.onend = () => {
                     const btn = $('#btn-play-audio');
                     if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
-                    resolve();
                 };
 
                 utterance.onerror = (err) => {
-                    // console.error('Browser TTS error', err); 
-                    // SpeechSynthesisErrorEvent might not have a clean message
                     reject(err);
                 };
 
@@ -794,11 +1242,40 @@
         stop() {
             if (State.ttsAudio) {
                 State.ttsAudio.pause();
+                if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
                 State.ttsAudio = null;
             }
             if ('speechSynthesis' in window) {
                 speechSynthesis.cancel();
             }
+            // Clear streaming queue and combined blob
+            this.audioQueue = [];
+            this.isPlaying = false;
+            this.isPaused = false;
+            this.currentIndex = 0;
+            this.combinedBlob = null;
+        },
+
+        // Toggle pause for streaming TTS
+        togglePause() {
+            if (!State.ttsAudio) return false;
+
+            if (State.ttsAudio.paused) {
+                State.ttsAudio.play();
+                this.isPaused = false;
+                return true; // Now playing
+            } else {
+                State.ttsAudio.pause();
+                this.isPaused = true;
+                return false; // Now paused
+            }
+        },
+
+        // Helper for time format (MM:SS)
+        formatTime(seconds) {
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
         }
     };
 
@@ -808,6 +1285,7 @@
     const TestUI = {
         pendingGroups: [], // Track groups being loaded in background
         loadingGroupIndex: 0, // Current group being loaded
+        isSubmitting: false, // Prevent duplicate submissions
 
         async startTest() {
             const examType = State.currentExam; // e.g., "jlpt" or "hsk"
@@ -826,21 +1304,34 @@
                 selectedLevel = 'N2'; // Default fallback
             }
 
+            // Reset test flags
+            this.pendingGroups = [];
+            this.loadingGroupIndex = 0;
+            this.isSubmitting = false;
+
+            // Debounce Start Button
+            const startBtn = $('#btn-start-test');
+            if (startBtn.disabled) return;
+            startBtn.disabled = true;
+            const originalBtnText = startBtn.innerHTML;
+            startBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang khởi tạo...';
+
             showScreen('loading-screen');
             $('#loading-text').textContent = 'Đang tạo đề thi...';
 
-            // Section name mapping for display
+            // Section hint
             const sectionNames = {
-                'full': '',
                 'vocab-grammar': ' - Từ vựng & Ngữ pháp',
                 'reading': ' - Đọc hiểu',
                 'listening': ' - Nghe'
             };
             const sectionLabel = sectionNames[State.currentSection] || '';
             $('#loading-hint').textContent = `Đang tạo đề ${examType.toUpperCase()} ${selectedLevel}${sectionLabel}...`;
+
             progressBar.style.width = '0%';
             progressText.textContent = '0%';
 
+            // Start simulated progress (will stop at 98% until gen completes)
             const progressInterval = this.simulateProgress(progressBar, progressText);
 
             try {
@@ -848,62 +1339,349 @@
                 const rawSpec = await ExamLoader.loadSpec(examType, selectedLevel);
                 let scaledSpec = ExamLoader.applyModeScaling(rawSpec, mode);
 
-                // Apply section filter if not full exam
-                State.examSpec = ExamLoader.filterBySection(scaledSpec, State.currentSection);
+                // Filter by section (pass mode for reading mondai count)
+                State.examSpec = ExamLoader.filterBySection(scaledSpec, State.currentSection, mode);
 
-                // Generate FIRST GROUP only (for quick start)
-                const firstGroupResult = await Api.generateGroup(State.examSpec, mode, 0, llmProvider);
+                // Calculate total mondai for progress tracking
+                const totalMondai = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
 
-                // Initialize test with first group
+                // Determine model and concurrency based on level (Adaptive Optimization)
+                // N5/N4 are simple enough for 2.5-pro (faster, higher concurrency)
+                // N1/N2/N3 use 3-pro (more accurate, lower concurrency due to 25 RPM limit)
+                const isLowLevel = ['N5', 'N4'].includes(selectedLevel);
+                const targetModel = isLowLevel ? 'gemini-2.5-pro' : null; // null = default 3-pro
+
+                // Check if this is a single-section exam (only 1 group)
+                const isSingleSection = State.examSpec.groups.length === 1;
+
+                // Concurrency strategy:
+                // 2.5-pro (N4/N5): 7 parallel for BOTH single and full exam (250 RPM allows this)
+                // 3-pro (N1/N2/N3):
+                //   - Single-section: 5 parallel (safe under 25 RPM)
+                //   - Full exam: 4 parallel (1 per section to ensure coherence)
+                let concurrency;
+                if (targetModel === 'gemini-2.5-pro') {
+                    concurrency = 7; // High RPM allows full parallelism
+                } else {
+                    // 3-pro: more conservative due to 25 RPM limit
+                    concurrency = isSingleSection ? 5 : 4;
+                }
+
+                const chunkSize = 2; // 2 mondai per chunk for faster response
+                let generatedMondai = 0;
+
+                // Initialize test structure
                 State.test = {
-                    meta: firstGroupResult.meta,
-                    groups: [firstGroupResult] // Start with just first group
+                    meta: null,
+                    groups: []
                 };
+
+                // Generate first group using chunked approach for faster start
+                const firstGroup = State.examSpec.groups[0];
+                const firstGroupResult = {
+                    group_id: firstGroup.group_id,
+                    title_vi: firstGroup.title_vi,
+                    mondai: []
+                };
+
+                // Universal Initial Batch: Always load 2 chunks (if not parallel-all) 
+                // to provide buffer for Full exams or Large Single exams of ALL languages/levels.
+                const initialBatchSize = 2;
+
+                const totalChunks = Math.ceil(firstGroup.mondai.length / chunkSize);
+                let previousMondai = [];
+
+                // Determine max parallel chunks for single-section parallel loading
+                const maxParallelChunks = (targetModel === 'gemini-2.5-pro') ? 7 : 5;
+                const canParallelLoadAll = isSingleSection && totalChunks <= maxParallelChunks;
+
+                if (canParallelLoadAll) {
+                    // PARALLEL LOADING: Send ALL chunks at once for single-section exams
+                    console.log(`Parallel loading (${targetModel || '3-pro'}): Sending ALL ${totalChunks} chunks simultaneously for single-section exam`);
+
+                    const chunkPromises = [];
+                    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                        chunkPromises.push(
+                            Api.generateMondaiChunk(
+                                State.examSpec,
+                                mode,
+                                0, // groupIndex
+                                chunkIndex,
+                                chunkSize,
+                                [], // No previous context for parallel
+                                llmProvider,
+                                targetModel
+                            ).then(result => ({ chunkIndex, result }))
+                                .catch(err => ({ chunkIndex, error: err }))
+                        );
+                    }
+
+                    // Wait for ALL chunks to complete
+                    const results = await Promise.all(chunkPromises);
+                    results.sort((a, b) => a.chunkIndex - b.chunkIndex);
+
+                    for (const { chunkIndex, result, error } of results) {
+                        if (result) {
+                            if (result.meta && !State.test.meta) {
+                                State.test.meta = result.meta;
+                            }
+                            firstGroupResult.mondai.push(...result.mondai);
+                        } else if (error) {
+                            console.error(`Chunk ${chunkIndex} failed:`, error);
+                        }
+                    }
+
+                    // All chunks loaded - show test immediately
+                    State.test.groups = [firstGroupResult];
+                    State.answers = {};
+                    State.currentGroupIndex = 0;
+                    State.currentMondaiIndex = 0;
+
+                    clearInterval(progressInterval);
+                    progressBar.style.width = '100%';
+                    progressText.textContent = '100%';
+                    await new Promise(resolve => setTimeout(resolve, 200));
+
+                    this.initializeTest();
+                    startBtn.disabled = false;
+                    startBtn.innerHTML = originalBtnText;
+                    showScreen('test-screen');
+
+                    console.log('Parallel loading complete: All mondai ready');
+                    return;
+                }
+
+                // BATCHED INITIAL LOADING: Load initialBatchSize chunks before showing test
+                // For vocab/grammar in full exam: load 2 chunks (4 mondai) in parallel first
+                console.log(`Initial batch loading: ${initialBatchSize} chunks before showing test`);
+
+                const initialChunks = Math.min(initialBatchSize, totalChunks);
+                const initialPromises = [];
+
+                for (let chunkIndex = 0; chunkIndex < initialChunks; chunkIndex++) {
+                    initialPromises.push(
+                        Api.generateMondaiChunk(
+                            State.examSpec,
+                            mode,
+                            0, // groupIndex
+                            chunkIndex,
+                            chunkSize,
+                            [], // No previous context for parallel initial batch
+                            llmProvider,
+                            targetModel
+                        ).then(result => ({ chunkIndex, result }))
+                            .catch(err => ({ chunkIndex, error: err }))
+                    );
+                }
+
+                // Wait for initial batch to complete
+                const initialResults = await Promise.all(initialPromises);
+                initialResults.sort((a, b) => a.chunkIndex - b.chunkIndex);
+
+                for (const { chunkIndex, result, error } of initialResults) {
+                    if (result) {
+                        if (result.meta && !State.test.meta) {
+                            State.test.meta = result.meta;
+                        }
+                        firstGroupResult.mondai.push(...result.mondai);
+                    } else if (error) {
+                        console.error(`Initial chunk ${chunkIndex} failed:`, error);
+                    }
+                }
+
+                // Update progress
+                generatedMondai = firstGroupResult.mondai.length;
+                const progress = Math.min(90, Math.round((generatedMondai / totalMondai) * 95));
+                progressBar.style.width = `${progress}%`;
+                progressText.textContent = `${progress}%`;
+
+                // Initialize with initial batch data
+                State.test.groups = [firstGroupResult];
                 State.answers = {};
                 State.currentGroupIndex = 0;
                 State.currentMondaiIndex = 0;
 
-                // Complete progress for first group
+                // Stop simulated progress and complete to 100%
                 clearInterval(progressInterval);
+                progressBar.style.width = '100%';
+                progressText.textContent = '100%';
+                await new Promise(resolve => setTimeout(resolve, 200));
+
+                this.initializeTest();
+                startBtn.disabled = false;
+                startBtn.innerHTML = originalBtnText;
+                showScreen('test-screen');
+
+                console.log(`Initial batch complete: ${firstGroupResult.mondai.length} mondai ready`);
+
+                // Continue loading remaining chunks in background
+                if (initialChunks < totalChunks) {
+                    this.loadRemainingChunksInBackground(
+                        firstGroupResult,
+                        initialChunks,
+                        totalChunks,
+                        [...firstGroupResult.mondai], // Pass context
+                        llmProvider,
+                        targetModel,
+                        concurrency
+                    );
+                }
+
+                // Fallback: if first chunk didn't work, use full result
+                State.test.groups = [firstGroupResult];
+                State.answers = {};
+                State.currentGroupIndex = 0;
+                State.currentMondaiIndex = 0;
+
                 progressBar.style.width = '100%';
                 progressText.textContent = '100%';
 
                 await new Promise(resolve => setTimeout(resolve, 300));
 
                 this.initializeTest();
+
+                // Re-enable start button
+                startBtn.disabled = false;
+                startBtn.innerHTML = originalBtnText;
+
                 showScreen('test-screen');
 
                 // Start loading remaining groups in background
-                this.loadRemainingGroupsInBackground(llmProvider);
+                this.loadRemainingGroupsInBackground(llmProvider, targetModel, concurrency);
 
             } catch (err) {
                 clearInterval(progressInterval);
                 progressBar.style.width = '0%';
                 console.error('Start test error:', err);
                 showToast('Không thể tạo đề thi: ' + err.message, 'error');
+
+                // Re-enable start button
+                startBtn.disabled = false;
+                startBtn.innerHTML = originalBtnText;
+
                 showScreen('home-screen');
             }
         },
 
-        async loadRemainingGroupsInBackground(llmProvider) {
-            const totalGroups = State.examSpec.groups.length;
+        async loadRemainingChunksInBackground(groupResult, startChunkIndex, totalChunks, previousMondai, llmProvider, targetModel = null, concurrency = 3) {
+            // STREAM C START: Fire off remaining groups (Listening, etc.) IMMEDIATELY
+            // Do not await this. Let it run in parallel with the current group loading.
+            console.log('Starting Stream C: Loading remaining groups (Listening) in background...');
+            this.loadRemainingGroupsInBackground(llmProvider, targetModel, concurrency);
 
-            for (let i = 1; i < totalGroups; i++) {
-                this.loadingGroupIndex = i;
-                try {
-                    console.log(`Background loading group ${i + 1}/${totalGroups}...`);
-                    const groupResult = await Api.generateGroup(State.examSpec, State.currentMode, i, llmProvider);
-                    State.test.groups.push(groupResult);
-                    console.log(`Group ${i + 1} loaded successfully`);
-                } catch (err) {
-                    console.error(`Failed to load group ${i + 1}:`, err);
-                    // Store error for handling when user reaches this group
-                    this.pendingGroups[i] = { error: err.message };
-                }
+            // STREAM A + B START: Load current group chunks
+            const chunkSize = 2; // Match startTest chunk size
+            const batchSize = concurrency; // Dynamic batch size
+
+            // Create batches of chunks to load
+            const chunksToLoad = [];
+            for (let i = startChunkIndex; i < totalChunks; i++) {
+                chunksToLoad.push(i);
             }
-            this.loadingGroupIndex = -1; // Done loading
-            console.log('All groups loaded');
+
+            console.log(`Stream A/B Active: Loading ${chunksToLoad.length} chunks for current group...`);
+
+            // Process batches for current group
+            while (chunksToLoad.length > 0) {
+                const batch = chunksToLoad.splice(0, batchSize);
+                const promises = batch.map(chunkIndex => {
+                    return Api.generateMondaiChunk(
+                        State.examSpec,
+                        State.currentMode,
+                        0, // groupIndex
+                        chunkIndex,
+                        chunkSize,
+                        previousMondai,
+                        llmProvider,
+                        targetModel
+                    ).then(result => ({ chunkIndex, result }))
+                        .catch(err => ({ chunkIndex, error: err }));
+                });
+
+                // Wait for batch
+                const results = await Promise.all(promises);
+                results.sort((a, b) => a.chunkIndex - b.chunkIndex);
+
+                for (const { chunkIndex, result, error } of results) {
+                    if (result) {
+                        groupResult.mondai.push(...result.mondai);
+                        // Optional: Notify UI update here if we want real-time render
+                    }
+                }
+                previousMondai = [...groupResult.mondai];
+
+                // Update navigation buttons after each batch
+                this.updateNavigationButtons();
+            }
+            console.log('Stream A/B Complete: First group fully loaded.');
         },
+
+        async loadRemainingGroupsInBackground(llmProvider, targetModel = null, concurrency = 3) {
+            const totalGroups = State.examSpec.groups.length;
+            const chunkSize = 2;
+
+            // Create promises for ALL remaining groups to run in parallel
+            const groupPromises = [];
+
+            for (let groupIndex = 1; groupIndex < totalGroups; groupIndex++) {
+                groupPromises.push((async () => {
+                    this.loadingGroupIndex = groupIndex;
+                    const group = State.examSpec.groups[groupIndex];
+                    const totalChunks = Math.ceil(group.mondai.length / chunkSize);
+
+                    const groupResult = {
+                        group_id: group.group_id,
+                        title_vi: group.title_vi,
+                        mondai: []
+                    };
+                    State.test.groups[groupIndex] = groupResult; // Pre-allocate slot
+
+                    let previousMondai = [];
+
+                    try {
+                        // Load chunks for this group (also parallel batched)
+                        const chunks = [];
+                        for (let i = 0; i < totalChunks; i++) chunks.push(i);
+                        const batchSize = concurrency; // Use dynamic concurrency (req 4 for 2.5-pro)
+
+                        while (chunks.length > 0) {
+                            const batch = chunks.splice(0, batchSize);
+                            await Promise.all(batch.map(async (chunkIndex) => {
+                                const chunkResult = await Api.generateMondaiChunk(
+                                    State.examSpec,
+                                    State.currentMode,
+                                    groupIndex,
+                                    chunkIndex,
+                                    chunkSize,
+                                    previousMondai,
+                                    llmProvider,
+                                    targetModel
+                                );
+                                // Note: push order might be mixed within batch, but sorting ideally happens 
+                                // if we stored by index. For simplicity in this stream, simple push is used 
+                                // assuming independence or acceptable minor reorder. 
+                                // Ideally we should use same sort logic as above but let's keep it fast.
+                                groupResult.mondai.push(...chunkResult.mondai);
+
+                                // Update navigation buttons after each chunk
+                                TestUI.updateNavigationButtons();
+                            }));
+                            previousMondai = [...groupResult.mondai];
+                        }
+
+                        console.log(`Stream C Update: Group ${groupIndex + 1} (${group.title_vi}) fully loaded`);
+                    } catch (err) {
+                        console.error(`Stream C Error: Failed to load group ${groupIndex + 1}:`, err);
+                        this.pendingGroups[groupIndex] = { error: err.message };
+                    }
+                })());
+            }
+
+            await Promise.all(groupPromises);
+            this.loadingGroupIndex = -1;
+            console.log('Stream C Complete: All groups loaded');
+        },
+
 
         isGroupReady(groupIndex) {
             return State.test.groups[groupIndex] !== undefined;
@@ -911,17 +1689,19 @@
 
         simulateProgress(bar, text) {
             let progress = 0;
-            return setInterval(() => {
-                // Fast progress to show activity - completes quickly
-                let increment = 0;
-                if (progress < 70) increment = 5;       // Fast to 70%
-                else if (progress < 90) increment = 2;   // Slower to 90%
-                else if (progress < 98) increment = 0.5; // Very slow at end
+            const startTime = Date.now();
+            const targetDuration = 25000; // 25 seconds to reach 98%
 
-                progress = Math.min(progress + increment, 98);
+            return setInterval(() => {
+                const elapsed = Date.now() - startTime;
+                // Ease-out curve: fast at start, slow near end
+                // Reaches 98% at ~25 seconds, then stops
+                const targetProgress = 98 * (1 - Math.pow(1 - Math.min(elapsed / targetDuration, 1), 2));
+                progress = Math.min(Math.round(targetProgress), 98);
+
                 bar.style.width = `${progress}%`;
-                text.textContent = `${Math.round(progress)}%`;
-            }, 100); // Faster interval - 100ms instead of 200ms
+                text.textContent = `${progress}%`;
+            }, 200);
         },
 
         collectUserHistory() {
@@ -993,27 +1773,67 @@
             const isJapanese = language === 'ja-JP';
 
             // Update navigation
+            // globalIndex is based on State.test.groups (generated mondai)
             const globalIndex = this.getGlobalMondaiIndex();
-            const totalMondai = this.getTotalMondaiCount();
 
-            $('#mondai-current').textContent = mondai.mondai_id;
+            // Get current group from GENERATED test (for position within loaded mondai)
+            const currentGroup = State.test.groups[State.currentGroupIndex];
+            if (!currentGroup) return;
+
+            // Calculate position within current group using GENERATED test
+            let firstMondaiOfGroup = 0;
+            for (let i = 0; i < State.currentGroupIndex; i++) {
+                if (State.test.groups[i]) {
+                    firstMondaiOfGroup += State.test.groups[i].mondai.length;
+                }
+            }
+            const mondaiPosInGroup = globalIndex - firstMondaiOfGroup + 1;
+
+            // Total uses EXAM SPEC for the full intended count
+            const currentGroupSpec = State.examSpec.groups[State.currentGroupIndex];
+            const totalMondaiInGroup = currentGroupSpec ? currentGroupSpec.mondai.length : currentGroup.mondai.length;
+
+            $('#mondai-current').textContent = Math.min(mondaiPosInGroup, totalMondaiInGroup); // Cap at total
+            $('#mondai-total').textContent = totalMondaiInGroup;
+
+            // Calculate total mondai from exam spec for navigation buttons
+            const totalMondaiFromSpec = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
+            // Block navigation to unloaded mondai
+            const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
             $('#btn-prev-mondai').disabled = globalIndex === 0;
-            $('#btn-next-mondai').disabled = globalIndex === totalMondai - 1;
+
+            // Soft disable for Next button if loading (allow click for toast)
+            const btnNext = $('#btn-next-mondai');
+            const isLast = globalIndex === totalMondaiFromSpec - 1;
+
+            if (isLast) {
+                btnNext.disabled = true;
+                btnNext.classList.remove('btn-loading-wait');
+            } else if (!nextMondaiLoaded) {
+                btnNext.disabled = false; // Clickable
+                btnNext.classList.add('btn-loading-wait'); // Visual only
+            } else {
+                btnNext.disabled = false;
+                btnNext.classList.remove('btn-loading-wait');
+            }
 
             // Update header
             $('#mondai-title').textContent = mondai.title_vi;
             $('#mondai-instructions').textContent = mondai.instructions_vi || '';
 
-            // Render passage if exists
+            // Render passage if exists (with zoom controls)
             const passageContainer = $('#passage-container');
             const passageText = $('#passage-text');
 
-            if (mondai.passage?.text) {
-                passageContainer.classList.remove('hidden');
-                passageText.textContent = mondai.passage.text;
-                passageText.className = `passage-text ${isJapanese ? '' : 'zh'}`;
-            } else {
-                passageContainer.classList.add('hidden');
+            if (passageContainer) {
+                if (mondai.passage?.text) {
+                    passageContainer.classList.remove('hidden');
+                    passageText.textContent = mondai.passage.text;
+                    passageText.className = `passage-text ${isJapanese ? '' : 'zh'}`;
+                } else {
+                    passageContainer.classList.add('hidden');
+                    passageText.textContent = '';
+                }
             }
 
             // Render audio player for listening
@@ -1045,6 +1865,26 @@
 
             // Render question dots
             this.renderQuestionDots(mondai.items);
+
+            // Update submit button text to clarify what is being submitted
+            const submitBtn = $('#btn-submit-group');
+            if (submitBtn) {
+                const currentGroupTitle = this.getGroupLabel(State.currentGroupIndex);
+                const isLastGroup = State.currentGroupIndex === State.examSpec.groups.length - 1;
+
+                // Only update text if not currently submitting/loading
+                if (!submitBtn.disabled || submitBtn.textContent.includes('phần')) {
+                    if (isLastGroup) {
+                        submitBtn.innerHTML = '<span class="btn-icon"><i class="fa-solid fa-flag-checkered"></i></span> Nộp bài thi';
+                        submitBtn.classList.remove('btn-secondary');
+                        submitBtn.classList.add('btn-primary');
+                    } else {
+                        submitBtn.innerHTML = `Nộp phần ${currentGroupTitle}`;
+                        submitBtn.classList.remove('btn-primary');
+                        submitBtn.classList.add('btn-secondary');
+                    }
+                }
+            }
         },
 
         updateAudioButton(state) {
@@ -1066,7 +1906,16 @@
             const btn = $('#btn-play-audio');
             if (!btn) return;
 
-            // HTML5 Audio Handle
+            // Streaming TTS Handle (check first since it uses the same State.ttsAudio)
+            if (TTSManager.isPlaying || TTSManager.isPaused) {
+                if (State.ttsAudio && !State.ttsAudio.ended) {
+                    const isNowPlaying = TTSManager.togglePause();
+                    this.updateAudioButton(isNowPlaying ? 'playing' : 'paused');
+                    return;
+                }
+            }
+
+            // HTML5 Audio Handle (non-streaming)
             if (State.ttsAudio && State.ttsAudio.src && !State.ttsAudio.error) {
                 if (!State.ttsAudio.ended) {
                     if (State.ttsAudio.paused) {
@@ -1132,6 +1981,57 @@
                 }
             }
             return null;
+        },
+
+        // Check if a mondai at globalIndex has been loaded
+        isMondaiLoaded(globalIndex) {
+            if (globalIndex < 0) return false;
+            let idx = 0;
+            for (const group of State.test.groups) {
+                if (!group || !group.mondai) continue; // Group not loaded yet
+                for (const mondai of group.mondai) {
+                    if (idx === globalIndex) return true;
+                    idx++;
+                }
+            }
+            return false;
+        },
+
+        // Update navigation buttons without re-rendering (for background loading)
+        updateNavigationButtons() {
+            if (!State.test || !State.examSpec) return;
+
+            const globalIndex = this.getGlobalMondaiIndex();
+            const totalMondaiFromSpec = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
+            const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
+            const btnNext = $('#btn-next-mondai');
+            const isLast = globalIndex === totalMondaiFromSpec - 1;
+
+            if (isLast) {
+                btnNext.disabled = true;
+                btnNext.classList.remove('btn-loading-wait');
+            } else if (!nextMondaiLoaded) {
+                btnNext.disabled = false;
+                btnNext.classList.add('btn-loading-wait');
+            } else {
+                btnNext.disabled = false;
+                btnNext.classList.remove('btn-loading-wait');
+            }
+
+            // Update loading indicator
+            const loadingIndicator = $('#nav-loading-indicator');
+            if (loadingIndicator) {
+                if (!nextMondaiLoaded && globalIndex < totalMondaiFromSpec - 1) {
+                    loadingIndicator.classList.remove('hidden');
+                } else {
+                    loadingIndicator.classList.add('hidden');
+                }
+            }
+
+            // Notify user if button just became enabled
+            if (wasDisabled && !$('#btn-next-mondai').disabled) {
+                // Toast is optional - can be noisy, so just update button silently
+            }
         },
 
         getGlobalMondaiIndex() {
@@ -1209,6 +2109,12 @@
             const total = this.getTotalMondaiCount();
             const newIndex = State.currentMondaiIndex + direction;
 
+            // Block forward navigation to unloaded mondai
+            if (direction > 0 && !this.isMondaiLoaded(newIndex)) {
+                showToast('Vui lòng đợi chút, vẫn đang tạo đề...', 'info');
+                return;
+            }
+
             if (newIndex >= 0 && newIndex < total) {
                 // Check if crossing group boundary
                 const oldGroupIndex = this.getGroupIndexForMondai(State.currentMondaiIndex);
@@ -1246,7 +2152,21 @@
             return 0;
         },
 
+        getFirstMondaiIndexOfGroup(groupIndex) {
+            let idx = 0;
+            for (let gi = 0; gi < groupIndex; gi++) {
+                idx += State.test.groups[gi].mondai.length;
+            }
+            return idx;
+        },
+
         async moveToNextGroup() {
+            // Prevent duplicate submissions
+            if (this.isSubmitting) return;
+
+            const submitBtn = $('#btn-submit-group');
+            const originalText = submitBtn.textContent;
+
             const currentGroupIdx = State.currentGroupIndex;
             const nextGroupIdx = currentGroupIdx + 1;
             const totalGroups = State.examSpec.groups.length;
@@ -1254,13 +2174,19 @@
             if (nextGroupIdx < totalGroups) {
                 // Check if next group is ready
                 if (!this.isGroupReady(nextGroupIdx)) {
-                    // Show loading indicator while waiting for group
+                    // Disable button and show loading state
+                    submitBtn.disabled = true;
+                    submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang tải...';
                     showToast('Đang tải phần tiếp theo...', 'info');
 
                     // Wait for group to load (poll every 500ms)
                     while (!this.isGroupReady(nextGroupIdx) && this.loadingGroupIndex >= 0) {
                         await new Promise(resolve => setTimeout(resolve, 500));
                     }
+
+                    // Re-enable button after loading
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = originalText;
 
                     // Check if group failed to load
                     if (this.pendingGroups[nextGroupIdx]?.error) {
@@ -1288,10 +2214,134 @@
                 this.renderCurrentMondai();
                 window.scrollTo({ top: 0 });
             } else {
-                this.submitTest();
+                // Last group - set submitting state and show grading options
+                this.isSubmitting = true;
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang xử lý...';
+
+                try {
+                    await this.confirmSubmitTest();
+                } finally {
+                    // Re-enable on cancel or error (not on successful submit)
+                    if (State.test) { // If still on test screen
+                        this.isSubmitting = false;
+                        submitBtn.disabled = false;
+                        submitBtn.textContent = 'Nộp bài';
+                    }
+                }
             }
         },
 
+
+        // Show grading options modal
+        showGradingOptions() {
+            return new Promise((resolve) => {
+                const modal = $('#grading-modal');
+                const btnQuick = $('#btn-grade-quick');
+                const btnAI = $('#btn-grade-ai');
+                const btnCancel = $('#btn-grade-cancel');
+
+                modal.classList.remove('hidden');
+
+                const cleanup = () => {
+                    modal.classList.add('hidden');
+                    btnQuick.onclick = null;
+                    btnAI.onclick = null;
+                    btnCancel.onclick = null;
+                };
+
+                btnQuick.onclick = () => {
+                    cleanup();
+                    resolve('quick');
+                };
+
+                btnAI.onclick = () => {
+                    cleanup();
+                    resolve('ai');
+                };
+
+                btnCancel.onclick = () => {
+                    cleanup();
+                    resolve(null);
+                };
+            });
+        },
+
+        // Show grading options instead of simple confirm
+        async confirmSubmitTest() {
+            const choice = await this.showGradingOptions();
+
+            if (choice === 'quick') {
+                await this.quickGradeTest();
+            } else if (choice === 'ai') {
+                await this.submitTest();
+            }
+            // null = cancelled, do nothing
+        },
+
+        // Quick grading without AI - instant results
+        async quickGradeTest() {
+            Timer.stopAll();
+            TTSManager.stop();
+
+            // Calculate scores directly
+            const questionsWithAnswers = [];
+            let correctCount = 0;
+            let totalCount = 0;
+            const scoreByGroup = {};
+
+            State.test.groups.forEach(group => {
+                let groupCorrect = 0;
+                group.mondai.forEach(mondai => {
+                    mondai.items.forEach(item => {
+                        totalCount++;
+                        const userAnswer = State.answers[item.id];
+                        const isCorrect = userAnswer === item.answer_index;
+
+                        if (isCorrect) {
+                            correctCount++;
+                            groupCorrect++;
+                        }
+
+                        questionsWithAnswers.push({
+                            id: item.id,
+                            is_correct: isCorrect,
+                            user_answer_index: userAnswer !== undefined ? userAnswer : null,
+                            correct_index: item.answer_index,
+                            // Use existing explain_brief from question generation
+                            key_point_vi: item.explain_brief || '',
+                            tags: item.tags
+                        });
+                    });
+                });
+                scoreByGroup[group.group_id] = groupCorrect;
+            });
+
+            // Build feedback object compatible with ReviewUI
+            const feedback = {
+                score_summary: {
+                    total_score: correctCount,
+                    max_score: totalCount,
+                    score_by_group: scoreByGroup,
+                    weak_tags: [], // Could calculate from incorrect answers
+                    recommendation_vi: correctCount >= totalCount * 0.7
+                        ? 'Kết quả tốt! Tiếp tục luyện tập để cải thiện.'
+                        : 'Cần ôn tập thêm các phần còn yếu.'
+                },
+                by_question: questionsWithAnswers,
+                grading_mode: 'quick' // Flag for UI to know this was quick grading
+            };
+
+            State.feedback = feedback;
+
+            // Save to history (simplified)
+            await this.saveToHistory(feedback);
+
+            ReviewUI.render();
+            showScreen('review-screen');
+        },
+
+        // AI grading with detailed feedback
         async submitTest() {
             Timer.stopAll();
             TTSManager.stop();
@@ -1300,10 +2350,28 @@
             $('#loading-text').textContent = 'Đang chấm điểm...';
             $('#loading-hint').textContent = 'AI đang phân tích và đánh giá câu trả lời của bạn...';
 
+            // Get progress bar elements
+            const progressBar = $('#loading-progress-inner');
+            const progressText = $('#loading-progress-text');
+
+            // Reset progress
+            if (progressBar) progressBar.style.width = '0%';
+            if (progressText) progressText.textContent = '0%';
+
+            // Start simulated progress (same as question generation)
+            const progressInterval = this.simulateProgress(progressBar, progressText);
+
             try {
                 const llmProvider = $('#llm-provider').value;
                 const feedback = await Api.gradeTest(State.test, State.answers, llmProvider);
+                feedback.grading_mode = 'ai'; // Flag for UI
                 State.feedback = feedback;
+
+                // Stop progress and complete to 100%
+                clearInterval(progressInterval);
+                if (progressBar) progressBar.style.width = '100%';
+                if (progressText) progressText.textContent = '100%';
+                await new Promise(resolve => setTimeout(resolve, 300));
 
                 // Save to history
                 await this.saveToHistory(feedback);
@@ -1311,10 +2379,60 @@
                 ReviewUI.render();
                 showScreen('review-screen');
             } catch (err) {
+                clearInterval(progressInterval);
                 console.error('Grade test error:', err);
                 showToast('Không thể chấm điểm: ' + err.message, 'error');
                 showScreen('home-screen');
             }
+        },
+
+        // Quit test without grading
+        async quitTest() {
+            const confirmed = await this.showConfirm(
+                'Thoát bài thi?',
+                'Bạn có muốn thoát? Bài thi sẽ KHÔNG được chấm điểm và tiến độ sẽ bị mất.'
+            );
+            if (confirmed) {
+                Timer.stopAll();
+                TTSManager.stop();
+                State.test = null;
+                State.answers = {};
+                State.currentMondaiIndex = 0;
+                State.currentGroupIndex = 0;
+                showScreen('home-screen');
+                showToast('Đã thoát bài thi', 'info');
+            }
+        },
+
+        // Generic confirmation dialog
+        showConfirm(title, message) {
+            return new Promise((resolve) => {
+                const modal = $('#confirm-modal');
+                const titleEl = $('#confirm-title');
+                const messageEl = $('#confirm-message');
+                const btnYes = $('#btn-confirm-yes');
+                const btnNo = $('#btn-confirm-no');
+
+                titleEl.textContent = title;
+                messageEl.textContent = message;
+                modal.classList.remove('hidden');
+
+                const cleanup = () => {
+                    modal.classList.add('hidden');
+                    btnYes.onclick = null;
+                    btnNo.onclick = null;
+                };
+
+                btnYes.onclick = () => {
+                    cleanup();
+                    resolve(true);
+                };
+
+                btnNo.onclick = () => {
+                    cleanup();
+                    resolve(false);
+                };
+            });
         },
 
         async saveToHistory(feedback) {
@@ -1327,32 +2445,73 @@
                 date: new Date().toISOString(),
                 exam: State.currentExam,
                 mode: State.currentMode,
-                score: feedback.summary.score_total,
-                maxScore: feedback.summary.score_max,
-                weakTags: feedback.summary.weak_tags
+                score: feedback.score_summary?.total_score ?? feedback.summary?.score_total,
+                maxScore: feedback.score_summary?.max_score ?? feedback.summary?.score_max,
+                weakTags: feedback.score_summary?.weak_tags ?? feedback.summary?.weak_tags
             });
 
-            // Add mistakes to mistake book
+            // Add mistakes to mistake book (with optimized context)
             const incorrectItems = feedback.by_question.filter(q => !q.is_correct);
             for (const item of incorrectItems) {
-                // Find the question in test
+                // Find the question and parent mondai in test
                 let questionData = null;
+                let parentMondai = null;
+
                 for (const group of State.test.groups) {
                     for (const mondai of group.mondai) {
                         const found = mondai.items.find(q => q.id === item.id);
                         if (found) {
                             questionData = found;
+                            parentMondai = mondai;
                             break;
                         }
                     }
+                    if (questionData) break;
                 }
 
                 if (questionData) {
+                    // Build optimized question context (minimal storage)
+                    const optimizedQuestion = {
+                        id: questionData.id,
+                        type: questionData.type,
+                        prompt: questionData.prompt,
+                        choices: questionData.choices,
+                        answer_index: questionData.answer_index,
+                        explain_brief: questionData.explain_brief,
+                        tags: questionData.tags
+                    };
+
+                    // Add context text (passage or script) - truncated to save space
+                    let contextText = null;
+                    const MAX_CONTEXT_LENGTH = 500;
+
+                    // Check for passage (reading questions)
+                    if (parentMondai?.passage?.text) {
+                        contextText = parentMondai.passage.text.length > MAX_CONTEXT_LENGTH
+                            ? parentMondai.passage.text.substring(0, MAX_CONTEXT_LENGTH) + '...'
+                            : parentMondai.passage.text;
+                    }
+                    // Check for audio script (listening questions)
+                    else if (questionData.media?.script_text) {
+                        contextText = questionData.media.script_text.length > MAX_CONTEXT_LENGTH
+                            ? questionData.media.script_text.substring(0, MAX_CONTEXT_LENGTH) + '...'
+                            : questionData.media.script_text;
+                    }
+
+                    if (contextText) {
+                        optimizedQuestion.context = contextText;
+                    }
+
                     State.userData.mistakeBook.push({
                         date: new Date().toISOString(),
                         exam: State.currentExam,
-                        question: questionData,
-                        feedback: item,
+                        question: optimizedQuestion,
+                        feedback: {
+                            is_correct: item.is_correct,
+                            why_wrong_vi: item.why_wrong_vi,
+                            key_point_vi: item.key_point_vi,
+                            mini_lesson_vi: item.mini_lesson_vi
+                        },
                         userAnswer: State.answers[item.id]
                     });
                 }
@@ -1446,9 +2605,11 @@
             const test = State.test;
 
             // Score circle
-            const scoreValue = feedback.summary.score_total;
-            const scoreMax = feedback.summary.score_max || this.getTotalQuestions();
-            const percentage = (scoreValue / scoreMax) * 100;
+            // Schema update: summary -> score_summary, score_total -> total_score, score_max -> max_score
+            const scoreSummary = feedback.score_summary || feedback.summary || {};
+            const scoreValue = scoreSummary.total_score !== undefined ? scoreSummary.total_score : (scoreSummary.score_total || 0);
+            const scoreMax = scoreSummary.max_score !== undefined ? scoreSummary.max_score : (scoreSummary.score_max || this.getTotalQuestions());
+            const percentage = scoreMax > 0 ? (scoreValue / scoreMax) * 100 : 0;
 
             $('#score-value').textContent = scoreValue;
             $('#score-max').textContent = `/${scoreMax}`;
@@ -1473,7 +2634,7 @@
             }
 
             // Score by group
-            const groupsHtml = Object.entries(feedback.summary.score_by_group || {})
+            const groupsHtml = Object.entries(scoreSummary.score_by_group || {})
                 .map(([groupId, score]) => {
                     const group = test.groups.find(g => g.group_id === groupId);
                     const label = group?.title_vi || groupId;
@@ -1486,10 +2647,10 @@
                 }).join('');
 
             $('#score-by-group').innerHTML = groupsHtml;
-            $('#recommendation').textContent = feedback.summary.recommendation_vi || '';
+            $('#recommendation').textContent = scoreSummary.recommendation_vi || '';
 
             // Weak tags
-            const tagsHtml = (feedback.summary.weak_tags || [])
+            const tagsHtml = (scoreSummary.weak_tags || [])
                 .map(tag => `<span class="tag">${tag}</span>`)
                 .join('');
             $('#weak-tags').innerHTML = tagsHtml || '<span style="color: var(--text-muted)">Không có</span>';
@@ -1525,20 +2686,26 @@
           <div class="review-item ${item.is_correct ? '' : 'incorrect'}">
             <div class="review-item-header">
               <span class="review-item-id">${item.id}</span>
-              <span class="review-status ${item.is_correct ? 'correct' : 'incorrect'}">
-                ${item.is_correct ? '✓ Đúng' : '✗ Sai'}
-              </span>
+              <div style="display: flex; gap: 8px; align-items: center;">
+                <span class="review-status ${item.is_correct ? 'correct' : 'incorrect'}">
+                    ${item.is_correct ? '✓ Đúng' : '✗ Sai'}
+                </span>
+                <button onclick="ReviewUI.saveToNotebook('${item.id}')" class="btn btn-xs btn-outline" style="border: 1px solid var(--border); padding: 2px 8px; border-radius: 4px;" title="Lưu vào kho">
+                    <i class="fa-solid fa-bookmark"></i>
+                </button>
+              </div>
             </div>
             <div class="review-prompt ${isJapanese ? '' : 'zh'}">${TestUI.escapeHtml(questionData.prompt)}</div>
             
             <div class="choices" style="margin-top: 12px;">
               ${questionData.choices.map((choice, idx) => {
-                    let classes = 'choice ' + (isJapanese ? '' : 'zh');
+                    let classes = 'choice review-choice ' + (isJapanese ? '' : 'zh');
+                    if (idx === userAnswer) classes += ' user-selected';
                     if (idx === correctAnswer) classes += ' correct-answer';
                     if (idx === userAnswer && !item.is_correct) classes += ' wrong-answer';
                     return `
-                  <div class="${classes}" style="cursor: default; ${idx === correctAnswer ? 'border-color: var(--success);' : ''} ${idx === userAnswer && !item.is_correct ? 'border-color: var(--error);' : ''}">
-                    <span class="choice-letter" style="${idx === correctAnswer ? 'background: var(--success);' : ''}">${String.fromCharCode(65 + idx)}</span>
+                  <div class="${classes}">
+                    <span class="choice-letter">${String.fromCharCode(65 + idx)}</span>
                     <span class="choice-text">${TestUI.escapeHtml(choice)}</span>
                   </div>
                 `;
@@ -1575,10 +2742,14 @@
             $('#review-list').innerHTML = html;
         },
 
-        saveGrammar(index) {
+        saveGrammar(questionId) {
             const feedback = State.feedback;
-            const item = feedback.by_question[index];
-            if (!item) return;
+            // Find the item by question ID
+            const item = feedback.by_question.find(q => q.id === questionId);
+            if (!item) {
+                showToast('Không tìm thấy dữ liệu câu hỏi', 'error');
+                return;
+            }
 
             const success = GrammarBook.save(
                 item.key_point_vi,
@@ -1591,6 +2762,44 @@
                 showToast('Đã lưu ngữ pháp!', 'success');
             } else {
                 showToast('Ngữ pháp này đã có trong sổ tay.', 'error');
+            }
+        },
+
+        async saveToNotebook(questionId) {
+            // Find question data by searching through test groups
+            let question = null;
+            for (const group of State.test.groups) {
+                for (const mondai of group.mondai) {
+                    const found = mondai.items.find(q => q.id === questionId);
+                    if (found) {
+                        question = found;
+                        break;
+                    }
+                }
+                if (question) break;
+            }
+
+            if (!question) {
+                showToast('Không tìm thấy dữ liệu câu hỏi', 'error');
+                return;
+            }
+
+            const note = prompt('Nhập ghi chú (tùy chọn):', '');
+            if (note === null) return; // Cancelled
+
+            try {
+                // Determine tags based on question type
+                const tags = [];
+                if (question.type) tags.push(question.type);
+                if (State.currentExam) tags.push(State.currentExam);
+
+                const result = await Api.saveToNotebook(question, note, tags);
+                if (result.success) {
+                    showToast('Đã lưu vào kho kiến thức!', 'success');
+                }
+            } catch (err) {
+                console.error('Save notebook error:', err);
+                showToast('Lỗi lưu câu hỏi: ' + err.message, 'error');
             }
         },
 
@@ -1667,25 +2876,74 @@
 
             emptyState.classList.add('hidden');
 
-            const html = mistakes.slice().reverse().slice(0, 50).map(item => {
+            const html = mistakes.slice().reverse().slice(0, 50).map((item, idx) => {
+                const realIdx = mistakes.length - 1 - idx;
                 const date = new Date(item.date).toLocaleDateString('vi-VN');
                 const question = item.question;
                 const feedback = item.feedback;
+                const userAnswer = item.userAnswer;
+                const correctAnswer = question.answer_index;
 
                 return `
-          <div class="review-item incorrect">
-            <div class="review-item-header">
-              <span class="review-item-id">${item.exam} - ${date}</span>
+          <div class="mistake-item" data-idx="${realIdx}">
+            <div class="mistake-header" onclick="MistakesUI.toggle(${realIdx})">
+              <span class="mistake-meta">${item.exam.toUpperCase()} - ${date}</span>
+              <i class="fa-solid fa-chevron-down expand-icon"></i>
             </div>
-            <div class="review-prompt">${TestUI.escapeHtml(question.prompt)}</div>
-            ${feedback.key_point_vi ? `<div class="review-feedback"><p>${feedback.key_point_vi}</p></div>` : ''}
+            <div class="mistake-prompt">${TestUI.escapeHtml(question.prompt)}</div>
+            
+            <div class="mistake-detail hidden">
+              <div class="choices" style="margin-top: 12px;">
+                ${question.choices.map((choice, cIdx) => {
+                    let classes = 'choice review-choice';
+                    if (cIdx === userAnswer) classes += ' user-selected';
+                    if (cIdx === correctAnswer) classes += ' correct-answer';
+                    if (cIdx === userAnswer && cIdx !== correctAnswer) classes += ' wrong-answer';
+                    return `
+                    <div class="${classes}">
+                      <span class="choice-letter">${String.fromCharCode(65 + cIdx)}</span>
+                      <span class="choice-text">${TestUI.escapeHtml(choice)}</span>
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+              
+              <div class="mistake-feedback">
+                ${feedback.why_wrong_vi ? `<div class="feedback-section"><h4>Tại sao sai:</h4><p>${feedback.why_wrong_vi}</p></div>` : ''}
+                ${feedback.key_point_vi ? `<div class="feedback-section"><h4>Điểm ngữ pháp:</h4><p>${feedback.key_point_vi}</p></div>` : ''}
+                ${feedback.mini_lesson_vi ? `<div class="feedback-section"><h4>Bài học nhỏ:</h4><p>${feedback.mini_lesson_vi}</p></div>` : ''}
+              </div>
+            </div>
           </div>
         `;
             }).join('');
 
             container.innerHTML = html;
+        },
+
+        toggle(idx) {
+            const container = $('#mistakes-list');
+            const item = container.querySelector(`[data-idx="${idx}"]`);
+            const detail = item?.querySelector('.mistake-detail');
+            const icon = item?.querySelector('.expand-icon');
+
+            if (!detail) return;
+
+            const isExpanded = !detail.classList.contains('hidden');
+
+            // Close all others
+            container.querySelectorAll('.mistake-detail').forEach(d => d.classList.add('hidden'));
+            container.querySelectorAll('.expand-icon').forEach(i => i.style.transform = 'rotate(0deg)');
+
+            if (!isExpanded) {
+                detail.classList.remove('hidden');
+                if (icon) icon.style.transform = 'rotate(180deg)';
+            }
         }
     };
+
+    // Expose for onclick handlers
+    window.MistakesUI = MistakesUI;
 
     // ============================================
     // Grammar Book Module
@@ -1832,7 +3090,26 @@
     function initEventHandlers() {
         // Auth
         $('#btn-email-login').addEventListener('click', () => Auth.loginWithEmail());
-        $('#btn-demo-login').addEventListener('click', () => Auth.loginDemo());
+
+        $('#btn-demo-login').addEventListener('click', async (e) => {
+            const btn = e.target.closest('button');
+            if (btn.disabled) return;
+
+            btn.disabled = true;
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang vào...';
+
+            try {
+                await Auth.loginDemo();
+                // Success will change screen, no need to revert
+            } catch (err) {
+                console.error(err);
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+                showToast('Lỗi đăng nhập demo', 'error');
+            }
+        });
+
         $('#btn-logout').addEventListener('click', () => Auth.logout());
 
         // Theme toggle
@@ -1850,9 +3127,7 @@
 
                 // Show section selector when exam is selected
                 const sectionSelector = $('#exam-section-selector');
-                if (sectionSelector) {
-                    sectionSelector.classList.remove('hidden');
-                }
+                // Ensure section selector is visible (though strictly already removed hidden)
             });
         });
 
@@ -1886,6 +3161,21 @@
         $('#btn-show-script')?.addEventListener('click', () => TestUI.toggleScript());
         $('#btn-play-audio')?.addEventListener('click', () => TestUI.handleAudio());
 
+        // Audio Seek & Rewind
+        $('#audio-seek')?.addEventListener('input', (e) => {
+            if (State.ttsAudio && State.ttsAudio.duration) {
+                const pct = parseFloat(e.target.value);
+                State.ttsAudio.currentTime = (pct / 100) * State.ttsAudio.duration;
+            }
+        });
+
+        $('#btn-replay-audio')?.addEventListener('click', () => {
+            if (State.ttsAudio) {
+                State.ttsAudio.currentTime = Math.max(0, State.ttsAudio.currentTime - 5);
+                if (State.ttsAudio.paused) State.ttsAudio.play();
+            }
+        });
+
         // Grammar Book
         $('#btn-grammar')?.addEventListener('click', () => {
             GrammarUI.render();
@@ -1899,6 +3189,7 @@
         $('#btn-next-mondai').addEventListener('click', () => TestUI.navigateMondai(1));
         $('#btn-pause-test').addEventListener('click', () => TestUI.togglePause());
         $('#btn-submit-group').addEventListener('click', () => TestUI.moveToNextGroup());
+        $('#btn-quit-test')?.addEventListener('click', () => TestUI.quitTest());
 
         // Passage controls
         $('#btn-zoom-in').addEventListener('click', () => {

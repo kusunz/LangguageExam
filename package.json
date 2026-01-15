@@ -2,11 +2,9 @@
     "name": "language-exam-monorepo",
     "version": "1.0.0",
     "private": true,
-    "description": "Language Exam Practice App",
+    "description": "Root config for deploying server and web together",
     "scripts": {
-        "build": "cd web && npm install && npm run build",
-        "start": "cd server && npm start",
-        "dev": "cd server && npm start"
+        "start": "node server/server.js"
     },
     "dependencies": {
         "@deepgram/sdk": "^4.11.3",
@@ -18,6 +16,6 @@
         "pg": "^8.16.3"
     },
     "engines": {
-        "node": "22.x"
+        "node": ">=18.0.0"
     }
 }

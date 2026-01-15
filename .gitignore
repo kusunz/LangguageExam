@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+.agent/
 
 # Environment files
 .env
@@ -31,4 +32,6 @@ server/server.log
 # Cache
 .cache/
 *.cache
-.vercel
+
+# Private project notes
+.project-notes.md

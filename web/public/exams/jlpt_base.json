@@ -9,7 +9,7 @@
         "N2",
         "N1"
     ],
-    "default_level": "N2",
+    "default_level": "N5",
     "modes": {
         "basic": {
             "time_scale": 0.3333,
