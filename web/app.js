@@ -1419,7 +1419,7 @@
 
         async loadRemainingChunksInBackground(groupResult, startChunkIndex, totalChunks, previousMondai, llmProvider) {
             const chunkSize = 2; // Match startTest chunk size
-            const batchSize = 2; // Number of concurrent requests
+            const batchSize = 3; // Number of concurrent requests (User requested 3)
 
             // Create batches of chunks to load
             const chunksToLoad = [];
