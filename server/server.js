@@ -422,10 +422,11 @@ async function callOpenAI(messages, options = {}) {
 }
 
 // Gemini model fallback order
+// Gemini model fallback order
 const GEMINI_MODELS = [
-  'gemini-3-pro-preview',
-  'gemini-2.5-pro',
-  'gemini-3-flash-preview'
+  'gemini-2.0-flash-exp',
+  'gemini-1.5-flash',
+  'gemini-1.5-pro'
 ];
 
 async function callGeminiWithModel(prompt, model, options = {}) {

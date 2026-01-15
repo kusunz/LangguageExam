@@ -1369,7 +1369,7 @@
                 let increment = 0;
                 if (progress < 50) increment = 5;
                 else if (progress < 85) increment = 2;
-                else if (progress < 90) increment = 1;
+                else if (progress < 95) increment = 1;
 
                 progress = Math.min(progress + increment, 99);
                 bar.style.width = `${progress}%`;
