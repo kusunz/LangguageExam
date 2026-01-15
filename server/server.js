@@ -794,7 +794,110 @@ app.post('/api/generate-group', authMiddleware, async (req, res) => {
   }
 });
 
-// Grade test
+// Generate a chunk of mondai (2-3 at a time for faster progressive loading)
+app.post('/api/generate-mondai-chunk', authMiddleware, async (req, res) => {
+  try {
+    const { examSpec, mode, groupIndex, chunkIndex, chunkSize = 3, previousMondai = [], provider, model } = req.body;
+    const llmProvider = provider || process.env.DEFAULT_LLM_PROVIDER || 'gemini';
+
+    const group = examSpec.groups[groupIndex];
+    if (!group) {
+      return res.status(400).json({ error: 'Invalid group index' });
+    }
+
+    // Calculate which mondai to generate in this chunk
+    const startMondaiIndex = chunkIndex * chunkSize;
+    const endMondaiIndex = Math.min(startMondaiIndex + chunkSize, group.mondai.length);
+    const mondaiToGenerate = group.mondai.slice(startMondaiIndex, endMondaiIndex);
+
+    if (mondaiToGenerate.length === 0) {
+      return res.json({ mondai: [], isLast: true });
+    }
+
+    const isLast = endMondaiIndex >= group.mondai.length;
+    const isFirst = chunkIndex === 0;
+
+    let result;
+    if (llmProvider === 'openai') {
+      const prompt = buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGenerate, startMondaiIndex, previousMondai);
+      result = await callOpenAI([{ role: 'user', content: prompt }]);
+    } else {
+      const prompt = buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGenerate, startMondaiIndex, previousMondai);
+      result = await callGemini(prompt, {
+        model: model || DEFAULT_GEMINI_MODEL,
+        maxTokens: 8192, // Smaller chunks need less tokens
+        temperature: 0.4,
+        proOnly: true
+      });
+    }
+
+    // Validate mondai items
+    const validatedMondai = [];
+    if (result.mondai && Array.isArray(result.mondai)) {
+      for (const m of result.mondai) {
+        const errors = [];
+        if (!m.mondai_id) errors.push('missing_mondai_id');
+        if (!m.title_vi) errors.push('missing_title_vi');
+        if (!Array.isArray(m.items) || m.items.length === 0) errors.push('missing_items');
+
+        if (errors.length === 0) {
+          validatedMondai.push(m);
+        } else {
+          log('WARN', `Mondai validation issues: ${errors.join(', ')}`);
+        }
+      }
+    }
+
+    // Response with chunk info
+    const response = {
+      mondai: validatedMondai,
+      chunkIndex,
+      isFirst,
+      isLast,
+      totalMondai: group.mondai.length,
+      generatedCount: validatedMondai.length
+    };
+
+    // Include group metadata and meta on first chunk
+    if (isFirst) {
+      response.group_id = group.group_id;
+      response.title_vi = group.title_vi;
+
+      if (groupIndex === 0) {
+        const modeConfig = examSpec.modes[mode];
+        const timeScale = modeConfig.time_scale;
+        response.meta = {
+          exam_id: examSpec.exam_id,
+          level: examSpec.level,
+          language: examSpec.language,
+          mode: mode,
+          seed: Math.random().toString(36).substring(7),
+          generated_at: new Date().toISOString(),
+          providers: { llm: llmProvider, tts_mode: 'auto' },
+          time_limits: {
+            overall_sec: Math.round(examSpec.official_time_limits_sec.overall_time_sec * timeScale),
+            groups: examSpec.official_time_limits_sec.groups.map(g => ({
+              group_id: g.group_id,
+              time_sec: Math.round(g.time_sec * timeScale)
+            }))
+          }
+        };
+      }
+    }
+
+    // Async save generated questions to Knowledge Bank
+    saveQuestionsFromTest({ groups: [{ mondai: validatedMondai }] }).catch(e => console.error('Bank save error chunk:', e));
+
+    log('INFO', `Generated mondai chunk ${chunkIndex + 1} for group ${groupIndex + 1}: ${validatedMondai.length} mondai`);
+    res.json(response);
+  } catch (err) {
+    console.error('Generate mondai chunk error:', err);
+    log('ERROR', 'Generate mondai chunk failed', { error: err.message, stack: err.stack?.substring(0, 500) });
+    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại sau.' });
+  }
+});
+
+
 app.post('/api/grade-test', authMiddleware, async (req, res) => {
   try {
     const { test, answers, provider } = req.body;
@@ -1400,6 +1503,93 @@ Schema:
           "media": {
             "script_text": "<for listening, null otherwise>"
           }
+        }
+      ]
+    }
+  ]
+}
+
+GENERATE JSON NOW:`;
+}
+
+// Build prompt for generating a chunk of mondai (2-3 at a time)
+function buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGenerate, startMondaiIndex, previousMondai = []) {
+  const modeConfig = examSpec.modes[mode];
+  const questionScale = modeConfig.question_scale;
+
+  // Reading type IDs for special handling
+  const readingTypes = ['reading_short', 'reading_mid', 'reading_long', 'reading_compare', 'reading_info'];
+
+  // Current chunk mondai details
+  const mondaiInfo = mondaiToGenerate.map((m, idx) => {
+    const totalQuestions = Math.max(1, Math.round(m.count_official * questionScale));
+    const isReading = m.types.some(t => readingTypes.includes(t));
+    const mondaiNum = startMondaiIndex + idx + 1;
+
+    if (isReading && totalQuestions > 2) {
+      const passageCount = Math.min(2, Math.ceil(totalQuestions / 3));
+      const questionsPerPassage = Math.ceil(totalQuestions / passageCount);
+      return `  ${mondaiNum}. ${m.mondai_id} (${m.title_vi}): ${passageCount} passage(s), ${questionsPerPassage} questions each (total ${totalQuestions}), types: ${m.types.join(', ')}
+    *** Create FEWER passages with MORE questions per passage ***`;
+    }
+
+    return `  ${mondaiNum}. ${m.mondai_id} (${m.title_vi}): ${totalQuestions} questions, types: ${m.types.join(', ')}`;
+  }).join('\n');
+
+  // Context from previously generated mondai (summarized)
+  let contextInfo = '';
+  if (previousMondai.length > 0) {
+    const contextSummary = previousMondai.map(m => {
+      const questionCount = m.items?.length || 0;
+      const sampleTopics = m.items?.slice(0, 2).map(i => i.tags?.[0] || i.type).join(', ') || 'various';
+      return `  - ${m.mondai_id}: ${questionCount} questions about ${sampleTopics}`;
+    }).join('\n');
+    contextInfo = `
+PREVIOUSLY GENERATED MONDAI (maintain consistency, avoid repetition):
+${contextSummary}
+`;
+  }
+
+  return `You are generating a CHUNK of ${examSpec.display_name_vi} practice test questions.
+
+EXAM: ${examSpec.display_name_vi}
+LEVEL: ${examSpec.level}
+LANGUAGE: ${examSpec.language}
+MODE: ${mode} (question_scale: ${questionScale})
+
+GROUP: ${group.group_id} (${group.title_vi})
+CHUNK: Mondai ${startMondaiIndex + 1} to ${startMondaiIndex + mondaiToGenerate.length} of ${group.mondai.length}
+${contextInfo}
+GENERATE THESE MONDAI NOW:
+${mondaiInfo}
+
+CRITICAL RULES:
+1. Generate 100% original questions - NO copy from real exams
+2. Each question: exactly 4 choices, exactly 1 correct answer
+3. Match ${examSpec.level} difficulty precisely
+4. "choices" are full answer texts, NOT letters "A/B/C/D"
+5. Include meaningful tags and brief explanations
+6. For listening: include script_text for TTS
+7. ${previousMondai.length > 0 ? 'AVOID repeating vocabulary/topics from previously generated mondai' : 'This is the first chunk - set a good foundation'}
+
+OUTPUT: Return RAW JSON only (no markdown code blocks):
+{
+  "mondai": [
+    {
+      "mondai_id": "<string>",
+      "title_vi": "<string>",
+      "instructions_vi": "<Vietnamese instructions>",
+      "passage": { "title": "<optional>", "text": "<for reading>" },
+      "items": [
+        {
+          "id": "<unique_id>",
+          "type": "<question_type>",
+          "prompt": "<question in ${examSpec.language}>",
+          "choices": ["<A text>", "<B text>", "<C text>", "<D text>"],
+          "answer_index": 0,
+          "explain_brief": "<brief explanation>",
+          "tags": ["<tag1>", "<tag2>"],
+          "media": { "script_text": "<for listening, null otherwise>" }
         }
       ]
     }

@@ -162,6 +162,13 @@
             });
         },
 
+        async generateMondaiChunk(examSpec, mode, groupIndex, chunkIndex, chunkSize = 3, previousMondai = [], provider) {
+            return this.request('/generate-mondai-chunk', {
+                method: 'POST',
+                body: { examSpec, mode, groupIndex, chunkIndex, chunkSize, previousMondai, provider }
+            });
+        },
+
         async gradeTest(test, answers, provider) {
             return this.request('/grade-test', {
                 method: 'POST',
@@ -1294,8 +1301,6 @@
             progressBar.style.width = '0%';
             progressText.textContent = '0%';
 
-            const progressInterval = this.simulateProgress(progressBar, progressText);
-
             try {
                 // Load exam spec with dynamic level
                 const rawSpec = await ExamLoader.loadSpec(examType, selectedLevel);
@@ -1304,20 +1309,89 @@
                 // Filter by section (pass mode for reading mondai count)
                 State.examSpec = ExamLoader.filterBySection(scaledSpec, State.currentSection, mode);
 
-                // Generate FIRST GROUP only (for quick start)
-                const firstGroupResult = await Api.generateGroup(State.examSpec, mode, 0, llmProvider);
+                // Calculate total mondai for progress tracking
+                const totalMondai = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
+                const chunkSize = 3;
+                let generatedMondai = 0;
 
-                // Initialize test with first group
+                // Initialize test structure
                 State.test = {
-                    meta: firstGroupResult.meta,
-                    groups: [firstGroupResult] // Start with just first group
+                    meta: null,
+                    groups: []
                 };
+
+                // Generate first group using chunked approach for faster start
+                const firstGroup = State.examSpec.groups[0];
+                const firstGroupResult = {
+                    group_id: firstGroup.group_id,
+                    title_vi: firstGroup.title_vi,
+                    mondai: []
+                };
+
+                // Generate first chunk (3 mondai) - this gives user questions quickly
+                const totalChunks = Math.ceil(firstGroup.mondai.length / chunkSize);
+                let previousMondai = [];
+
+                for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                    const chunkResult = await Api.generateMondaiChunk(
+                        State.examSpec,
+                        mode,
+                        0, // groupIndex
+                        chunkIndex,
+                        chunkSize,
+                        previousMondai,
+                        llmProvider
+                    );
+
+                    // Collect meta from first chunk
+                    if (chunkResult.meta) {
+                        State.test.meta = chunkResult.meta;
+                    }
+
+                    // Add generated mondai
+                    firstGroupResult.mondai.push(...chunkResult.mondai);
+                    previousMondai = [...firstGroupResult.mondai]; // Pass context to next chunk
+
+                    // Update progress based on actual mondai generated
+                    generatedMondai += chunkResult.generatedCount || chunkResult.mondai.length;
+                    const progress = Math.min(90, Math.round((generatedMondai / totalMondai) * 95));
+                    progressBar.style.width = `${progress}%`;
+                    progressText.textContent = `${progress}%`;
+
+                    // After first chunk, can start test immediately
+                    if (chunkIndex === 0 && chunkResult.mondai.length > 0) {
+                        // Initialize with partial data so user can start
+                        State.test.groups = [firstGroupResult];
+                        State.answers = {};
+                        State.currentGroupIndex = 0;
+                        State.currentMondaiIndex = 0;
+
+                        // Quick progress bump and delay before switching screens
+                        progressBar.style.width = '100%';
+                        progressText.textContent = '100%';
+                        await new Promise(resolve => setTimeout(resolve, 200));
+
+                        this.initializeTest();
+                        showScreen('test-screen');
+
+                        // Continue loading remaining chunks in background
+                        this.loadRemainingChunksInBackground(
+                            firstGroupResult,
+                            chunkIndex + 1,
+                            totalChunks,
+                            previousMondai,
+                            llmProvider
+                        );
+                        return;
+                    }
+                }
+
+                // Fallback: if first chunk didn't work, use full result
+                State.test.groups = [firstGroupResult];
                 State.answers = {};
                 State.currentGroupIndex = 0;
                 State.currentMondaiIndex = 0;
 
-                // Complete progress for first group
-                clearInterval(progressInterval);
                 progressBar.style.width = '100%';
                 progressText.textContent = '100%';
 
@@ -1330,7 +1404,6 @@
                 this.loadRemainingGroupsInBackground(llmProvider);
 
             } catch (err) {
-                clearInterval(progressInterval);
                 progressBar.style.width = '0%';
                 console.error('Start test error:', err);
                 showToast('Không thể tạo đề thi: ' + err.message, 'error');
@@ -1338,25 +1411,83 @@
             }
         },
 
+        async loadRemainingChunksInBackground(groupResult, startChunkIndex, totalChunks, previousMondai, llmProvider) {
+            const chunkSize = 3;
+
+            // Continue loading remaining chunks of first group
+            for (let chunkIndex = startChunkIndex; chunkIndex < totalChunks; chunkIndex++) {
+                try {
+                    console.log(`Background loading chunk ${chunkIndex + 1}/${totalChunks}...`);
+                    const chunkResult = await Api.generateMondaiChunk(
+                        State.examSpec,
+                        State.currentMode,
+                        0, // groupIndex
+                        chunkIndex,
+                        chunkSize,
+                        previousMondai,
+                        llmProvider
+                    );
+
+                    groupResult.mondai.push(...chunkResult.mondai);
+                    previousMondai = [...groupResult.mondai];
+                    console.log(`Chunk ${chunkIndex + 1} loaded: ${chunkResult.mondai.length} mondai`);
+                } catch (err) {
+                    console.error(`Failed to load chunk ${chunkIndex + 1}:`, err);
+                }
+            }
+
+            console.log('First group fully loaded, loading remaining groups...');
+
+            // Load remaining groups
+            this.loadRemainingGroupsInBackground(llmProvider);
+        },
+
         async loadRemainingGroupsInBackground(llmProvider) {
             const totalGroups = State.examSpec.groups.length;
+            const chunkSize = 3;
 
-            for (let i = 1; i < totalGroups; i++) {
-                this.loadingGroupIndex = i;
+            for (let groupIndex = 1; groupIndex < totalGroups; groupIndex++) {
+                this.loadingGroupIndex = groupIndex;
+                const group = State.examSpec.groups[groupIndex];
+                const totalChunks = Math.ceil(group.mondai.length / chunkSize);
+
+                const groupResult = {
+                    group_id: group.group_id,
+                    title_vi: group.title_vi,
+                    mondai: []
+                };
+
+                let previousMondai = [];
+
                 try {
-                    console.log(`Background loading group ${i + 1}/${totalGroups}...`);
-                    const groupResult = await Api.generateGroup(State.examSpec, State.currentMode, i, llmProvider);
+                    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                        console.log(`Background loading group ${groupIndex + 1} chunk ${chunkIndex + 1}/${totalChunks}...`);
+                        const chunkResult = await Api.generateMondaiChunk(
+                            State.examSpec,
+                            State.currentMode,
+                            groupIndex,
+                            chunkIndex,
+                            chunkSize,
+                            previousMondai,
+                            llmProvider
+                        );
+
+                        groupResult.mondai.push(...chunkResult.mondai);
+                        previousMondai = [...groupResult.mondai];
+                    }
+
                     State.test.groups.push(groupResult);
-                    console.log(`Group ${i + 1} loaded successfully`);
+                    console.log(`Group ${groupIndex + 1} loaded successfully`);
                 } catch (err) {
-                    console.error(`Failed to load group ${i + 1}:`, err);
+                    console.error(`Failed to load group ${groupIndex + 1}:`, err);
                     // Store error for handling when user reaches this group
-                    this.pendingGroups[i] = { error: err.message };
+                    this.pendingGroups[groupIndex] = { error: err.message };
                 }
             }
             this.loadingGroupIndex = -1; // Done loading
             console.log('All groups loaded');
         },
+
 
         isGroupReady(groupIndex) {
             return State.test.groups[groupIndex] !== undefined;
