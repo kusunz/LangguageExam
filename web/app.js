@@ -1346,10 +1346,15 @@
                 const totalMondai = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
 
                 // Determine model and concurrency based on level (Adaptive Optimization)
-                // N5/N4 are simple enough for 2.5-pro/flash and can be generated faster (concurrency 4)
+                // N5/N4 are simple enough for 2.5-pro (faster, higher concurrency)
+                // N1/N2/N3 use 3-pro (more accurate, lower concurrency due to 25 RPM limit)
                 const isLowLevel = ['N5', 'N4'].includes(selectedLevel);
-                const targetModel = isLowLevel ? 'gemini-2.5-pro' : null;
-                const concurrency = isLowLevel ? 4 : 3;
+                const targetModel = isLowLevel ? 'gemini-2.5-pro' : null; // null = default 3-pro
+
+                // Concurrency based on model RPM limits:
+                // - gemini-2.5-pro: 250 RPM → can send 7 parallel requests safely
+                // - gemini-3-pro: 25 RPM → max 5 parallel to stay under limit
+                const concurrency = (targetModel === 'gemini-2.5-pro') ? 7 : 5;
 
                 const chunkSize = 2; // 2 mondai per chunk for faster response
                 let generatedMondai = 0;
@@ -1517,6 +1522,9 @@
                     }
                 }
                 previousMondai = [...groupResult.mondai];
+
+                // Update navigation buttons after each batch
+                this.updateNavigationButtons();
             }
             console.log('Stream A/B Complete: First group fully loaded.');
         },
@@ -1567,6 +1575,9 @@
                                 // assuming independence or acceptable minor reorder. 
                                 // Ideally we should use same sort logic as above but let's keep it fast.
                                 groupResult.mondai.push(...chunkResult.mondai);
+
+                                // Update navigation buttons after each chunk
+                                TestUI.updateNavigationButtons();
                             }));
                             previousMondai = [...groupResult.mondai];
                         }
@@ -1883,6 +1894,33 @@
                 }
             }
             return false;
+        },
+
+        // Update navigation buttons without re-rendering (for background loading)
+        updateNavigationButtons() {
+            if (!State.test || !State.examSpec) return;
+
+            const globalIndex = this.getGlobalMondaiIndex();
+            const totalMondaiFromSpec = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
+            const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
+            const wasDisabled = $('#btn-next-mondai').disabled;
+
+            $('#btn-next-mondai').disabled = globalIndex === totalMondaiFromSpec - 1 || !nextMondaiLoaded;
+
+            // Update loading indicator
+            const loadingIndicator = $('#nav-loading-indicator');
+            if (loadingIndicator) {
+                if (!nextMondaiLoaded && globalIndex < totalMondaiFromSpec - 1) {
+                    loadingIndicator.classList.remove('hidden');
+                } else {
+                    loadingIndicator.classList.add('hidden');
+                }
+            }
+
+            // Notify user if button just became enabled
+            if (wasDisabled && !$('#btn-next-mondai').disabled) {
+                // Toast is optional - can be noisy, so just update button silently
+            }
         },
 
         getGlobalMondaiIndex() {

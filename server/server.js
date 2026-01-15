@@ -1521,11 +1521,14 @@ function buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGener
 
   // Reading type IDs for special handling
   const readingTypes = ['reading_short', 'reading_mid', 'reading_long', 'reading_compare', 'reading_info'];
+  // Listening type IDs
+  const listeningTypes = ['listening_dialogue', 'listening_mono', 'listen_respond', 'listen_integration', 'listen_task'];
 
   // Current chunk mondai details
   const mondaiInfo = mondaiToGenerate.map((m, idx) => {
     const totalQuestions = Math.max(1, Math.round(m.count_official * questionScale));
     const isReading = m.types.some(t => readingTypes.includes(t));
+    const isListening = m.types.some(t => listeningTypes.includes(t));
     const mondaiNum = startMondaiIndex + idx + 1;
 
     if (isReading && totalQuestions > 2) {
@@ -1535,27 +1538,84 @@ function buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGener
     *** Create FEWER passages with MORE questions per passage ***`;
     }
 
+    if (isListening) {
+      return `  ${mondaiNum}. ${m.mondai_id} (${m.title_vi}): ${totalQuestions} questions, types: ${m.types.join(', ')}
+    *** Include script_text with natural dialogue/monologue for TTS ***`;
+    }
+
     return `  ${mondaiNum}. ${m.mondai_id} (${m.title_vi}): ${totalQuestions} questions, types: ${m.types.join(', ')}`;
   }).join('\n');
 
-  // Context from previously generated mondai (summarized)
+  // Build detailed anti-duplication context from previously generated mondai
   let contextInfo = '';
+  let usedVocabulary = [];
+  let usedThemes = [];
+  let usedGrammar = [];
+
   if (previousMondai.length > 0) {
+    // Extract vocabulary, themes, and grammar from previous items
+    previousMondai.forEach(m => {
+      if (m.items) {
+        m.items.forEach(item => {
+          // Collect tags as themes/grammar points
+          if (item.tags) {
+            item.tags.forEach(tag => {
+              if (tag.includes('文法') || tag.includes('grammar')) {
+                if (!usedGrammar.includes(tag)) usedGrammar.push(tag);
+              } else {
+                if (!usedThemes.includes(tag)) usedThemes.push(tag);
+              }
+            });
+          }
+          // Extract key vocabulary from prompts (first few words)
+          if (item.prompt) {
+            const words = item.prompt.split(/[\s、。！？]+/).slice(0, 3).join(', ');
+            if (words && !usedVocabulary.includes(words)) {
+              usedVocabulary.push(words);
+            }
+          }
+        });
+      }
+    });
+
     const contextSummary = previousMondai.map(m => {
       const questionCount = m.items?.length || 0;
       const sampleTopics = m.items?.slice(0, 2).map(i => i.tags?.[0] || i.type).join(', ') || 'various';
       return `  - ${m.mondai_id}: ${questionCount} questions about ${sampleTopics}`;
     }).join('\n');
+
     contextInfo = `
-PREVIOUSLY GENERATED MONDAI (maintain consistency, avoid repetition):
+PREVIOUSLY GENERATED MONDAI (maintain consistency, STRICTLY avoid repetition):
 ${contextSummary}
+
+★★★ ALREADY USED - DO NOT REPEAT ★★★
+${usedThemes.length > 0 ? `Themes/Topics: ${usedThemes.slice(0, 10).join(', ')}` : ''}
+${usedGrammar.length > 0 ? `Grammar Points: ${usedGrammar.slice(0, 8).join(', ')}` : ''}
+${usedVocabulary.length > 0 ? `Sample Vocabulary: ${usedVocabulary.slice(0, 6).join(' | ')}` : ''}
 `;
   }
 
-  return `You are generating a CHUNK of ${examSpec.display_name_vi} practice test questions.
+  // Determine if this is a single-section exam (grammar/vocab only, listening only, or reading only)
+  const isSingleSection = examSpec.groups.length === 1;
+  const sectionType = group.group_id;
+
+  // Define JLPT Can-do levels
+  const jlptLevels = {
+    'N5': 'understanding basic, familiar, concrete information',
+    'N4': 'understanding basic, familiar, concrete information',
+    'N3': 'understanding main points in everyday contexts',
+    'N2': 'understanding logical flow, practical and workplace content',
+    'N1': 'understanding abstract, academic, and opinion-based content'
+  };
+  const levelDesc = jlptLevels[examSpec.level] || 'understanding main points in everyday contexts';
+
+  return `You are an AI expert in JLPT exam design, working strictly under the official standards of The Japan Foundation.
+
+Your task is NOT to generate miscellaneous questions.
+Your task is to GENERATE STRICT JLPT-STYLE QUESTIONS for the following exam chunk.
 
 EXAM: ${examSpec.display_name_vi}
-LEVEL: ${examSpec.level}
+LEVEL: ${examSpec.level} (${levelDesc})
 LANGUAGE: ${examSpec.language}
 MODE: ${mode} (question_scale: ${questionScale})
 
@@ -1565,14 +1625,34 @@ ${contextInfo}
 GENERATE THESE MONDAI NOW:
 ${mondaiInfo}
 
+★★★ MANDATORY JLPT STANDARDS ★★★
+1. ALIGNMENT WITH LEVEL (${examSpec.level}):
+   - ${examSpec.level === 'N5' || examSpec.level === 'N4' ? 'Focus on basic, concrete, familiar topics (daily life, school, family).' : ''}
+   - ${examSpec.level === 'N3' ? 'Focus on everyday situations with some specific details.' : ''}
+   - ${examSpec.level === 'N2' ? 'Focus on clear logical flow, practical/workplace scenarios, and expository text.' : ''}
+   - ${examSpec.level === 'N1' ? 'Focus on abstract ideas, editorials, critiques, and complex logic.' : ''}
+   - Difficulty must NOT exceed ${examSpec.level}.
+
+2. NATURAL JAPANESE:
+   - Japanese usage must be natural and realistic.
+   - NO unnatural or textbook-only phrasings.
+
+3. STRUCTURE & CONTENT:
+   - Each question must explicitly test a specific ability (vocab, grammar, reading skill).
+   - AVOID trick questions, puzzles, or outside knowledge dependencies.
+   - For Listening/Reading: Content must be self-contained.
+
+★★★ COHERENCE & ANTI-DUPLICATION ★★★
+- THEMATIC FLOW: Questions should feel like part of a cohesive test.
+- NO DUPLICATION: Do not reuse vocabulary/topics from previous chunks.
+${previousMondai.length > 0 ? '- CHECK "ALREADY USED" LIST ABOVE. REPEAT = FAILURE.' : ''}
+
 CRITICAL RULES:
-1. Generate 100% original questions - NO copy from real exams
-2. Each question: exactly 4 choices, exactly 1 correct answer
-3. Match ${examSpec.level} difficulty precisely
-4. "choices" are full answer texts, NOT letters "A/B/C/D"
-5. Include meaningful tags and brief explanations
-6. For listening: include script_text for TTS
-7. ${previousMondai.length > 0 ? 'AVOID repeating vocabulary/topics from previously generated mondai' : 'This is the first chunk - set a good foundation'}
+1. Generate 100% original questions - NO copy from real exams.
+2. Each question: exactly 4 choices, exactly 1 correct answer.
+3. "choices" are full answer texts, NOT letters "A/B/C/D".
+4. Include meaningful tags and brief explanations.
+5. For listening: include script_text for TTS.
 
 OUTPUT: Return RAW JSON only (no markdown code blocks):
 {
