@@ -1301,6 +1301,9 @@
             progressBar.style.width = '0%';
             progressText.textContent = '0%';
 
+            // Start simulated progress (will stop at 98% until gen completes)
+            const progressInterval = this.simulateProgress(progressBar, progressText);
+
             try {
                 // Load exam spec with dynamic level
                 const rawSpec = await ExamLoader.loadSpec(examType, selectedLevel);
@@ -1311,7 +1314,7 @@
 
                 // Calculate total mondai for progress tracking
                 const totalMondai = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
-                const chunkSize = 3;
+                const chunkSize = 2; // 2 mondai per chunk for faster response
                 let generatedMondai = 0;
 
                 // Initialize test structure
@@ -1366,7 +1369,8 @@
                         State.currentGroupIndex = 0;
                         State.currentMondaiIndex = 0;
 
-                        // Quick progress bump and delay before switching screens
+                        // Stop simulated progress and complete to 100%
+                        clearInterval(progressInterval);
                         progressBar.style.width = '100%';
                         progressText.textContent = '100%';
                         await new Promise(resolve => setTimeout(resolve, 200));
@@ -1404,6 +1408,7 @@
                 this.loadRemainingGroupsInBackground(llmProvider);
 
             } catch (err) {
+                clearInterval(progressInterval);
                 progressBar.style.width = '0%';
                 console.error('Start test error:', err);
                 showToast('Không thể tạo đề thi: ' + err.message, 'error');
@@ -1412,7 +1417,7 @@
         },
 
         async loadRemainingChunksInBackground(groupResult, startChunkIndex, totalChunks, previousMondai, llmProvider) {
-            const chunkSize = 3;
+            const chunkSize = 2; // Match startTest chunk size
 
             // Continue loading remaining chunks of first group
             for (let chunkIndex = startChunkIndex; chunkIndex < totalChunks; chunkIndex++) {
@@ -1444,7 +1449,7 @@
 
         async loadRemainingGroupsInBackground(llmProvider) {
             const totalGroups = State.examSpec.groups.length;
-            const chunkSize = 3;
+            const chunkSize = 2; // Match startTest chunk size
 
             for (let groupIndex = 1; groupIndex < totalGroups; groupIndex++) {
                 this.loadingGroupIndex = groupIndex;
@@ -1495,16 +1500,18 @@
 
         simulateProgress(bar, text) {
             let progress = 0;
-            return setInterval(() => {
-                // fast until 30%, then slower until 80%, then very slow until 90%
-                let increment = 0;
-                if (progress < 50) increment = 5;
-                else if (progress < 85) increment = 2;
-                else if (progress < 95) increment = 1;
+            const startTime = Date.now();
+            const targetDuration = 25000; // 25 seconds to reach 98%
 
-                progress = Math.min(progress + increment, 99);
+            return setInterval(() => {
+                const elapsed = Date.now() - startTime;
+                // Ease-out curve: fast at start, slow near end
+                // Reaches 98% at ~25 seconds, then stops
+                const targetProgress = 98 * (1 - Math.pow(1 - Math.min(elapsed / targetDuration, 1), 2));
+                progress = Math.min(Math.round(targetProgress), 98);
+
                 bar.style.width = `${progress}%`;
-                text.textContent = `${Math.round(progress)}%`;
+                text.textContent = `${progress}%`;
             }, 200);
         },
 
