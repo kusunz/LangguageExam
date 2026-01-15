@@ -1995,3 +1995,17 @@ body::before {
   border-color: var(--accent-primary);
   box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
 }
+
+/* Utility Classes */
+.text-muted {
+  color: var(--text-muted);
+}
+
+/* Audio Note */
+.audio-note {
+  font-size: var(--text-xs);
+  margin-top: var(--space-sm);
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}

@@ -1175,6 +1175,7 @@
 
                 State.ttsAudio.onended = () => {
                     URL.revokeObjectURL(url);
+                    TTSManager.isPlaying = false;
                     const btn = $('#btn-play-audio');
                     if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
 
@@ -1187,6 +1188,7 @@
 
                 // Resolve promise when playback STARTS so UI is interactive
                 State.ttsAudio.onplay = () => {
+                    TTSManager.isPlaying = true;
                     const btn = $('#btn-play-audio');
                     if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
                     resolve();
@@ -1698,8 +1700,10 @@
 
             // Calculate total mondai from exam spec for navigation buttons
             const totalMondaiFromSpec = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
+            // Block navigation to unloaded mondai
+            const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
             $('#btn-prev-mondai').disabled = globalIndex === 0;
-            $('#btn-next-mondai').disabled = globalIndex === totalMondaiFromSpec - 1;
+            $('#btn-next-mondai').disabled = globalIndex === totalMondaiFromSpec - 1 || !nextMondaiLoaded;
 
             // Update header
             $('#mondai-title').textContent = mondai.title_vi;
@@ -1867,6 +1871,20 @@
             return null;
         },
 
+        // Check if a mondai at globalIndex has been loaded
+        isMondaiLoaded(globalIndex) {
+            if (globalIndex < 0) return false;
+            let idx = 0;
+            for (const group of State.test.groups) {
+                if (!group || !group.mondai) continue; // Group not loaded yet
+                for (const mondai of group.mondai) {
+                    if (idx === globalIndex) return true;
+                    idx++;
+                }
+            }
+            return false;
+        },
+
         getGlobalMondaiIndex() {
             return State.currentMondaiIndex;
         },
@@ -1941,6 +1959,12 @@
         navigateMondai(direction) {
             const total = this.getTotalMondaiCount();
             const newIndex = State.currentMondaiIndex + direction;
+
+            // Block forward navigation to unloaded mondai
+            if (direction > 0 && !this.isMondaiLoaded(newIndex)) {
+                showToast('Đang tải câu hỏi tiếp theo...', 'info');
+                return;
+            }
 
             if (newIndex >= 0 && newIndex < total) {
                 // Check if crossing group boundary
