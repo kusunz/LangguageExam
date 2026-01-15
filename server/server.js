@@ -422,13 +422,24 @@ async function callOpenAI(messages, options = {}) {
   return JSON.parse(data.choices[0].message.content);
 }
 
-// Gemini model fallback order
-// Gemini model fallback order
+// Gemini model fallback order (full list)
 const GEMINI_MODELS = [
   'gemini-3-pro',
   'gemini-3-flash',
   'gemini-2.5-pro',
   'gemini-2.5-flash'
+];
+
+// Pro-only models for high-quality generation (no Flash fallback)
+const GEMINI_MODELS_PRO = [
+  'gemini-3-pro',
+  'gemini-2.5-pro'
+];
+
+// Gemini TTS models (for TTS fallback)
+const GEMINI_TTS_MODELS = [
+  'gemini-2.5-pro-tts',
+  'gemini-2.5-flash-tts'
 ];
 
 async function callGeminiWithModel(prompt, model, options = {}) {
@@ -633,10 +644,13 @@ function repairTruncatedJSON(text) {
 
 async function callGemini(prompt, options = {}) {
   const requested = options.model ? [options.model] : [];
-  const models = [...requested, ...GEMINI_MODELS].filter((v, i, a) => a.indexOf(v) === i);
+  // Use Pro-only models if specified, otherwise use full list
+  const baseModels = options.proOnly ? GEMINI_MODELS_PRO : GEMINI_MODELS;
+  const models = [...requested, ...baseModels].filter((v, i, a) => a.indexOf(v) === i);
   let lastError = null;
 
-  for (const model of models) {
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
     try {
       return await callGeminiWithModel(prompt, model, options);
     } catch (err) {
@@ -646,18 +660,28 @@ async function callGemini(prompt, options = {}) {
         error: err.message.substring(0, 200)
       });
 
-      // If it's a rate limit (429) or quota error, try next model
-      if (err.status === 429 || err.status === 403 || err.status === 500) {
-        log('INFO', `Rate limit/quota issue, trying next model...`);
-        continue;
-      }
-
-      // If it's an auth error (401), no point retrying with different model
+      // If it's an auth error (401), no point retrying
       if (err.status === 401) {
         throw err;
       }
 
-      // For other errors (including 400/404 which might be model-specific), try next model
+      // For proOnly mode: only fallback on rate limit/quota (429/403)
+      // For other errors, stop and throw
+      if (options.proOnly) {
+        if (err.status === 429 || err.status === 403) {
+          log('INFO', `Rate limit/quota issue on Pro model, trying Flash fallback...`);
+          // Add Flash models to try list if not already there
+          if (i === models.length - 1) {
+            const flashModels = GEMINI_MODELS.filter(m => m.includes('flash') && !models.includes(m));
+            models.push(...flashModels);
+          }
+          continue;
+        }
+        // Other errors in proOnly mode: stop trying
+        throw err;
+      }
+
+      // Standard mode: try all models for any error
       continue;
     }
   }
@@ -672,12 +696,13 @@ async function generateGroupWithIntegrity(examSpec, mode, group, groupIndex, opt
   const temperature = typeof options.temperature === 'number' ? options.temperature : 0.4;
 
   const prompt = buildGenerateGroupPrompt(examSpec, mode, group, groupIndex);
-  const first = await callGemini(prompt, { model, maxTokens, temperature });
+  // Use Pro-only models for high-quality generation (no Flash fallback)
+  const first = await callGemini(prompt, { model, maxTokens, temperature, proOnly: true });
   const errors1 = validateGroupResult(first);
   if (errors1.length === 0) return first;
 
   const fixPrompt = buildFixGroupPrompt(examSpec, mode, first, groupIndex, errors1);
-  const fixed = await callGemini(fixPrompt, { model, maxTokens: Math.min(8192, maxTokens), temperature: 0 });
+  const fixed = await callGemini(fixPrompt, { model, maxTokens: Math.min(8192, maxTokens), temperature: 0, proOnly: true });
   const errors2 = validateGroupResult(fixed);
   if (errors2.length === 0) return fixed;
 
@@ -707,7 +732,8 @@ app.post('/api/generate-test', authMiddleware, async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('Generate test error:', err);
-    res.status(500).json({ error: 'Failed to generate test: ' + err.message });
+    log('ERROR', 'Generate test failed', { error: err.message, stack: err.stack?.substring(0, 500) });
+    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại sau.' });
   }
 });
 
@@ -763,7 +789,8 @@ app.post('/api/generate-group', authMiddleware, async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('Generate group error:', err);
-    res.status(500).json({ error: 'Failed to generate group: ' + err.message });
+    log('ERROR', 'Generate group failed', { error: err.message, stack: err.stack?.substring(0, 500) });
+    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại sau.' });
   }
 });
 
@@ -1118,27 +1145,62 @@ app.post('/api/tts', authMiddleware, async (req, res) => {
   }
 });
 
+// Gemini TTS with model fallback
 async function generateGeminiTTS(text, language, speed = 1.0, voice) {
-  const url = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${process.env.GEMINI_API_KEY}`;
-
   const languageCode = language === 'ja-JP' ? 'ja-JP' : language === 'zh-CN' ? 'cmn-CN' : 'en-US';
   const voiceName = voice || (language === 'ja-JP' ? 'ja-JP-Neural2-B' : 'cmn-CN-Wavenet-A');
 
+  // Try Gemini TTS models in order
+  for (const model of GEMINI_TTS_MODELS) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: `Read aloud in ${languageCode}: ${text}` }] }],
+          generationConfig: {
+            response_modalities: ['AUDIO'],
+            speech_config: {
+              voice_config: { prebuilt_voice_config: { voice_name: voiceName } }
+            }
+          }
+        })
+      });
+
+      if (!response.ok) {
+        log('WARN', `Gemini TTS ${model} failed, trying next...`);
+        continue;
+      }
+
+      const data = await response.json();
+      if (data.candidates?.[0]?.content?.parts?.[0]?.inline_data?.data) {
+        return Buffer.from(data.candidates[0].content.parts[0].inline_data.data, 'base64');
+      }
+
+      // Fallback to Google Cloud TTS API if Gemini TTS response format differs
+      throw new Error('Unexpected Gemini TTS response format');
+    } catch (err) {
+      log('WARN', `Gemini TTS ${model} error: ${err.message}`);
+      continue;
+    }
+  }
+
+  // Final fallback: Google Cloud TTS API
+  const url = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${process.env.GEMINI_API_KEY}`;
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       input: { text },
       voice: { languageCode, name: voiceName },
-      audioConfig: {
-        audioEncoding: 'MP3',
-        speakingRate: speed
-      }
+      audioConfig: { audioEncoding: 'MP3', speakingRate: speed }
     })
   });
 
   if (!response.ok) {
-    throw new Error('Gemini TTS failed');
+    throw new Error('All Gemini TTS options failed');
   }
 
   const data = await response.json();
