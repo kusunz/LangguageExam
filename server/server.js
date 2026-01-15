@@ -1599,62 +1599,113 @@ ${usedVocabulary.length > 0 ? `Sample Vocabulary: ${usedVocabulary.slice(0, 6).j
   const isSingleSection = examSpec.groups.length === 1;
   const sectionType = group.group_id;
 
-  // Define JLPT Can-do levels
-  const jlptLevels = {
-    'N5': 'understanding basic, familiar, concrete information',
-    'N4': 'understanding basic, familiar, concrete information',
-    'N3': 'understanding main points in everyday contexts',
-    'N2': 'understanding logical flow, practical and workplace content',
-    'N1': 'understanding abstract, academic, and opinion-based content'
+  // JLPT Can-do definitions by level
+  const jlptCanDo = {
+    'N5': {
+      desc: 'Understand very basic sentences. Familiar, concrete daily topics. Explicit information only.',
+      grammar: 'polite forms, basic conjunctions, no abstraction',
+      types: 'kanji reading, vocabulary usage, particle selection, short sentence ordering, literal reading comprehension'
+    },
+    'N4': {
+      desc: 'Understand simple explanations and descriptions. Slightly longer daily-life contexts. Still concrete, minimal abstraction.',
+      grammar: 'polite forms, basic conjunctions, simple て-form, no abstraction',
+      types: 'kanji reading, vocabulary usage, particle selection, short sentence ordering, literal reading comprehension'
+    },
+    'N3': {
+      desc: 'Understand main points of everyday and semi-formal texts. Simple opinions, reasons, and intentions. Limited inference allowed.',
+      grammar: 'plain forms, reasons (から/ので), soft opinions, basic conditional',
+      types: 'meaning inference, paraphrase matching, intent identification (simple)'
+    },
+    'N2': {
+      desc: 'Understand logical structure and arguments. Workplace, news-like, and explanatory texts. Abstract but practical concepts.',
+      grammar: 'passive/causative, contrast (一方/に対して), logical connectors, formal expressions',
+      types: 'logical flow, opinion vs fact, contextual paraphrasing'
+    },
+    'N1': {
+      desc: 'Understand abstract, academic, critical, and implicit content. Opinions, nuance, stance, and author intent. High-density information.',
+      grammar: 'modality, stance markers, ellipsis, rhetorical devices, literary expressions',
+      types: 'abstract inference, author attitude, rhetorical purpose, implicit meaning'
+    }
   };
-  const levelDesc = jlptLevels[examSpec.level] || 'understanding main points in everyday contexts';
 
-  return `You are an AI expert in JLPT exam design, working strictly under the official standards of The Japan Foundation.
+  const levelInfo = jlptCanDo[examSpec.level] || jlptCanDo['N3'];
 
-Your task is NOT to generate miscellaneous questions.
-Your task is to GENERATE STRICT JLPT-STYLE QUESTIONS for the following exam chunk.
+  return `You are an AI Expert that generates JLPT exam content.
+All output MUST conform to official standards defined by The Japan Foundation.
+
+================================
+CORE PRINCIPLE: LEVEL DISCIPLINE
+================================
+TARGET LEVEL: ${examSpec.level}
+You MUST generate content strictly within ${examSpec.level}.
+You are allowed to go LOWER than ${examSpec.level}.
+You are FORBIDDEN from exceeding ${examSpec.level}.
+If uncertainty exists, DOWNGRADE difficulty.
 
 EXAM: ${examSpec.display_name_vi}
-LEVEL: ${examSpec.level} (${levelDesc})
 LANGUAGE: ${examSpec.language}
 MODE: ${mode} (question_scale: ${questionScale})
-
 GROUP: ${group.group_id} (${group.title_vi})
 CHUNK: Mondai ${startMondaiIndex + 1} to ${startMondaiIndex + mondaiToGenerate.length} of ${group.mondai.length}
 ${contextInfo}
-GENERATE THESE MONDAI NOW:
+GENERATE THESE MONDAI:
 ${mondaiInfo}
 
-★★★ MANDATORY JLPT STANDARDS ★★★
-1. ALIGNMENT WITH LEVEL (${examSpec.level}):
-   - ${examSpec.level === 'N5' || examSpec.level === 'N4' ? 'Focus on basic, concrete, familiar topics (daily life, school, family).' : ''}
-   - ${examSpec.level === 'N3' ? 'Focus on everyday situations with some specific details.' : ''}
-   - ${examSpec.level === 'N2' ? 'Focus on clear logical flow, practical/workplace scenarios, and expository text.' : ''}
-   - ${examSpec.level === 'N1' ? 'Focus on abstract ideas, editorials, critiques, and complex logic.' : ''}
-   - Difficulty must NOT exceed ${examSpec.level}.
+-------------------------
+CAN-DO BOUNDARIES (${examSpec.level})
+-------------------------
+${levelInfo.desc}
 
-2. NATURAL JAPANESE:
-   - Japanese usage must be natural and realistic.
-   - NO unnatural or textbook-only phrasings.
+ALLOWED GRAMMAR: ${levelInfo.grammar}
+ALLOWED QUESTION TYPES: ${levelInfo.types}
 
-3. STRUCTURE & CONTENT:
-   - Each question must explicitly test a specific ability (vocab, grammar, reading skill).
-   - AVOID trick questions, puzzles, or outside knowledge dependencies.
-   - For Listening/Reading: Content must be self-contained.
+If a question requires abilities from a higher tier → INVALID.
+Using grammar ≥ one level above ${examSpec.level} → FORBIDDEN.
 
-★★★ COHERENCE & ANTI-DUPLICATION ★★★
-- THEMATIC FLOW: Questions should feel like part of a cohesive test.
-- NO DUPLICATION: Do not reuse vocabulary/topics from previous chunks.
-${previousMondai.length > 0 ? '- CHECK "ALREADY USED" LIST ABOVE. REPEAT = FAILURE.' : ''}
+-------------------------
+LANGUAGE SCOPE CONTROL
+-------------------------
+Vocabulary, kanji, and grammar MUST satisfy ALL conditions:
+- Belongs to ${examSpec.level} OR lower
+- Frequently appears in official JLPT prep materials
+- Natural Japanese usage (no textbook artifacts)
 
-CRITICAL RULES:
-1. Generate 100% original questions - NO copy from real exams.
-2. Each question: exactly 4 choices, exactly 1 correct answer.
-3. "choices" are full answer texts, NOT letters "A/B/C/D".
-4. Include meaningful tags and brief explanations.
-5. For listening: include script_text for TTS.
+Prohibited:
+- Trick phrasing
+- Artificial ambiguity
+- Cross-level grammar mixing without necessity
 
-OUTPUT: Return RAW JSON only (no markdown code blocks):
+-------------------------
+ANSWER OPTION INTEGRITY
+-------------------------
+- Exactly ONE correct answer (answer_index: 0-3)
+- No duplicate or near-duplicate options
+- Distractors must:
+  - Be plausible for ${examSpec.level}
+  - Fail for a clear linguistic reason
+- Never rely on cultural trivia or external knowledge
+
+-------------------------
+DIFFICULTY SAFETY CHECK
+-------------------------
+Before finalizing, verify:
+- Does this question require knowledge above ${examSpec.level}? → REWRITE
+- Would a learner at ${examSpec.level} reasonably succeed? → If no, DOWNGRADE
+- When in doubt → Treat as TOO HARD → Rewrite at lower level
+
+-------------------------
+COHERENCE & ANTI-DUPLICATION
+-------------------------
+${previousMondai.length > 0 ? `★★★ ALREADY USED - DO NOT REPEAT ★★★
+${usedThemes.length > 0 ? `Themes: ${usedThemes.slice(0, 10).join(', ')}` : ''}
+${usedGrammar.length > 0 ? `Grammar: ${usedGrammar.slice(0, 8).join(', ')}` : ''}
+${usedVocabulary.length > 0 ? `Vocab: ${usedVocabulary.slice(0, 6).join(' | ')}` : ''}
+REPEAT = FAILURE.` : 'First chunk - establish diverse foundation.'}
+
+-------------------------
+OUTPUT RULE
+-------------------------
+Return RAW JSON only. No explanations, no meta text.
 {
   "mondai": [
     {
