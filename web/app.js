@@ -1310,68 +1310,72 @@
                 this.currentIndex++;
                 // Start playback loop
                 this.playNextInQueue(resolve, reject);
-            },
+            };
 
-                // Play next blob in the queue
-                async playNextInQueue(resolve, reject) {
-                if (this.currentIndex >= this.audioQueue.length) {
-                    // Queue finished?
-                    if (this.isStreamComplete) {
-                        // All done
-                        this.isPlaying = false;
-                        const btn = $('#btn-play-audio');
-                        if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
 
-                        // Create combined blob for Replay
-                        if (this.audioQueue.length > 0) {
-                            this.combinedBlob = new Blob(this.audioQueue, { type: 'audio/mp3' });
-                            this.setupCombinedAudio();
-                        }
-                    }
-                    return;
+            State.ttsAudio.onerror = (err) => {
+                URL.revokeObjectURL(url);
+                this.currentIndex++;
+                // Try next segment instead of failing completely
+                this.playNextInQueue(resolve, reject);
+            };
+
+            State.ttsAudio.onplay = () => {
+                const btn = $('#btn-play-audio');
+                if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
+            };
+
+            try {
+                await State.ttsAudio.play();
+            } catch (err) {
+                this.currentIndex++;
+                this.playNextInQueue(resolve, reject);
+            }
+        },
+
+        // Setup combined audio for seek/timer after streaming completes
+        setupCombinedAudio() {
+            if (!this.combinedBlob) return;
+
+            const url = URL.createObjectURL(this.combinedBlob);
+
+            if (State.ttsAudio) {
+                State.ttsAudio.pause();
+                if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
+            }
+
+            State.ttsAudio = new Audio(url);
+            State.ttsAudio.preload = 'metadata';
+
+            // Setup time update for seek bar
+            State.ttsAudio.ontimeupdate = () => {
+                const currentTime = State.ttsAudio.currentTime;
+                const duration = State.ttsAudio.duration;
+
+                const timeEl = $('#audio-time');
+                if (timeEl && !isNaN(duration)) {
+                    timeEl.textContent = `${this.formatTime(currentTime)} / ${this.formatTime(duration)}`;
                 }
 
-                const blob = this.audioQueue[this.currentIndex];
+                const seek = $('#audio-seek');
+                if (seek && !isNaN(duration)) {
+                    seek.value = (currentTime / duration) * 100;
+                }
+            };
+
+            State.ttsAudio.onloadedmetadata = () => {
+                const timeEl = $('#audio-time');
+                if (timeEl) {
+                    timeEl.textContent = `00:00 / ${this.formatTime(State.ttsAudio.duration)}`;
+                }
+            };
+
+            // Don't auto-play - user will click "Nghe lại" to replay
+        },
+
+        async playBlob(blob) {
+            return new Promise((resolve, reject) => {
                 const url = URL.createObjectURL(blob);
-
-                if (State.ttsAudio) {
-                    if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
-                }
-
-                State.ttsAudio = new Audio(url);
-                State.ttsAudio.preload = 'auto'; // Load immediately
-
-                State.ttsAudio.onended = () => {
-                    URL.revokeObjectURL(url);
-                    this.currentIndex++;
-                    this.playNextInQueue(resolve, reject);
-                };
-
-                State.ttsAudio.onerror = (err) => {
-                    URL.revokeObjectURL(url);
-                    this.currentIndex++;
-                    // Try next segment instead of failing completely
-                    this.playNextInQueue(resolve, reject);
-                };
-
-                State.ttsAudio.onplay = () => {
-                    const btn = $('#btn-play-audio');
-                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
-                };
-
-                try {
-                    await State.ttsAudio.play();
-                } catch (err) {
-                    this.currentIndex++;
-                    this.playNextInQueue(resolve, reject);
-                }
-            },
-
-            // Setup combined audio for seek/timer after streaming completes
-            setupCombinedAudio() {
-                if (!this.combinedBlob) return;
-
-                const url = URL.createObjectURL(this.combinedBlob);
 
                 if (State.ttsAudio) {
                     State.ttsAudio.pause();
@@ -1379,452 +1383,395 @@
                 }
 
                 State.ttsAudio = new Audio(url);
-                State.ttsAudio.preload = 'metadata';
 
-                // Setup time update for seek bar
+                // Time update & Seek integration
                 State.ttsAudio.ontimeupdate = () => {
                     const currentTime = State.ttsAudio.currentTime;
                     const duration = State.ttsAudio.duration;
 
+                    // Update time display
                     const timeEl = $('#audio-time');
                     if (timeEl && !isNaN(duration)) {
                         timeEl.textContent = `${this.formatTime(currentTime)} / ${this.formatTime(duration)}`;
                     }
 
+                    // Update seek bar
                     const seek = $('#audio-seek');
                     if (seek && !isNaN(duration)) {
                         seek.value = (currentTime / duration) * 100;
                     }
                 };
 
-                State.ttsAudio.onloadedmetadata = () => {
-                    const timeEl = $('#audio-time');
-                    if (timeEl) {
-                        timeEl.textContent = `00:00 / ${this.formatTime(State.ttsAudio.duration)}`;
-                    }
+                State.ttsAudio.onended = () => {
+                    URL.revokeObjectURL(url);
+                    TTSManager.isPlaying = false;
+                    const btn = $('#btn-play-audio');
+                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
+
+                    // Reset seek
+                    const seek = $('#audio-seek');
+                    if (seek) seek.value = 100;
                 };
 
-                // Don't auto-play - user will click "Nghe lại" to replay
-            },
+                State.ttsAudio.onerror = reject;
 
-        async playBlob(blob) {
-                return new Promise((resolve, reject) => {
-                    const url = URL.createObjectURL(blob);
+                // Resolve promise when playback STARTS so UI is interactive
+                State.ttsAudio.onplay = () => {
+                    TTSManager.isPlaying = true;
+                    const btn = $('#btn-play-audio');
+                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
+                    resolve();
+                };
 
-                    if (State.ttsAudio) {
-                        State.ttsAudio.pause();
-                        if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
-                    }
+                // Also resolve on canplay through to ensure we don't block
+                State.ttsAudio.oncanplaythrough = () => {
+                    // Optional: enable controls
+                };
 
-                    State.ttsAudio = new Audio(url);
-
-                    // Time update & Seek integration
-                    State.ttsAudio.ontimeupdate = () => {
-                        const currentTime = State.ttsAudio.currentTime;
-                        const duration = State.ttsAudio.duration;
-
-                        // Update time display
-                        const timeEl = $('#audio-time');
-                        if (timeEl && !isNaN(duration)) {
-                            timeEl.textContent = `${this.formatTime(currentTime)} / ${this.formatTime(duration)}`;
-                        }
-
-                        // Update seek bar
-                        const seek = $('#audio-seek');
-                        if (seek && !isNaN(duration)) {
-                            seek.value = (currentTime / duration) * 100;
-                        }
-                    };
-
-                    State.ttsAudio.onended = () => {
-                        URL.revokeObjectURL(url);
-                        TTSManager.isPlaying = false;
-                        const btn = $('#btn-play-audio');
-                        if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
-
-                        // Reset seek
-                        const seek = $('#audio-seek');
-                        if (seek) seek.value = 100;
-                    };
-
-                    State.ttsAudio.onerror = reject;
-
-                    // Resolve promise when playback STARTS so UI is interactive
-                    State.ttsAudio.onplay = () => {
-                        TTSManager.isPlaying = true;
-                        const btn = $('#btn-play-audio');
-                        if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
-                        resolve();
-                    };
-
-                    // Also resolve on canplay through to ensure we don't block
-                    State.ttsAudio.oncanplaythrough = () => {
-                        // Optional: enable controls
-                    };
-
-                    State.ttsAudio.play().then(() => {
-                        // Modern browsers return promise
-                        // Resolve handled in onplay
-                    }).catch(reject);
-                });
-            },
+                State.ttsAudio.play().then(() => {
+                    // Modern browsers return promise
+                    // Resolve handled in onplay
+                }).catch(reject);
+            });
+        },
 
         async playBrowserTTS(text, language) {
-                return new Promise((resolve, reject) => {
-                    if (!('speechSynthesis' in window)) {
-                        reject(new Error('Browser TTS not supported'));
-                        return;
-                    }
-
-                    // Stop any existing
-                    speechSynthesis.cancel();
-
-                    const utterance = new SpeechSynthesisUtterance(text);
-                    utterance.lang = language;
-                    utterance.rate = 0.9;
-
-                    utterance.onstart = () => {
-                        const btn = $('#btn-play-audio');
-                        if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
-                        resolve(); // Resolve immediately
-                    };
-
-                    utterance.onend = () => {
-                        const btn = $('#btn-play-audio');
-                        if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
-                    };
-
-                    utterance.onerror = (err) => {
-                        reject(err);
-                    };
-
-                    speechSynthesis.speak(utterance);
-                });
-            },
-
-            stop() {
-                if (State.ttsAudio) {
-                    State.ttsAudio.pause();
-                    if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
-                    State.ttsAudio = null;
+            return new Promise((resolve, reject) => {
+                if (!('speechSynthesis' in window)) {
+                    reject(new Error('Browser TTS not supported'));
+                    return;
                 }
-                if ('speechSynthesis' in window) {
-                    speechSynthesis.cancel();
-                }
-                // Clear streaming queue and combined blob
-                this.audioQueue = [];
-                this.isPlaying = false;
-                this.isPaused = false;
-                this.currentIndex = 0;
-                this.combinedBlob = null;
-            },
 
-            // Toggle pause for streaming TTS
-            togglePause() {
-                if (!State.ttsAudio) return false;
+                // Stop any existing
+                speechSynthesis.cancel();
 
-                if (State.ttsAudio.paused) {
-                    State.ttsAudio.play();
-                    this.isPaused = false;
-                    return true; // Now playing
-                } else {
-                    State.ttsAudio.pause();
-                    this.isPaused = true;
-                    return false; // Now paused
-                }
-            },
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.lang = language;
+                utterance.rate = 0.9;
 
-            // Helper for time format (MM:SS)
-            formatTime(seconds) {
-                const mins = Math.floor(seconds / 60);
-                const secs = Math.floor(seconds % 60);
-                return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-            }
-        };
-
-        // ============================================
-        // Test UI
-        // ============================================
-        const TestUI = {
-            pendingGroups: [], // Track groups being loaded in background
-            loadingGroupIndex: 0, // Current group being loaded
-            isSubmitting: false, // Prevent duplicate submissions
-
-
-            async startTest() {
-                const llmProvider = $('#llm-provider').value;
-                const targetModel = null; // Default or from settings
-                const concurrency = 3; // Max parallel requests
-
-                // Reset state
-                State.test = {
-                    meta: {
-                        exam_id: State.examSpec.exam_id,
-                        mode: State.currentMode,
-                        start_time: new Date().toISOString(),
-                        time_limits: State.examSpec.scaled_time_limits || State.examSpec.official_time_limits_sec,
-                        language: 'vi-VN' // Default
-                    },
-                    groups: []
+                utterance.onstart = () => {
+                    const btn = $('#btn-play-audio');
+                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
+                    resolve(); // Resolve immediately
                 };
-                State.answers = {};
-                State.currentGroupIndex = 0;
-                State.currentMondaiIndex = 0;
-                State.isTestPaused = false;
-                State.feedback = null;
 
-                // Show loading screen with enhanced UI
-                showScreen('loading-screen');
-                $('#loading-text').textContent = 'Đang tạo đề thi...';
-                $('#loading-hint').textContent = 'AI đang sinh câu hỏi theo cấu trúc JLPT...';
+                utterance.onend = () => {
+                    const btn = $('#btn-play-audio');
+                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
+                };
 
-                const progressBar = $('#loading-progress-inner');
-                const progressText = $('#loading-progress-text');
-                if (progressBar) progressBar.style.width = '0%';
-                if (progressText) progressText.textContent = '0%';
+                utterance.onerror = (err) => {
+                    reject(err);
+                };
 
-                try {
-                    const totalGroups = State.examSpec.groups.length;
-                    const group0 = State.examSpec.groups[0];
-                    const totalChunks = Math.ceil(group0.mondai.length / 2); // chunkSize=2
+                speechSynthesis.speak(utterance);
+            });
+        },
 
-                    // --- PRIORITY MIX STRATEGY ---
-                    // P1: Vocab/Grammar (Group 0) - First 3 chunks (M1-M6 approx)
-                    // P2: Listening (Group 1 if exists) - First 1 chunk (L1)
-                    // P3: Reading (Group 0) - First Reading Chunk (M8 approx)
+        stop() {
+            if (State.ttsAudio) {
+                State.ttsAudio.pause();
+                if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
+                State.ttsAudio = null;
+            }
+            if ('speechSynthesis' in window) {
+                speechSynthesis.cancel();
+            }
+            // Clear streaming queue and combined blob
+            this.audioQueue = [];
+            this.isPlaying = false;
+            this.isPaused = false;
+            this.currentIndex = 0;
+            this.combinedBlob = null;
+        },
 
-                    const pendingPromisesMap = {}; // { chunkIndex: Promise } for Group 0
-                    const pendingGroupsMap = {};   // { groupIndex: [Promises] }
+        // Toggle pause for streaming TTS
+        togglePause() {
+            if (!State.ttsAudio) return false;
 
-                    console.log('Starting Priority Mix Strategy...');
+            if (State.ttsAudio.paused) {
+                State.ttsAudio.play();
+                this.isPaused = false;
+                return true; // Now playing
+            } else {
+                State.ttsAudio.pause();
+                this.isPaused = true;
+                return false; // Now paused
+            }
+        },
 
-                    // 1. Identify Priorities
-                    const priorityChunksG0 = [0, 1, 2].filter(i => i < totalChunks); // First 3 Vocab
+        // Helper for time format (MM:SS)
+        formatTime(seconds) {
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        }
+    };
 
-                    // Find Reading Start Chunk in Group 0
-                    let readingStartChunk = -1;
-                    let mCount = 0;
-                    for (let i = 0; i < group0.mondai.length; i++) {
-                        if (group0.mondai[i].mondai_id === 'M8' || group0.mondai[i].title_vi.includes('Đọc')) {
-                            readingStartChunk = Math.floor(i / 2);
-                            break;
-                        }
+    // ============================================
+    // Test UI
+    // ============================================
+    const TestUI = {
+        pendingGroups: [], // Track groups being loaded in background
+        loadingGroupIndex: 0, // Current group being loaded
+        isSubmitting: false, // Prevent duplicate submissions
+
+
+        async startTest() {
+            const llmProvider = $('#llm-provider').value;
+            const targetModel = null; // Default or from settings
+            const concurrency = 3; // Max parallel requests
+
+            // Reset state
+            State.test = {
+                meta: {
+                    exam_id: State.examSpec.exam_id,
+                    mode: State.currentMode,
+                    start_time: new Date().toISOString(),
+                    time_limits: State.examSpec.scaled_time_limits || State.examSpec.official_time_limits_sec,
+                    language: 'vi-VN' // Default
+                },
+                groups: []
+            };
+            State.answers = {};
+            State.currentGroupIndex = 0;
+            State.currentMondaiIndex = 0;
+            State.isTestPaused = false;
+            State.feedback = null;
+
+            // Show loading screen with enhanced UI
+            showScreen('loading-screen');
+            $('#loading-text').textContent = 'Đang tạo đề thi...';
+            $('#loading-hint').textContent = 'AI đang sinh câu hỏi theo cấu trúc JLPT...';
+
+            const progressBar = $('#loading-progress-inner');
+            const progressText = $('#loading-progress-text');
+            if (progressBar) progressBar.style.width = '0%';
+            if (progressText) progressText.textContent = '0%';
+
+            try {
+                const totalGroups = State.examSpec.groups.length;
+                const group0 = State.examSpec.groups[0];
+                const totalChunks = Math.ceil(group0.mondai.length / 2); // chunkSize=2
+
+                // --- PRIORITY MIX STRATEGY ---
+                // P1: Vocab/Grammar (Group 0) - First 3 chunks (M1-M6 approx)
+                // P2: Listening (Group 1 if exists) - First 1 chunk (L1)
+                // P3: Reading (Group 0) - First Reading Chunk (M8 approx)
+
+                const pendingPromisesMap = {}; // { chunkIndex: Promise } for Group 0
+                const pendingGroupsMap = {};   // { groupIndex: [Promises] }
+
+                console.log('Starting Priority Mix Strategy...');
+
+                // 1. Identify Priorities
+                const priorityChunksG0 = [0, 1, 2].filter(i => i < totalChunks); // First 3 Vocab
+
+                // Find Reading Start Chunk in Group 0
+                let readingStartChunk = -1;
+                let mCount = 0;
+                for (let i = 0; i < group0.mondai.length; i++) {
+                    if (group0.mondai[i].mondai_id === 'M8' || group0.mondai[i].title_vi.includes('Đọc')) {
+                        readingStartChunk = Math.floor(i / 2);
+                        break;
                     }
-                    if (readingStartChunk !== -1 && !priorityChunksG0.includes(readingStartChunk)) {
-                        priorityChunksG0.push(readingStartChunk);
-                    }
-
-                    // 2. Fire Group 0 Priorities
-                    const chunkSize = 2;
-                    priorityChunksG0.forEach(cIdx => {
-                        pendingPromisesMap[cIdx] = RequestQueue.schedule(() =>
-                            Api.generateMondaiChunk(
-                                State.examSpec, State.currentMode, 0, cIdx, chunkSize, [], llmProvider, targetModel
-                            )
-                        ).then(result => ({ chunkIndex: cIdx, result }))
-                            .catch(err => ({ chunkIndex: cIdx, error: err }));
-                    });
-
-                    // 3. Fire Group 1 Priorities (Listening)
-                    if (totalGroups > 1) {
-                        const group1 = State.examSpec.groups[1];
-                        if (group1.group_id === 'listening' || group1.title_vi.includes('Nghe')) {
-                            const p = RequestQueue.schedule(() =>
-                                Api.generateMondaiChunk(
-                                    State.examSpec, State.currentMode, 1, 0, chunkSize, [], llmProvider, targetModel
-                                )
-                            ).then(result => ({ chunkIndex: 0, result }))
-                                .catch(err => ({ chunkIndex: 0, error: err }));
-
-                            pendingGroupsMap[1] = [p]; // Store for Stream C
-                        }
-                    }
-
-                    // 4. Wait for Critical Initial Content (First 2 chunks of G0)
-                    // This ensures we can START the test
-                    const criticalIndices = [0, 1].filter(i => i < totalChunks);
-                    const criticalPromises = criticalIndices.map(i => pendingPromisesMap[i]);
-
-                    await Promise.all(criticalPromises);
-
-                    // Initialize Group 0 structure
-                    State.test.groups[0] = {
-                        group_id: group0.group_id,
-                        title_vi: group0.title_vi,
-                        mondai: []
-                    };
-
-                    // Buffer initial results
-                    const buffer = {};
-                    for (let i of criticalIndices) {
-                        const result = await pendingPromisesMap[i]; // Already resolved
-                        if (result.result) {
-                            buffer[i] = result.result.mondai;
-                        }
-                    }
-
-                    // Push sequentially
-                    let pushedCount = 0;
-                    for (let i = 0; i < totalChunks; i++) {
-                        if (buffer[i]) {
-                            State.test.groups[0].mondai.push(...buffer[i]);
-                            pushedCount++;
-                        } else {
-                            break; // Stop at gap
-                        }
-                    }
-
-                    showScreen('test-screen');
-                    this.initializeTest();
-                    console.log('Test Initialized with Priority Content.');
-
-                    // 5. Start Background Loading (Stream A & C)
-                    // Stream A: Finish Group 0
-                    this.loadRemainingChunksInBackground(
-                        State.test.groups[0],
-                        pushedCount, // Start index
-                        totalChunks,
-                        [], // previousMondai (optimization)
-                        llmProvider,
-                        targetModel,
-                        concurrency,
-                        pendingPromisesMap, // Pass existing promises
-                        pendingGroupsMap
-                    );
-
-                } catch (err) {
-                    console.error('Start Test Error:', err);
-                    showToast('Lỗi khởi tạo bài thi: ' + err.message, 'error');
-                    showScreen('home-screen');
                 }
-            },
+                if (readingStartChunk !== -1 && !priorityChunksG0.includes(readingStartChunk)) {
+                    priorityChunksG0.push(readingStartChunk);
+                }
 
-            async loadRemainingChunksInBackground(groupResult, startChunkIndex, totalChunks, previousMondai, llmProvider, targetModel = null, concurrency = 3, pendingPromisesMap = {}, pendingGroupsMap = {}) {
-                // STREAM C START: Fire off remaining groups (Listening, etc.)
-                console.log('Starting Stream C: Queuing remaining groups...');
-                this.loadRemainingGroupsInBackground(llmProvider, targetModel, concurrency, pendingGroupsMap);
-
-                // STREAM A: Sliding Window Load
-                console.log(`Stream A Active: Queuing chunks ${startChunkIndex} to ${totalChunks - 1} with buffering...`);
-
-                const promises = [];
+                // 2. Fire Group 0 Priorities
                 const chunkSize = 2;
+                priorityChunksG0.forEach(cIdx => {
+                    pendingPromisesMap[cIdx] = RequestQueue.schedule(() =>
+                        Api.generateMondaiChunk(
+                            State.examSpec, State.currentMode, 0, cIdx, chunkSize, [], llmProvider, targetModel
+                        )
+                    ).then(result => ({ chunkIndex: cIdx, result }))
+                        .catch(err => ({ chunkIndex: cIdx, error: err }));
+                });
 
-                for (let i = startChunkIndex; i < totalChunks; i++) {
-                    if (pendingPromisesMap[i]) {
-                        // Wrap priority promise with RETRY logic
-                        // If it resolved with error, try again immediately here
-                        const p = pendingPromisesMap[i].then(outcome => {
-                            if (outcome.error) {
-                                console.warn(`Stream A: Priority chunk ${i} failed previously. Retrying...`, outcome.error);
-                                return RequestQueue.schedule(() =>
-                                    Api.generateMondaiChunk(
-                                        State.examSpec,
-                                        State.currentMode,
-                                        0, // groupIndex
-                                        i,
-                                        chunkSize,
-                                        previousMondai,
-                                        llmProvider,
-                                        targetModel
-                                    )
-                                ).then(result => ({ chunkIndex: i, result }))
-                                    .catch(err => ({ chunkIndex: i, error: err }));
-                            }
-                            return outcome;
-                        });
-                        promises.push(p);
-                    } else {
+                // 3. Fire Group 1 Priorities (Listening)
+                if (totalGroups > 1) {
+                    const group1 = State.examSpec.groups[1];
+                    if (group1.group_id === 'listening' || group1.title_vi.includes('Nghe')) {
                         const p = RequestQueue.schedule(() =>
                             Api.generateMondaiChunk(
-                                State.examSpec,
-                                State.currentMode,
-                                0, // groupIndex
-                                i,
-                                chunkSize,
-                                previousMondai,
-                                llmProvider,
-                                targetModel
+                                State.examSpec, State.currentMode, 1, 0, chunkSize, [], llmProvider, targetModel
                             )
-                        ).then(result => ({ chunkIndex: i, result }))
-                            .catch(err => ({ chunkIndex: i, error: err }));
-                        promises.push(p);
+                        ).then(result => ({ chunkIndex: 0, result }))
+                            .catch(err => ({ chunkIndex: 0, error: err }));
+
+                        pendingGroupsMap[1] = [p]; // Store for Stream C
                     }
                 }
 
-                let nextIndex = startChunkIndex;
+                // 4. Wait for Critical Initial Content (First 2 chunks of G0)
+                // This ensures we can START the test
+                const criticalIndices = [0, 1].filter(i => i < totalChunks);
+                const criticalPromises = criticalIndices.map(i => pendingPromisesMap[i]);
+
+                await Promise.all(criticalPromises);
+
+                // Initialize Group 0 structure
+                State.test.groups[0] = {
+                    group_id: group0.group_id,
+                    title_vi: group0.title_vi,
+                    mondai: []
+                };
+
+                // Buffer initial results
                 const buffer = {};
-                // Pre-fill buffer with any completed pending promises that haven't been pushed
-                // (handled by the promise.then below)
-
-                promises.forEach(p => {
-                    p.then(({ chunkIndex, result, error }) => {
-                        if (result) {
-                            buffer[chunkIndex] = result.mondai;
-                        }
-                        while (buffer[nextIndex]) {
-                            groupResult.mondai.push(...buffer[nextIndex]);
-                            delete buffer[nextIndex];
-                            nextIndex++;
-                            this.updateNavigationButtons();
-                        }
-                    });
-                });
-
-                await Promise.all(promises);
-                console.log('Stream A Complete: First group fully loaded.');
-            },
-
-            async loadRemainingGroupsInBackground(llmProvider, targetModel = null, concurrency = 3, pendingGroupsMap = {}) {
-                const totalGroups = State.examSpec.groups.length;
-                const remainingIndices = [];
-                for (let i = 1; i < totalGroups; i++) remainingIndices.push(i);
-
-                const groupPromises = remainingIndices.map(async (groupIndex) => {
-                    const group = State.examSpec.groups[groupIndex];
-
-                    // Ensure slot
-                    if (!State.test.groups[groupIndex]) {
-                        State.test.groups[groupIndex] = {
-                            group_id: group.group_id,
-                            title_vi: group.title_vi,
-                            mondai: []
-                        };
+                for (let i of criticalIndices) {
+                    const result = await pendingPromisesMap[i]; // Already resolved
+                    if (result.result) {
+                        buffer[i] = result.result.mondai;
                     }
-                    const groupResult = State.test.groups[groupIndex];
+                }
 
-                    const pendingForGroup = pendingGroupsMap[groupIndex] || [];
-                    const chunkSize = 2;
-                    const groupTotalChunks = Math.ceil(group.mondai.length / chunkSize);
-                    const promises = [];
+                // Push sequentially
+                let pushedCount = 0;
+                for (let i = 0; i < totalChunks; i++) {
+                    if (buffer[i]) {
+                        State.test.groups[0].mondai.push(...buffer[i]);
+                        pushedCount++;
+                    } else {
+                        break; // Stop at gap
+                    }
+                }
 
-                    try {
-                        for (let c = 0; c < groupTotalChunks; c++) {
-                            if (pendingForGroup[c]) {
-                                // Wrap priority promise with RETRY logic
-                                const p = pendingForGroup[c].then(outcome => {
-                                    if (outcome.error) {
-                                        console.warn(`Stream C: Priority chunk ${c} (Group ${groupIndex}) failed previously. Retrying...`, outcome.error);
-                                        return RequestQueue.schedule(() =>
-                                            Api.generateMondaiChunk(
-                                                State.examSpec,
-                                                State.currentMode,
-                                                groupIndex,
-                                                c,
-                                                chunkSize,
-                                                [],
-                                                llmProvider,
-                                                targetModel
-                                            )
-                                        ).then(result => ({ chunkIndex: c, result }))
-                                            .catch(err => ({ chunkIndex: c, error: err }));
-                                    }
-                                    return outcome;
-                                });
-                                promises.push(p);
-                            } else {
-                                promises.push(
-                                    RequestQueue.schedule(() =>
+                showScreen('test-screen');
+                this.initializeTest();
+                console.log('Test Initialized with Priority Content.');
+
+                // 5. Start Background Loading (Stream A & C)
+                // Stream A: Finish Group 0
+                this.loadRemainingChunksInBackground(
+                    State.test.groups[0],
+                    pushedCount, // Start index
+                    totalChunks,
+                    [], // previousMondai (optimization)
+                    llmProvider,
+                    targetModel,
+                    concurrency,
+                    pendingPromisesMap, // Pass existing promises
+                    pendingGroupsMap
+                );
+
+            } catch (err) {
+                console.error('Start Test Error:', err);
+                showToast('Lỗi khởi tạo bài thi: ' + err.message, 'error');
+                showScreen('home-screen');
+            }
+        },
+
+        async loadRemainingChunksInBackground(groupResult, startChunkIndex, totalChunks, previousMondai, llmProvider, targetModel = null, concurrency = 3, pendingPromisesMap = {}, pendingGroupsMap = {}) {
+            // STREAM C START: Fire off remaining groups (Listening, etc.)
+            console.log('Starting Stream C: Queuing remaining groups...');
+            this.loadRemainingGroupsInBackground(llmProvider, targetModel, concurrency, pendingGroupsMap);
+
+            // STREAM A: Sliding Window Load
+            console.log(`Stream A Active: Queuing chunks ${startChunkIndex} to ${totalChunks - 1} with buffering...`);
+
+            const promises = [];
+            const chunkSize = 2;
+
+            for (let i = startChunkIndex; i < totalChunks; i++) {
+                if (pendingPromisesMap[i]) {
+                    // Wrap priority promise with RETRY logic
+                    // If it resolved with error, try again immediately here
+                    const p = pendingPromisesMap[i].then(outcome => {
+                        if (outcome.error) {
+                            console.warn(`Stream A: Priority chunk ${i} failed previously. Retrying...`, outcome.error);
+                            return RequestQueue.schedule(() =>
+                                Api.generateMondaiChunk(
+                                    State.examSpec,
+                                    State.currentMode,
+                                    0, // groupIndex
+                                    i,
+                                    chunkSize,
+                                    previousMondai,
+                                    llmProvider,
+                                    targetModel
+                                )
+                            ).then(result => ({ chunkIndex: i, result }))
+                                .catch(err => ({ chunkIndex: i, error: err }));
+                        }
+                        return outcome;
+                    });
+                    promises.push(p);
+                } else {
+                    const p = RequestQueue.schedule(() =>
+                        Api.generateMondaiChunk(
+                            State.examSpec,
+                            State.currentMode,
+                            0, // groupIndex
+                            i,
+                            chunkSize,
+                            previousMondai,
+                            llmProvider,
+                            targetModel
+                        )
+                    ).then(result => ({ chunkIndex: i, result }))
+                        .catch(err => ({ chunkIndex: i, error: err }));
+                    promises.push(p);
+                }
+            }
+
+            let nextIndex = startChunkIndex;
+            const buffer = {};
+            // Pre-fill buffer with any completed pending promises that haven't been pushed
+            // (handled by the promise.then below)
+
+            promises.forEach(p => {
+                p.then(({ chunkIndex, result, error }) => {
+                    if (result) {
+                        buffer[chunkIndex] = result.mondai;
+                    }
+                    while (buffer[nextIndex]) {
+                        groupResult.mondai.push(...buffer[nextIndex]);
+                        delete buffer[nextIndex];
+                        nextIndex++;
+                        this.updateNavigationButtons();
+                    }
+                });
+            });
+
+            await Promise.all(promises);
+            console.log('Stream A Complete: First group fully loaded.');
+        },
+
+        async loadRemainingGroupsInBackground(llmProvider, targetModel = null, concurrency = 3, pendingGroupsMap = {}) {
+            const totalGroups = State.examSpec.groups.length;
+            const remainingIndices = [];
+            for (let i = 1; i < totalGroups; i++) remainingIndices.push(i);
+
+            const groupPromises = remainingIndices.map(async (groupIndex) => {
+                const group = State.examSpec.groups[groupIndex];
+
+                // Ensure slot
+                if (!State.test.groups[groupIndex]) {
+                    State.test.groups[groupIndex] = {
+                        group_id: group.group_id,
+                        title_vi: group.title_vi,
+                        mondai: []
+                    };
+                }
+                const groupResult = State.test.groups[groupIndex];
+
+                const pendingForGroup = pendingGroupsMap[groupIndex] || [];
+                const chunkSize = 2;
+                const groupTotalChunks = Math.ceil(group.mondai.length / chunkSize);
+                const promises = [];
+
+                try {
+                    for (let c = 0; c < groupTotalChunks; c++) {
+                        if (pendingForGroup[c]) {
+                            // Wrap priority promise with RETRY logic
+                            const p = pendingForGroup[c].then(outcome => {
+                                if (outcome.error) {
+                                    console.warn(`Stream C: Priority chunk ${c} (Group ${groupIndex}) failed previously. Retrying...`, outcome.error);
+                                    return RequestQueue.schedule(() =>
                                         Api.generateMondaiChunk(
                                             State.examSpec,
                                             State.currentMode,
@@ -1836,413 +1783,432 @@
                                             targetModel
                                         )
                                     ).then(result => ({ chunkIndex: c, result }))
-                                        .catch(err => ({ chunkIndex: c, error: err }))
-                                );
-                            }
-                        }
-
-                        // Buffer logic
-                        let nextIdx = 0;
-                        const buffer = {};
-
-                        promises.forEach(p => {
-                            p.then(({ chunkIndex, result }) => {
-                                if (result) buffer[chunkIndex] = result.mondai;
-                                while (buffer[nextIdx]) {
-                                    groupResult.mondai.push(...buffer[nextIdx]);
-                                    delete buffer[nextIdx];
-                                    nextIdx++;
+                                        .catch(err => ({ chunkIndex: c, error: err }));
                                 }
+                                return outcome;
                             });
-                        });
+                            promises.push(p);
+                        } else {
+                            promises.push(
+                                RequestQueue.schedule(() =>
+                                    Api.generateMondaiChunk(
+                                        State.examSpec,
+                                        State.currentMode,
+                                        groupIndex,
+                                        c,
+                                        chunkSize,
+                                        [],
+                                        llmProvider,
+                                        targetModel
+                                    )
+                                ).then(result => ({ chunkIndex: c, result }))
+                                    .catch(err => ({ chunkIndex: c, error: err }))
+                            );
+                        }
+                    }
 
-                        await Promise.all(promises);
-                        console.log(`Stream C Update: Group ${groupIndex + 1} (${group.title_vi}) fully loaded`);
-                    } catch (err) {
-                        console.error(`Stream C Error: Group ${groupIndex + 1}:`, err);
+                    // Buffer logic
+                    let nextIdx = 0;
+                    const buffer = {};
+
+                    promises.forEach(p => {
+                        p.then(({ chunkIndex, result }) => {
+                            if (result) buffer[chunkIndex] = result.mondai;
+                            while (buffer[nextIdx]) {
+                                groupResult.mondai.push(...buffer[nextIdx]);
+                                delete buffer[nextIdx];
+                                nextIdx++;
+                            }
+                        });
+                    });
+
+                    await Promise.all(promises);
+                    console.log(`Stream C Update: Group ${groupIndex + 1} (${group.title_vi}) fully loaded`);
+                } catch (err) {
+                    console.error(`Stream C Error: Group ${groupIndex + 1}:`, err);
+                }
+            });
+
+            await Promise.all(groupPromises);
+            console.log('Stream C Complete: All groups loaded');
+        },
+
+
+        isGroupReady(groupIndex) {
+            return State.test.groups[groupIndex] !== undefined;
+        },
+
+        simulateProgress(bar, text) {
+            let progress = 0;
+            const startTime = Date.now();
+            const targetDuration = 25000; // 25 seconds to reach 98%
+
+            return setInterval(() => {
+                const elapsed = Date.now() - startTime;
+                // Ease-out curve: fast at start, slow near end
+                // Reaches 98% at ~25 seconds, then stops
+                const targetProgress = 98 * (1 - Math.pow(1 - Math.min(elapsed / targetDuration, 1), 2));
+                progress = Math.min(Math.round(targetProgress), 98);
+
+                bar.style.width = `${progress}%`;
+                text.textContent = `${progress}%`;
+            }, 200);
+        },
+
+        collectUserHistory() {
+            if (!State.userData) return null;
+
+            const history = {};
+
+            // Get last 5 tests
+            if (State.userData.history && State.userData.history.length > 0) {
+                history.recentResults = State.userData.history.slice(-5);
+            }
+
+            // Get mistake patterns
+            if (State.userData.mistakeBook && State.userData.mistakeBook.length > 0) {
+                // Count tags from mistakes
+                const tagCounts = {};
+                State.userData.mistakeBook.forEach(m => {
+                    if (m.tags && Array.isArray(m.tags)) {
+                        m.tags.forEach(tag => {
+                            tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+                        });
                     }
                 });
 
-                await Promise.all(groupPromises);
-                console.log('Stream C Complete: All groups loaded');
-            },
+                // Get top 5 weak tags
+                history.weakTags = Object.entries(tagCounts)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 5)
+                    .map(([tag]) => tag);
+            }
 
+            return history;
+        },
 
-            isGroupReady(groupIndex) {
-                return State.test.groups[groupIndex] !== undefined;
-            },
+        initializeTest() {
+            const test = State.test;
+            const spec = State.examSpec;
 
-            simulateProgress(bar, text) {
-                let progress = 0;
-                const startTime = Date.now();
-                const targetDuration = 25000; // 25 seconds to reach 98%
+            // Start timers
+            Timer.startOverallTimer(test.meta.time_limits.overall_sec);
 
-                return setInterval(() => {
-                    const elapsed = Date.now() - startTime;
-                    // Ease-out curve: fast at start, slow near end
-                    // Reaches 98% at ~25 seconds, then stops
-                    const targetProgress = 98 * (1 - Math.pow(1 - Math.min(elapsed / targetDuration, 1), 2));
-                    progress = Math.min(Math.round(targetProgress), 98);
+            const firstGroup = test.meta.time_limits.groups[0];
+            if (firstGroup) {
+                $('#group-label').textContent = this.getGroupLabel(0);
+                Timer.startGroupTimer(firstGroup.time_sec);
+            }
 
-                    bar.style.width = `${progress}%`;
-                    text.textContent = `${progress}%`;
-                }, 200);
-            },
+            // Update total mondai count
+            const totalMondai = ExamLoader.getTotalMondai(spec);
+            $('#mondai-total').textContent = totalMondai;
 
-            collectUserHistory() {
-                if (!State.userData) return null;
+            // Render first mondai
+            this.renderCurrentMondai();
+        },
 
-                const history = {};
+        getGroupLabel(groupIndex) {
+            const group = State.test.groups[groupIndex];
+            return group?.title_vi || 'Phần';
+        },
 
-                // Get last 5 tests
-                if (State.userData.history && State.userData.history.length > 0) {
-                    history.recentResults = State.userData.history.slice(-5);
+        renderCurrentMondai() {
+            const test = State.test;
+            const mondaiData = this.getCurrentMondaiData();
+
+            if (!mondaiData) return;
+
+            const { group, mondai } = mondaiData;
+            const language = test.meta.language;
+            const isJapanese = language === 'ja-JP';
+
+            // Update navigation
+            // globalIndex is based on State.test.groups (generated mondai)
+            const globalIndex = this.getGlobalMondaiIndex();
+
+            // Get current group from GENERATED test (for position within loaded mondai)
+            const currentGroup = State.test.groups[State.currentGroupIndex];
+            if (!currentGroup) return;
+
+            // Calculate position within current group using GENERATED test
+            let firstMondaiOfGroup = 0;
+            for (let i = 0; i < State.currentGroupIndex; i++) {
+                if (State.test.groups[i]) {
+                    firstMondaiOfGroup += State.test.groups[i].mondai.length;
                 }
+            }
+            const mondaiPosInGroup = globalIndex - firstMondaiOfGroup + 1;
 
-                // Get mistake patterns
-                if (State.userData.mistakeBook && State.userData.mistakeBook.length > 0) {
-                    // Count tags from mistakes
-                    const tagCounts = {};
-                    State.userData.mistakeBook.forEach(m => {
-                        if (m.tags && Array.isArray(m.tags)) {
-                            m.tags.forEach(tag => {
-                                tagCounts[tag] = (tagCounts[tag] || 0) + 1;
-                            });
-                        }
-                    });
+            // Total uses EXAM SPEC for the full intended count
+            const currentGroupSpec = State.examSpec.groups[State.currentGroupIndex];
+            const totalMondaiInGroup = currentGroupSpec ? currentGroupSpec.mondai.length : currentGroup.mondai.length;
 
-                    // Get top 5 weak tags
-                    history.weakTags = Object.entries(tagCounts)
-                        .sort((a, b) => b[1] - a[1])
-                        .slice(0, 5)
-                        .map(([tag]) => tag);
-                }
+            $('#mondai-current').textContent = Math.min(mondaiPosInGroup, totalMondaiInGroup); // Cap at total
+            $('#mondai-total').textContent = totalMondaiInGroup;
 
-                return history;
-            },
+            // Calculate total mondai from exam spec for navigation buttons
+            const totalMondaiFromSpec = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
+            // Block navigation to unloaded mondai
+            const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
+            $('#btn-prev-mondai').disabled = globalIndex === 0;
 
-            initializeTest() {
-                const test = State.test;
-                const spec = State.examSpec;
+            // Soft disable for Next button if loading (allow click for toast)
+            const btnNext = $('#btn-next-mondai');
+            const isLast = globalIndex === totalMondaiFromSpec - 1;
 
-                // Start timers
-                Timer.startOverallTimer(test.meta.time_limits.overall_sec);
+            if (isLast) {
+                btnNext.disabled = true;
+                btnNext.innerHTML = 'Next >';
+            } else if (!nextMondaiLoaded) {
+                btnNext.disabled = true; // Native disable
+                btnNext.innerHTML = '<span class="loading-spinner"></span> Loading...';
+            } else {
+                btnNext.disabled = false;
+                btnNext.innerHTML = 'Next >'; // Or specific text
+            }
 
-                const firstGroup = test.meta.time_limits.groups[0];
-                if (firstGroup) {
-                    $('#group-label').textContent = this.getGroupLabel(0);
-                    Timer.startGroupTimer(firstGroup.time_sec);
-                }
+            // Update header
+            $('#mondai-title').textContent = mondai.title_vi;
+            $('#mondai-instructions').textContent = mondai.instructions_vi || '';
 
-                // Update total mondai count
-                const totalMondai = ExamLoader.getTotalMondai(spec);
-                $('#mondai-total').textContent = totalMondai;
+            // Render passage if exists (with zoom controls)
+            const passageContainer = $('#passage-container');
+            const passageText = $('#passage-text');
 
-                // Render first mondai
-                this.renderCurrentMondai();
-            },
-
-            getGroupLabel(groupIndex) {
-                const group = State.test.groups[groupIndex];
-                return group?.title_vi || 'Phần';
-            },
-
-            renderCurrentMondai() {
-                const test = State.test;
-                const mondaiData = this.getCurrentMondaiData();
-
-                if (!mondaiData) return;
-
-                const { group, mondai } = mondaiData;
-                const language = test.meta.language;
-                const isJapanese = language === 'ja-JP';
-
-                // Update navigation
-                // globalIndex is based on State.test.groups (generated mondai)
-                const globalIndex = this.getGlobalMondaiIndex();
-
-                // Get current group from GENERATED test (for position within loaded mondai)
-                const currentGroup = State.test.groups[State.currentGroupIndex];
-                if (!currentGroup) return;
-
-                // Calculate position within current group using GENERATED test
-                let firstMondaiOfGroup = 0;
-                for (let i = 0; i < State.currentGroupIndex; i++) {
-                    if (State.test.groups[i]) {
-                        firstMondaiOfGroup += State.test.groups[i].mondai.length;
-                    }
-                }
-                const mondaiPosInGroup = globalIndex - firstMondaiOfGroup + 1;
-
-                // Total uses EXAM SPEC for the full intended count
-                const currentGroupSpec = State.examSpec.groups[State.currentGroupIndex];
-                const totalMondaiInGroup = currentGroupSpec ? currentGroupSpec.mondai.length : currentGroup.mondai.length;
-
-                $('#mondai-current').textContent = Math.min(mondaiPosInGroup, totalMondaiInGroup); // Cap at total
-                $('#mondai-total').textContent = totalMondaiInGroup;
-
-                // Calculate total mondai from exam spec for navigation buttons
-                const totalMondaiFromSpec = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
-                // Block navigation to unloaded mondai
-                const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
-                $('#btn-prev-mondai').disabled = globalIndex === 0;
-
-                // Soft disable for Next button if loading (allow click for toast)
-                const btnNext = $('#btn-next-mondai');
-                const isLast = globalIndex === totalMondaiFromSpec - 1;
-
-                if (isLast) {
-                    btnNext.disabled = true;
-                    btnNext.innerHTML = 'Next >';
-                } else if (!nextMondaiLoaded) {
-                    btnNext.disabled = true; // Native disable
-                    btnNext.innerHTML = '<span class="loading-spinner"></span> Loading...';
+            if (passageContainer) {
+                if (mondai.passage?.text) {
+                    passageContainer.classList.remove('hidden');
+                    passageText.textContent = mondai.passage.text;
+                    passageText.className = `passage-text ${isJapanese ? '' : 'zh'}`;
                 } else {
-                    btnNext.disabled = false;
-                    btnNext.innerHTML = 'Next >'; // Or specific text
+                    passageContainer.classList.add('hidden');
+                    passageText.textContent = '';
                 }
+            }
 
-                // Update header
-                $('#mondai-title').textContent = mondai.title_vi;
-                $('#mondai-instructions').textContent = mondai.instructions_vi || '';
+            // Render audio player for listening
+            const audioPlayer = $('#audio-player');
+            const hasAudio = mondai.items.some(item => item.media?.script_text);
+            const audioScript = $('#audio-script');
+            const btnShowScript = $('#btn-show-script');
 
-                // Render passage if exists (with zoom controls)
-                const passageContainer = $('#passage-container');
-                const passageText = $('#passage-text');
+            if (hasAudio) {
+                audioPlayer.classList.remove('hidden');
 
-                if (passageContainer) {
-                    if (mondai.passage?.text) {
-                        passageContainer.classList.remove('hidden');
-                        passageText.textContent = mondai.passage.text;
-                        passageText.className = `passage-text ${isJapanese ? '' : 'zh'}`;
-                    } else {
-                        passageContainer.classList.add('hidden');
-                        passageText.textContent = '';
-                    }
-                }
-
-                // Render audio player for listening
-                const audioPlayer = $('#audio-player');
-                const hasAudio = mondai.items.some(item => item.media?.script_text);
-                const audioScript = $('#audio-script');
-                const btnShowScript = $('#btn-show-script');
-
-                if (hasAudio) {
-                    audioPlayer.classList.remove('hidden');
-
-                    // Setup script
-                    const scriptText = mondai.items.find(item => item.media?.script_text)?.media?.script_text;
-                    if (scriptText) {
-                        btnShowScript.classList.remove('hidden');
-                        audioScript.innerHTML = this.escapeHtml(scriptText).replace(/\n/g, '<br>');
-                        audioScript.classList.add('hidden');
-                        btnShowScript.textContent = 'Hiển thị lời thoại';
-                    } else {
-                        btnShowScript.classList.add('hidden');
-                        audioScript.innerHTML = '';
-                    }
+                // Setup script
+                const scriptText = mondai.items.find(item => item.media?.script_text)?.media?.script_text;
+                if (scriptText) {
+                    btnShowScript.classList.remove('hidden');
+                    audioScript.innerHTML = this.escapeHtml(scriptText).replace(/\n/g, '<br>');
+                    audioScript.classList.add('hidden');
+                    btnShowScript.textContent = 'Hiển thị lời thoại';
                 } else {
-                    audioPlayer.classList.add('hidden');
+                    btnShowScript.classList.add('hidden');
+                    audioScript.innerHTML = '';
                 }
+            } else {
+                audioPlayer.classList.add('hidden');
+            }
 
-                // Render questions
-                this.renderQuestions(mondai.items, language);
+            // Render questions
+            this.renderQuestions(mondai.items, language);
 
-                // Render question dots
-                this.renderQuestionDots(mondai.items);
+            // Render question dots
+            this.renderQuestionDots(mondai.items);
 
-                // Update submit button text to clarify what is being submitted
-                const submitBtn = $('#btn-submit-group');
-                if (submitBtn) {
-                    const currentGroupTitle = this.getGroupLabel(State.currentGroupIndex);
-                    const isLastGroup = State.currentGroupIndex === State.examSpec.groups.length - 1;
+            // Update submit button text to clarify what is being submitted
+            const submitBtn = $('#btn-submit-group');
+            if (submitBtn) {
+                const currentGroupTitle = this.getGroupLabel(State.currentGroupIndex);
+                const isLastGroup = State.currentGroupIndex === State.examSpec.groups.length - 1;
 
-                    // Only update text if not currently submitting/loading
-                    if (!submitBtn.disabled || submitBtn.textContent.includes('phần')) {
-                        if (isLastGroup) {
-                            submitBtn.innerHTML = '<span class="btn-icon"><i class="fa-solid fa-flag-checkered"></i></span> Nộp bài thi';
-                            submitBtn.classList.remove('btn-secondary');
-                            submitBtn.classList.add('btn-primary');
-                        } else {
-                            submitBtn.innerHTML = `Nộp phần ${currentGroupTitle}`;
-                            submitBtn.classList.remove('btn-primary');
-                            submitBtn.classList.add('btn-secondary');
-                        }
+                // Only update text if not currently submitting/loading
+                if (!submitBtn.disabled || submitBtn.textContent.includes('phần')) {
+                    if (isLastGroup) {
+                        submitBtn.innerHTML = '<span class="btn-icon"><i class="fa-solid fa-flag-checkered"></i></span> Nộp bài thi';
+                        submitBtn.classList.remove('btn-secondary');
+                        submitBtn.classList.add('btn-primary');
+                    } else {
+                        submitBtn.innerHTML = `Nộp phần ${currentGroupTitle}`;
+                        submitBtn.classList.remove('btn-primary');
+                        submitBtn.classList.add('btn-secondary');
                     }
                 }
-            },
+            }
+        },
 
-            updateAudioButton(state) {
-                const btn = $('#btn-play-audio');
-                if (!btn) return;
+        updateAudioButton(state) {
+            const btn = $('#btn-play-audio');
+            if (!btn) return;
 
-                if (state === 'playing') {
-                    btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
-                } else if (state === 'paused') {
-                    btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-play"></i></span> Tiếp tục`;
-                } else if (state === 'loading') {
-                    btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-spinner fa-spin"></i></span> Đang tải...`;
-                } else { // default/replay
-                    btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
+            if (state === 'playing') {
+                btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
+            } else if (state === 'paused') {
+                btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-play"></i></span> Tiếp tục`;
+            } else if (state === 'loading') {
+                btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-spinner fa-spin"></i></span> Đang tải...`;
+            } else { // default/replay
+                btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
+            }
+        },
+
+        async handleAudio() {
+            const btn = $('#btn-play-audio');
+            if (!btn) return;
+
+            // Streaming TTS Handle (check first since it uses the same State.ttsAudio)
+            if (TTSManager.isPlaying || TTSManager.isPaused) {
+                if (State.ttsAudio && !State.ttsAudio.ended) {
+                    const isNowPlaying = TTSManager.togglePause();
+                    this.updateAudioButton(isNowPlaying ? 'playing' : 'paused');
+                    return;
                 }
-            },
+            }
 
-            async handleAudio() {
-                const btn = $('#btn-play-audio');
-                if (!btn) return;
-
-                // Streaming TTS Handle (check first since it uses the same State.ttsAudio)
-                if (TTSManager.isPlaying || TTSManager.isPaused) {
-                    if (State.ttsAudio && !State.ttsAudio.ended) {
-                        const isNowPlaying = TTSManager.togglePause();
-                        this.updateAudioButton(isNowPlaying ? 'playing' : 'paused');
-                        return;
-                    }
-                }
-
-                // HTML5 Audio Handle (non-streaming)
-                if (State.ttsAudio && State.ttsAudio.src && !State.ttsAudio.error) {
-                    if (!State.ttsAudio.ended) {
-                        if (State.ttsAudio.paused) {
-                            await State.ttsAudio.play();
-                            this.updateAudioButton('playing');
-                        } else {
-                            State.ttsAudio.pause();
-                            this.updateAudioButton('paused');
-                        }
-                        return;
-                    }
-                    // If ended, we restart below
-                }
-
-                // Browser TTS Handle
-                if ('speechSynthesis' in window && speechSynthesis.speaking) {
-                    if (speechSynthesis.paused) {
-                        speechSynthesis.resume();
+            // HTML5 Audio Handle (non-streaming)
+            if (State.ttsAudio && State.ttsAudio.src && !State.ttsAudio.error) {
+                if (!State.ttsAudio.ended) {
+                    if (State.ttsAudio.paused) {
+                        await State.ttsAudio.play();
                         this.updateAudioButton('playing');
                     } else {
-                        speechSynthesis.pause();
+                        State.ttsAudio.pause();
                         this.updateAudioButton('paused');
                     }
                     return;
                 }
+                // If ended, we restart below
+            }
 
-                // Start new playback logic
-                const mondaiData = this.getCurrentMondaiData();
-                if (!mondaiData) return;
-
-                // Ensure stopped before starting new
-                TTSManager.stop();
-
-                const scriptItem = mondaiData.mondai.items.find(item => item.media?.script_text);
-                if (!scriptItem) return;
-
-                btn.disabled = true;
-                this.updateAudioButton('loading');
-
-                try {
-                    // Use Streaming TTS for immediate playback
-                    await TTSManager.playStreaming(scriptItem.media.script_text, State.test.meta.language);
-                    // Note: TTSManager updates button on start/end, but we rely on events there
-                } catch (err) {
-                    console.error(err);
-                    this.updateAudioButton('default'); // Show Retry/Play icon
-                } finally {
-                    btn.disabled = false;
-                }
-            },
-
-
-
-            getCurrentMondaiData() {
-                const test = State.test;
-                let idx = 0;
-
-                for (const group of test.groups) {
-                    for (const mondai of group.mondai) {
-                        if (idx === State.currentMondaiIndex) {
-                            return { group, mondai };
-                        }
-                        idx++;
-                    }
-                }
-                return null;
-            },
-
-            // Check if a mondai at globalIndex has been loaded
-            isMondaiLoaded(globalIndex) {
-                if (globalIndex < 0) return false;
-                let idx = 0;
-                for (const group of State.test.groups) {
-                    if (!group || !group.mondai) continue; // Group not loaded yet
-                    for (const mondai of group.mondai) {
-                        if (idx === globalIndex) return true;
-                        idx++;
-                    }
-                }
-                return false;
-            },
-
-            // Update navigation buttons without re-rendering (for background loading)
-            updateNavigationButtons() {
-                if (!State.test || !State.examSpec) return;
-
-                const globalIndex = this.getGlobalMondaiIndex();
-                const totalMondaiFromSpec = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
-                const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
-                const btnNext = $('#btn-next-mondai');
-                const isLast = globalIndex === totalMondaiFromSpec - 1;
-
-                if (isLast) {
-                    btnNext.disabled = true;
-                    btnNext.innerHTML = 'Tiếp theo >';
-                } else if (!nextMondaiLoaded) {
-                    btnNext.disabled = true;
-                    btnNext.innerHTML = '<span class="loading-spinner"></span> Loading...';
+            // Browser TTS Handle
+            if ('speechSynthesis' in window && speechSynthesis.speaking) {
+                if (speechSynthesis.paused) {
+                    speechSynthesis.resume();
+                    this.updateAudioButton('playing');
                 } else {
-                    btnNext.disabled = false;
-                    btnNext.innerHTML = 'Tiếp theo >';
+                    speechSynthesis.pause();
+                    this.updateAudioButton('paused');
                 }
+                return;
+            }
 
-                // Update loading indicator
-                const loadingIndicator = $('#nav-loading-indicator');
-                if (loadingIndicator) {
-                    if (!nextMondaiLoaded && globalIndex < totalMondaiFromSpec - 1) {
-                        loadingIndicator.classList.remove('hidden');
-                    } else {
-                        loadingIndicator.classList.add('hidden');
+            // Start new playback logic
+            const mondaiData = this.getCurrentMondaiData();
+            if (!mondaiData) return;
+
+            // Ensure stopped before starting new
+            TTSManager.stop();
+
+            const scriptItem = mondaiData.mondai.items.find(item => item.media?.script_text);
+            if (!scriptItem) return;
+
+            btn.disabled = true;
+            this.updateAudioButton('loading');
+
+            try {
+                // Use Streaming TTS for immediate playback
+                await TTSManager.playStreaming(scriptItem.media.script_text, State.test.meta.language);
+                // Note: TTSManager updates button on start/end, but we rely on events there
+            } catch (err) {
+                console.error(err);
+                this.updateAudioButton('default'); // Show Retry/Play icon
+            } finally {
+                btn.disabled = false;
+            }
+        },
+
+
+
+        getCurrentMondaiData() {
+            const test = State.test;
+            let idx = 0;
+
+            for (const group of test.groups) {
+                for (const mondai of group.mondai) {
+                    if (idx === State.currentMondaiIndex) {
+                        return { group, mondai };
                     }
+                    idx++;
                 }
+            }
+            return null;
+        },
 
-                // Notify user if button just became enabled
-                if (wasDisabled && !$('#btn-next-mondai').disabled) {
-                    // Toast is optional - can be noisy, so just update button silently
+        // Check if a mondai at globalIndex has been loaded
+        isMondaiLoaded(globalIndex) {
+            if (globalIndex < 0) return false;
+            let idx = 0;
+            for (const group of State.test.groups) {
+                if (!group || !group.mondai) continue; // Group not loaded yet
+                for (const mondai of group.mondai) {
+                    if (idx === globalIndex) return true;
+                    idx++;
                 }
-            },
+            }
+            return false;
+        },
 
-            getGlobalMondaiIndex() {
-                return State.currentMondaiIndex;
-            },
+        // Update navigation buttons without re-rendering (for background loading)
+        updateNavigationButtons() {
+            if (!State.test || !State.examSpec) return;
 
-            getTotalMondaiCount() {
-                return State.test.groups.reduce((sum, g) => sum + g.mondai.length, 0);
-            },
+            const globalIndex = this.getGlobalMondaiIndex();
+            const totalMondaiFromSpec = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
+            const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
+            const btnNext = $('#btn-next-mondai');
+            const isLast = globalIndex === totalMondaiFromSpec - 1;
 
-            renderQuestions(items, language) {
-                const container = $('#questions-container');
-                const isJapanese = language === 'ja-JP';
+            if (isLast) {
+                btnNext.disabled = true;
+                btnNext.innerHTML = 'Tiếp theo >';
+            } else if (!nextMondaiLoaded) {
+                btnNext.disabled = true;
+                btnNext.innerHTML = '<span class="loading-spinner"></span> Loading...';
+            } else {
+                btnNext.disabled = false;
+                btnNext.innerHTML = 'Tiếp theo >';
+            }
 
-                container.innerHTML = items.map((item, idx) => {
-                    // Detect "Still generating" placeholder content which might come from LLM/Server during partial loads
-                    const isPlaceholder = item.choices && item.choices.some(c =>
-                        c && (c.includes('tạo đề') ||
-                            c.includes('Vui lòng đợi') ||
-                            c.includes('Generating') ||
-                            c.includes('đang tạo'))
-                    );
+            // Update loading indicator
+            const loadingIndicator = $('#nav-loading-indicator');
+            if (loadingIndicator) {
+                if (!nextMondaiLoaded && globalIndex < totalMondaiFromSpec - 1) {
+                    loadingIndicator.classList.remove('hidden');
+                } else {
+                    loadingIndicator.classList.add('hidden');
+                }
+            }
 
-                    if (isPlaceholder) {
-                        return `
+            // Notify user if button just became enabled
+            if (wasDisabled && !$('#btn-next-mondai').disabled) {
+                // Toast is optional - can be noisy, so just update button silently
+            }
+        },
+
+        getGlobalMondaiIndex() {
+            return State.currentMondaiIndex;
+        },
+
+        getTotalMondaiCount() {
+            return State.test.groups.reduce((sum, g) => sum + g.mondai.length, 0);
+        },
+
+        renderQuestions(items, language) {
+            const container = $('#questions-container');
+            const isJapanese = language === 'ja-JP';
+
+            container.innerHTML = items.map((item, idx) => {
+                // Detect "Still generating" placeholder content which might come from LLM/Server during partial loads
+                const isPlaceholder = item.choices && item.choices.some(c =>
+                    c && (c.includes('tạo đề') ||
+                        c.includes('Vui lòng đợi') ||
+                        c.includes('Generating') ||
+                        c.includes('đang tạo'))
+                );
+
+                if (isPlaceholder) {
+                    return `
         <div class="question-item placeholder-item" data-question-id="${item.id}">
           <div class="question-number">Câu ${idx + 1}</div>
           <div class="question-prompt text-muted" style="text-align: center; padding: 2rem; color: #888;">
@@ -2250,9 +2216,9 @@
           </div>
         </div>
       `;
-                    }
+                }
 
-                    return `
+                return `
         <div class="question-item" data-question-id="${item.id}">
           <div class="question-number">Câu ${idx + 1}</div>
           <div class="question-prompt ${isJapanese ? '' : 'zh'}">${this.escapeHtml(item.prompt)}</div>
@@ -2268,627 +2234,627 @@
           </div>
         </div>
       `;
-                }).join('');
+            }).join('');
 
-                // Add click handlers
-                container.querySelectorAll('.choice').forEach(btn => {
-                    btn.addEventListener('click', () => this.selectChoice(btn));
-                });
-            },
+            // Add click handlers
+            container.querySelectorAll('.choice').forEach(btn => {
+                btn.addEventListener('click', () => this.selectChoice(btn));
+            });
+        },
 
-            renderQuestionDots(items) {
-                const container = $('#question-dots');
+        renderQuestionDots(items) {
+            const container = $('#question-dots');
 
-                container.innerHTML = items.map((item, idx) => `
+            container.innerHTML = items.map((item, idx) => `
         <div class="question-dot ${State.answers[item.id] !== undefined ? 'answered' : ''}"
              data-question-id="${item.id}"
              data-index="${idx}"></div>
       `).join('');
 
-                container.querySelectorAll('.question-dot').forEach(dot => {
-                    dot.addEventListener('click', () => {
-                        const questionId = dot.dataset.questionId;
-                        const el = $(`[data-question-id="${questionId}"].question-item`);
-                        if (el) {
-                            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        }
-                    });
+            container.querySelectorAll('.question-dot').forEach(dot => {
+                dot.addEventListener('click', () => {
+                    const questionId = dot.dataset.questionId;
+                    const el = $(`[data-question-id="${questionId}"].question-item`);
+                    if (el) {
+                        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
                 });
-            },
+            });
+        },
 
-            selectChoice(btn) {
-                const questionId = btn.dataset.questionId;
-                const choiceIndex = parseInt(btn.dataset.choiceIndex);
+        selectChoice(btn) {
+            const questionId = btn.dataset.questionId;
+            const choiceIndex = parseInt(btn.dataset.choiceIndex);
 
-                State.answers[questionId] = choiceIndex;
+            State.answers[questionId] = choiceIndex;
 
-                // Update UI
-                const questionItem = btn.closest('.question-item');
-                questionItem.querySelectorAll('.choice').forEach(c => c.classList.remove('selected'));
-                btn.classList.add('selected');
+            // Update UI
+            const questionItem = btn.closest('.question-item');
+            questionItem.querySelectorAll('.choice').forEach(c => c.classList.remove('selected'));
+            btn.classList.add('selected');
 
-                // Update dot
-                const dot = $(`.question-dot[data-question-id="${questionId}"]`);
-                if (dot) dot.classList.add('answered');
-            },
+            // Update dot
+            const dot = $(`.question-dot[data-question-id="${questionId}"]`);
+            if (dot) dot.classList.add('answered');
+        },
 
-            navigateMondai(direction) {
-                const total = this.getTotalMondaiCount();
-                const newIndex = State.currentMondaiIndex + direction;
+        navigateMondai(direction) {
+            const total = this.getTotalMondaiCount();
+            const newIndex = State.currentMondaiIndex + direction;
 
-                // Block forward navigation to unloaded mondai
-                if (direction > 0 && !this.isMondaiLoaded(newIndex)) {
-                    return;
-                }
+            // Block forward navigation to unloaded mondai
+            if (direction > 0 && !this.isMondaiLoaded(newIndex)) {
+                return;
+            }
 
-                if (newIndex >= 0 && newIndex < total) {
-                    // Check if crossing group boundary
-                    const oldGroupIndex = this.getGroupIndexForMondai(State.currentMondaiIndex);
-                    const newGroupIndex = this.getGroupIndexForMondai(newIndex);
+            if (newIndex >= 0 && newIndex < total) {
+                // Check if crossing group boundary
+                const oldGroupIndex = this.getGroupIndexForMondai(State.currentMondaiIndex);
+                const newGroupIndex = this.getGroupIndexForMondai(newIndex);
 
-                    if (newGroupIndex !== oldGroupIndex) {
-                        State.currentGroupIndex = newGroupIndex;
-                        const groupTime = State.test.meta.time_limits.groups[newGroupIndex];
-                        if (groupTime) {
-                            $('#group-label').textContent = this.getGroupLabel(newGroupIndex);
-                            Timer.startGroupTimer(groupTime.time_sec);
-                        }
-                    }
-
-                    State.currentMondaiIndex = newIndex;
-                    this.renderCurrentMondai();
-
-                    // Scroll test content to top
-                    const content = document.querySelector('.test-content');
-                    if (content) {
-                        content.scrollTo({ top: 0, behavior: 'smooth' });
-                    }
-                }
-            },
-
-            getGroupIndexForMondai(mondaiIndex) {
-                let idx = 0;
-                for (let gi = 0; gi < State.test.groups.length; gi++) {
-                    const group = State.test.groups[gi];
-                    if (mondaiIndex < idx + group.mondai.length) {
-                        return gi;
-                    }
-                    idx += group.mondai.length;
-                }
-                return 0;
-            },
-
-            getFirstMondaiIndexOfGroup(groupIndex) {
-                let idx = 0;
-                for (let gi = 0; gi < groupIndex; gi++) {
-                    idx += State.test.groups[gi].mondai.length;
-                }
-                return idx;
-            },
-
-            async moveToNextGroup() {
-                // Prevent duplicate submissions
-                if (this.isSubmitting) return;
-
-                const submitBtn = $('#btn-submit-group');
-                const originalText = submitBtn.textContent;
-
-                const currentGroupIdx = State.currentGroupIndex;
-                const nextGroupIdx = currentGroupIdx + 1;
-                const totalGroups = State.examSpec.groups.length;
-
-                if (nextGroupIdx < totalGroups) {
-                    // Check if next group is ready
-                    if (!this.isGroupReady(nextGroupIdx)) {
-                        // Disable button and show loading state
-                        submitBtn.disabled = true;
-                        submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang tải...';
-                        showToast('Đang tải phần tiếp theo...', 'info');
-
-                        // Wait for group to load (poll every 500ms)
-                        while (!this.isGroupReady(nextGroupIdx) && this.loadingGroupIndex >= 0) {
-                            await new Promise(resolve => setTimeout(resolve, 500));
-                        }
-
-                        // Re-enable button after loading
-                        submitBtn.disabled = false;
-                        submitBtn.textContent = originalText;
-
-                        // Check if group failed to load
-                        if (this.pendingGroups[nextGroupIdx]?.error) {
-                            showToast('Không thể tải phần tiếp theo: ' + this.pendingGroups[nextGroupIdx].error, 'error');
-                            return;
-                        }
-                    }
-
-                    State.currentGroupIndex = nextGroupIdx;
-
-                    // Find first mondai of next group
-                    let mondaiIdx = 0;
-                    for (let i = 0; i < nextGroupIdx; i++) {
-                        mondaiIdx += State.test.groups[i].mondai.length;
-                    }
-                    State.currentMondaiIndex = mondaiIdx;
-
-                    // Start new group timer
-                    const groupTime = State.test.meta.time_limits.groups[nextGroupIdx];
+                if (newGroupIndex !== oldGroupIndex) {
+                    State.currentGroupIndex = newGroupIndex;
+                    const groupTime = State.test.meta.time_limits.groups[newGroupIndex];
                     if (groupTime) {
-                        $('#group-label').textContent = this.getGroupLabel(nextGroupIdx);
+                        $('#group-label').textContent = this.getGroupLabel(newGroupIndex);
                         Timer.startGroupTimer(groupTime.time_sec);
                     }
+                }
 
-                    this.renderCurrentMondai();
-                    window.scrollTo({ top: 0 });
-                } else {
-                    // Last group - set submitting state and show grading options
-                    this.isSubmitting = true;
+                State.currentMondaiIndex = newIndex;
+                this.renderCurrentMondai();
+
+                // Scroll test content to top
+                const content = document.querySelector('.test-content');
+                if (content) {
+                    content.scrollTo({ top: 0, behavior: 'smooth' });
+                }
+            }
+        },
+
+        getGroupIndexForMondai(mondaiIndex) {
+            let idx = 0;
+            for (let gi = 0; gi < State.test.groups.length; gi++) {
+                const group = State.test.groups[gi];
+                if (mondaiIndex < idx + group.mondai.length) {
+                    return gi;
+                }
+                idx += group.mondai.length;
+            }
+            return 0;
+        },
+
+        getFirstMondaiIndexOfGroup(groupIndex) {
+            let idx = 0;
+            for (let gi = 0; gi < groupIndex; gi++) {
+                idx += State.test.groups[gi].mondai.length;
+            }
+            return idx;
+        },
+
+        async moveToNextGroup() {
+            // Prevent duplicate submissions
+            if (this.isSubmitting) return;
+
+            const submitBtn = $('#btn-submit-group');
+            const originalText = submitBtn.textContent;
+
+            const currentGroupIdx = State.currentGroupIndex;
+            const nextGroupIdx = currentGroupIdx + 1;
+            const totalGroups = State.examSpec.groups.length;
+
+            if (nextGroupIdx < totalGroups) {
+                // Check if next group is ready
+                if (!this.isGroupReady(nextGroupIdx)) {
+                    // Disable button and show loading state
                     submitBtn.disabled = true;
-                    submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang xử lý...';
+                    submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang tải...';
+                    showToast('Đang tải phần tiếp theo...', 'info');
 
-                    try {
-                        await this.confirmSubmitTest();
-                    } finally {
-                        // Re-enable on cancel or error (not on successful submit)
-                        if (State.test) { // If still on test screen
-                            this.isSubmitting = false;
-                            submitBtn.disabled = false;
-                            submitBtn.textContent = 'Nộp bài';
-                        }
+                    // Wait for group to load (poll every 500ms)
+                    while (!this.isGroupReady(nextGroupIdx) && this.loadingGroupIndex >= 0) {
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                    }
+
+                    // Re-enable button after loading
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = originalText;
+
+                    // Check if group failed to load
+                    if (this.pendingGroups[nextGroupIdx]?.error) {
+                        showToast('Không thể tải phần tiếp theo: ' + this.pendingGroups[nextGroupIdx].error, 'error');
+                        return;
                     }
                 }
-            },
 
+                State.currentGroupIndex = nextGroupIdx;
 
-            // Show grading options modal
-            showGradingOptions() {
-                return new Promise((resolve) => {
-                    const modal = $('#grading-modal');
-                    const btnQuick = $('#btn-grade-quick');
-                    const btnAI = $('#btn-grade-ai');
-                    const btnCancel = $('#btn-grade-cancel');
-
-                    modal.classList.remove('hidden');
-
-                    const cleanup = () => {
-                        modal.classList.add('hidden');
-                        btnQuick.onclick = null;
-                        btnAI.onclick = null;
-                        btnCancel.onclick = null;
-                    };
-
-                    btnQuick.onclick = () => {
-                        cleanup();
-                        resolve('quick');
-                    };
-
-                    btnAI.onclick = () => {
-                        cleanup();
-                        resolve('ai');
-                    };
-
-                    btnCancel.onclick = () => {
-                        cleanup();
-                        resolve(null);
-                    };
-                });
-            },
-
-            // Show grading options instead of simple confirm
-            async confirmSubmitTest() {
-                const choice = await this.showGradingOptions();
-
-                if (choice === 'quick') {
-                    await this.quickGradeTest();
-                } else if (choice === 'ai') {
-                    await this.submitTest();
+                // Find first mondai of next group
+                let mondaiIdx = 0;
+                for (let i = 0; i < nextGroupIdx; i++) {
+                    mondaiIdx += State.test.groups[i].mondai.length;
                 }
-                // null = cancelled, do nothing
-            },
+                State.currentMondaiIndex = mondaiIdx;
 
-            // Quick grading without AI - instant results
-            async quickGradeTest() {
-                Timer.stopAll();
-                TTSManager.stop();
+                // Start new group timer
+                const groupTime = State.test.meta.time_limits.groups[nextGroupIdx];
+                if (groupTime) {
+                    $('#group-label').textContent = this.getGroupLabel(nextGroupIdx);
+                    Timer.startGroupTimer(groupTime.time_sec);
+                }
 
-                // Calculate scores directly
-                const questionsWithAnswers = [];
-                let correctCount = 0;
-                let totalCount = 0;
-                const scoreByGroup = {};
+                this.renderCurrentMondai();
+                window.scrollTo({ top: 0 });
+            } else {
+                // Last group - set submitting state and show grading options
+                this.isSubmitting = true;
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang xử lý...';
 
-                State.test.groups.forEach(group => {
-                    let groupCorrect = 0;
-                    group.mondai.forEach(mondai => {
-                        mondai.items.forEach(item => {
-                            totalCount++;
-                            const userAnswer = State.answers[item.id];
-                            const isCorrect = userAnswer === item.answer_index;
+                try {
+                    await this.confirmSubmitTest();
+                } finally {
+                    // Re-enable on cancel or error (not on successful submit)
+                    if (State.test) { // If still on test screen
+                        this.isSubmitting = false;
+                        submitBtn.disabled = false;
+                        submitBtn.textContent = 'Nộp bài';
+                    }
+                }
+            }
+        },
 
-                            if (isCorrect) {
-                                correctCount++;
-                                groupCorrect++;
-                            }
 
-                            questionsWithAnswers.push({
-                                id: item.id,
-                                is_correct: isCorrect,
-                                user_answer_index: userAnswer !== undefined ? userAnswer : null,
-                                correct_index: item.answer_index,
-                                // Use existing explain_brief from question generation
-                                key_point_vi: item.explain_brief || '',
-                                tags: item.tags
-                            });
-                        });
-                    });
-                    scoreByGroup[group.group_id] = groupCorrect;
-                });
+        // Show grading options modal
+        showGradingOptions() {
+            return new Promise((resolve) => {
+                const modal = $('#grading-modal');
+                const btnQuick = $('#btn-grade-quick');
+                const btnAI = $('#btn-grade-ai');
+                const btnCancel = $('#btn-grade-cancel');
 
-                // Build feedback object compatible with ReviewUI
-                const feedback = {
-                    score_summary: {
-                        total_score: correctCount,
-                        max_score: totalCount,
-                        score_by_group: scoreByGroup,
-                        weak_tags: [], // Could calculate from incorrect answers
-                        recommendation_vi: correctCount >= totalCount * 0.7
-                            ? 'Kết quả tốt! Tiếp tục luyện tập để cải thiện.'
-                            : 'Cần ôn tập thêm các phần còn yếu.'
-                    },
-                    by_question: questionsWithAnswers,
-                    grading_mode: 'quick' // Flag for UI to know this was quick grading
+                modal.classList.remove('hidden');
+
+                const cleanup = () => {
+                    modal.classList.add('hidden');
+                    btnQuick.onclick = null;
+                    btnAI.onclick = null;
+                    btnCancel.onclick = null;
                 };
 
+                btnQuick.onclick = () => {
+                    cleanup();
+                    resolve('quick');
+                };
+
+                btnAI.onclick = () => {
+                    cleanup();
+                    resolve('ai');
+                };
+
+                btnCancel.onclick = () => {
+                    cleanup();
+                    resolve(null);
+                };
+            });
+        },
+
+        // Show grading options instead of simple confirm
+        async confirmSubmitTest() {
+            const choice = await this.showGradingOptions();
+
+            if (choice === 'quick') {
+                await this.quickGradeTest();
+            } else if (choice === 'ai') {
+                await this.submitTest();
+            }
+            // null = cancelled, do nothing
+        },
+
+        // Quick grading without AI - instant results
+        async quickGradeTest() {
+            Timer.stopAll();
+            TTSManager.stop();
+
+            // Calculate scores directly
+            const questionsWithAnswers = [];
+            let correctCount = 0;
+            let totalCount = 0;
+            const scoreByGroup = {};
+
+            State.test.groups.forEach(group => {
+                let groupCorrect = 0;
+                group.mondai.forEach(mondai => {
+                    mondai.items.forEach(item => {
+                        totalCount++;
+                        const userAnswer = State.answers[item.id];
+                        const isCorrect = userAnswer === item.answer_index;
+
+                        if (isCorrect) {
+                            correctCount++;
+                            groupCorrect++;
+                        }
+
+                        questionsWithAnswers.push({
+                            id: item.id,
+                            is_correct: isCorrect,
+                            user_answer_index: userAnswer !== undefined ? userAnswer : null,
+                            correct_index: item.answer_index,
+                            // Use existing explain_brief from question generation
+                            key_point_vi: item.explain_brief || '',
+                            tags: item.tags
+                        });
+                    });
+                });
+                scoreByGroup[group.group_id] = groupCorrect;
+            });
+
+            // Build feedback object compatible with ReviewUI
+            const feedback = {
+                score_summary: {
+                    total_score: correctCount,
+                    max_score: totalCount,
+                    score_by_group: scoreByGroup,
+                    weak_tags: [], // Could calculate from incorrect answers
+                    recommendation_vi: correctCount >= totalCount * 0.7
+                        ? 'Kết quả tốt! Tiếp tục luyện tập để cải thiện.'
+                        : 'Cần ôn tập thêm các phần còn yếu.'
+                },
+                by_question: questionsWithAnswers,
+                grading_mode: 'quick' // Flag for UI to know this was quick grading
+            };
+
+            State.feedback = feedback;
+
+            // Save to history (simplified)
+            await this.saveToHistory(feedback);
+
+            ReviewUI.render();
+            showScreen('review-screen');
+        },
+
+        // AI grading with detailed feedback
+        async submitTest() {
+            Timer.stopAll();
+            TTSManager.stop();
+
+            showScreen('loading-screen');
+            $('#loading-text').textContent = 'Đang chấm điểm...';
+            $('#loading-hint').textContent = 'AI đang phân tích và đánh giá câu trả lời của bạn...';
+
+            // Get progress bar elements
+            const progressBar = $('#loading-progress-inner');
+            const progressText = $('#loading-progress-text');
+
+            // Reset progress
+            if (progressBar) progressBar.style.width = '0%';
+            if (progressText) progressText.textContent = '0%';
+
+            // Start simulated progress (same as question generation)
+            const progressInterval = this.simulateProgress(progressBar, progressText);
+
+            try {
+                const llmProvider = $('#llm-provider').value;
+                const feedback = await Api.gradeTest(State.test, State.answers, llmProvider);
+                feedback.grading_mode = 'ai'; // Flag for UI
                 State.feedback = feedback;
 
-                // Save to history (simplified)
+                // Stop progress and complete to 100%
+                clearInterval(progressInterval);
+                if (progressBar) progressBar.style.width = '100%';
+                if (progressText) progressText.textContent = '100%';
+                await new Promise(resolve => setTimeout(resolve, 300));
+
+                // Save to history
                 await this.saveToHistory(feedback);
 
                 ReviewUI.render();
                 showScreen('review-screen');
-            },
+            } catch (err) {
+                clearInterval(progressInterval);
+                console.error('Grade test error:', err);
+                showToast('Không thể chấm điểm: ' + err.message, 'error');
+                showScreen('home-screen');
+            }
+        },
 
-            // AI grading with detailed feedback
-            async submitTest() {
+        // Quit test without grading
+        async quitTest() {
+            const confirmed = await this.showConfirm(
+                'Thoát bài thi?',
+                'Bạn có muốn thoát? Bài thi sẽ KHÔNG được chấm điểm và tiến độ sẽ bị mất.'
+            );
+            if (confirmed) {
                 Timer.stopAll();
                 TTSManager.stop();
-
-                showScreen('loading-screen');
-                $('#loading-text').textContent = 'Đang chấm điểm...';
-                $('#loading-hint').textContent = 'AI đang phân tích và đánh giá câu trả lời của bạn...';
-
-                // Get progress bar elements
-                const progressBar = $('#loading-progress-inner');
-                const progressText = $('#loading-progress-text');
-
-                // Reset progress
-                if (progressBar) progressBar.style.width = '0%';
-                if (progressText) progressText.textContent = '0%';
-
-                // Start simulated progress (same as question generation)
-                const progressInterval = this.simulateProgress(progressBar, progressText);
-
-                try {
-                    const llmProvider = $('#llm-provider').value;
-                    const feedback = await Api.gradeTest(State.test, State.answers, llmProvider);
-                    feedback.grading_mode = 'ai'; // Flag for UI
-                    State.feedback = feedback;
-
-                    // Stop progress and complete to 100%
-                    clearInterval(progressInterval);
-                    if (progressBar) progressBar.style.width = '100%';
-                    if (progressText) progressText.textContent = '100%';
-                    await new Promise(resolve => setTimeout(resolve, 300));
-
-                    // Save to history
-                    await this.saveToHistory(feedback);
-
-                    ReviewUI.render();
-                    showScreen('review-screen');
-                } catch (err) {
-                    clearInterval(progressInterval);
-                    console.error('Grade test error:', err);
-                    showToast('Không thể chấm điểm: ' + err.message, 'error');
-                    showScreen('home-screen');
-                }
-            },
-
-            // Quit test without grading
-            async quitTest() {
-                const confirmed = await this.showConfirm(
-                    'Thoát bài thi?',
-                    'Bạn có muốn thoát? Bài thi sẽ KHÔNG được chấm điểm và tiến độ sẽ bị mất.'
-                );
-                if (confirmed) {
-                    Timer.stopAll();
-                    TTSManager.stop();
-                    State.test = null;
-                    State.answers = {};
-                    State.currentMondaiIndex = 0;
-                    State.currentGroupIndex = 0;
-                    showScreen('home-screen');
-                    showToast('Đã thoát bài thi', 'info');
-                }
-            },
-
-            // Generic confirmation dialog
-            showConfirm(title, message) {
-                return new Promise((resolve) => {
-                    const modal = $('#confirm-modal');
-                    const titleEl = $('#confirm-title');
-                    const messageEl = $('#confirm-message');
-                    const btnYes = $('#btn-confirm-yes');
-                    const btnNo = $('#btn-confirm-no');
-
-                    titleEl.textContent = title;
-                    messageEl.textContent = message;
-                    modal.classList.remove('hidden');
-
-                    const cleanup = () => {
-                        modal.classList.add('hidden');
-                        btnYes.onclick = null;
-                        btnNo.onclick = null;
-                    };
-
-                    btnYes.onclick = () => {
-                        cleanup();
-                        resolve(true);
-                    };
-
-                    btnNo.onclick = () => {
-                        cleanup();
-                        resolve(false);
-                    };
-                });
-            },
-
-            async saveToHistory(feedback) {
-                if (!State.userData) State.userData = { history: [], mistakeBook: [] };
-                if (!State.userData.history) State.userData.history = [];
-                if (!State.userData.mistakeBook) State.userData.mistakeBook = [];
-
-                // Add to history
-                State.userData.history.push({
-                    date: new Date().toISOString(),
-                    exam: State.currentExam,
-                    mode: State.currentMode,
-                    score: feedback.score_summary?.total_score ?? feedback.summary?.score_total,
-                    maxScore: feedback.score_summary?.max_score ?? feedback.summary?.score_max,
-                    weakTags: feedback.score_summary?.weak_tags ?? feedback.summary?.weak_tags
-                });
-
-                // Add mistakes to mistake book (with optimized context)
-                const incorrectItems = feedback.by_question.filter(q => !q.is_correct);
-                for (const item of incorrectItems) {
-                    // Find the question and parent mondai in test
-                    let questionData = null;
-                    let parentMondai = null;
-
-                    for (const group of State.test.groups) {
-                        for (const mondai of group.mondai) {
-                            const found = mondai.items.find(q => q.id === item.id);
-                            if (found) {
-                                questionData = found;
-                                parentMondai = mondai;
-                                break;
-                            }
-                        }
-                        if (questionData) break;
-                    }
-
-                    if (questionData) {
-                        // Build optimized question context (minimal storage)
-                        const optimizedQuestion = {
-                            id: questionData.id,
-                            type: questionData.type,
-                            prompt: questionData.prompt,
-                            choices: questionData.choices,
-                            answer_index: questionData.answer_index,
-                            explain_brief: questionData.explain_brief,
-                            tags: questionData.tags
-                        };
-
-                        // Add context text (passage or script) - truncated to save space
-                        let contextText = null;
-                        const MAX_CONTEXT_LENGTH = 500;
-
-                        // Check for passage (reading questions)
-                        if (parentMondai?.passage?.text) {
-                            contextText = parentMondai.passage.text.length > MAX_CONTEXT_LENGTH
-                                ? parentMondai.passage.text.substring(0, MAX_CONTEXT_LENGTH) + '...'
-                                : parentMondai.passage.text;
-                        }
-                        // Check for audio script (listening questions)
-                        else if (questionData.media?.script_text) {
-                            contextText = questionData.media.script_text.length > MAX_CONTEXT_LENGTH
-                                ? questionData.media.script_text.substring(0, MAX_CONTEXT_LENGTH) + '...'
-                                : questionData.media.script_text;
-                        }
-
-                        if (contextText) {
-                            optimizedQuestion.context = contextText;
-                        }
-
-                        State.userData.mistakeBook.push({
-                            date: new Date().toISOString(),
-                            exam: State.currentExam,
-                            question: optimizedQuestion,
-                            feedback: {
-                                is_correct: item.is_correct,
-                                why_wrong_vi: item.why_wrong_vi,
-                                key_point_vi: item.key_point_vi,
-                                mini_lesson_vi: item.mini_lesson_vi
-                            },
-                            userAnswer: State.answers[item.id]
-                        });
-                    }
-                }
-
-                // Save to server
-                try {
-                    await Api.saveUserData(State.userData);
-                } catch (err) {
-                    console.warn('Failed to save user data:', err);
-                }
-            },
-
-            togglePause() {
-                State.isTestPaused = !State.isTestPaused;
-                Timer.togglePause(State.isTestPaused);
-
-                const btn = $('#btn-pause-test');
-                btn.innerHTML = State.isTestPaused ? '<i class="fa-solid fa-play"></i>' : '<i class="fa-solid fa-pause"></i>';
-                btn.title = State.isTestPaused ? 'Tiếp tục' : 'Tạm dừng';
-            },
-
-            toggleScript() {
-                const script = $('#audio-script');
-                const btn = $('#btn-show-script');
-
-                if (script.classList.contains('hidden')) {
-                    script.classList.remove('hidden');
-                    btn.textContent = 'Ẩn lời thoại';
-                } else {
-                    script.classList.add('hidden');
-                    btn.textContent = 'Hiển thị lời thoại';
-                }
-            },
-
-            escapeHtml(text) {
-                // Allow safe formatting tags for Japanese/Chinese text
-                // Allowed: u, b, i, em, strong, ruby, rt, rp, br, span
-                const allowedTags = ['u', 'b', 'i', 'em', 'strong', 'ruby', 'rt', 'rp', 'br', 'span'];
-
-                if (!text) return '';
-
-                // First, temporarily replace allowed tags with placeholders
-                let result = String(text);
-                const placeholders = [];
-
-                allowedTags.forEach(tag => {
-                    // Opening tags (with optional attributes for span)
-                    const openRegex = new RegExp(`<(${tag})(\\s[^>]*)?>`, 'gi');
-                    result = result.replace(openRegex, (match, tagName, attrs) => {
-                        const idx = placeholders.length;
-                        // For span, only allow class attribute
-                        if (tagName.toLowerCase() === 'span' && attrs) {
-                            const classMatch = attrs.match(/class="([^"]+)"/i);
-                            placeholders.push(classMatch ? `<span class="${classMatch[1]}">` : '<span>');
-                        } else {
-                            placeholders.push(`<${tagName.toLowerCase()}>`);
-                        }
-                        return `\x00PH${idx}\x00`;
-                    });
-
-                    // Closing tags
-                    const closeRegex = new RegExp(`</${tag}>`, 'gi');
-                    result = result.replace(closeRegex, () => {
-                        const idx = placeholders.length;
-                        placeholders.push(`</${tag.toLowerCase()}>`);
-                        return `\x00PH${idx}\x00`;
-                    });
-                });
-
-                // Now escape everything else
-                const div = document.createElement('div');
-                div.textContent = result;
-                result = div.innerHTML;
-
-                // Restore placeholders
-                placeholders.forEach((ph, idx) => {
-                    result = result.replace(`\x00PH${idx}\x00`, ph);
-                });
-
-                return result;
+                State.test = null;
+                State.answers = {};
+                State.currentMondaiIndex = 0;
+                State.currentGroupIndex = 0;
+                showScreen('home-screen');
+                showToast('Đã thoát bài thi', 'info');
             }
-        };
+        },
 
-        // ============================================
-        // Review UI
-        // ============================================
-        const ReviewUI = {
-            render() {
-                const feedback = State.feedback;
-                const test = State.test;
+        // Generic confirmation dialog
+        showConfirm(title, message) {
+            return new Promise((resolve) => {
+                const modal = $('#confirm-modal');
+                const titleEl = $('#confirm-title');
+                const messageEl = $('#confirm-message');
+                const btnYes = $('#btn-confirm-yes');
+                const btnNo = $('#btn-confirm-no');
 
-                // Score circle
-                // Schema update: summary -> score_summary, score_total -> total_score, score_max -> max_score
-                const scoreSummary = feedback.score_summary || feedback.summary || {};
-                const scoreValue = scoreSummary.total_score !== undefined ? scoreSummary.total_score : (scoreSummary.score_total || 0);
-                const scoreMax = scoreSummary.max_score !== undefined ? scoreSummary.max_score : (scoreSummary.score_max || this.getTotalQuestions());
-                const percentage = scoreMax > 0 ? (scoreValue / scoreMax) * 100 : 0;
+                titleEl.textContent = title;
+                messageEl.textContent = message;
+                modal.classList.remove('hidden');
 
-                $('#score-value').textContent = scoreValue;
-                $('#score-max').textContent = `/${scoreMax}`;
+                const cleanup = () => {
+                    modal.classList.add('hidden');
+                    btnYes.onclick = null;
+                    btnNo.onclick = null;
+                };
 
-                // Animate score ring
-                const ring = $('#score-ring');
-                const circumference = 2 * Math.PI * 45;
-                ring.style.strokeDasharray = circumference;
-                ring.style.strokeDashoffset = circumference - (percentage / 100) * circumference;
+                btnYes.onclick = () => {
+                    cleanup();
+                    resolve(true);
+                };
 
-                // Add gradient def if not exists
-                const svg = ring.closest('svg');
-                if (!svg.querySelector('#scoreGradient')) {
-                    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-                    defs.innerHTML = `
+                btnNo.onclick = () => {
+                    cleanup();
+                    resolve(false);
+                };
+            });
+        },
+
+        async saveToHistory(feedback) {
+            if (!State.userData) State.userData = { history: [], mistakeBook: [] };
+            if (!State.userData.history) State.userData.history = [];
+            if (!State.userData.mistakeBook) State.userData.mistakeBook = [];
+
+            // Add to history
+            State.userData.history.push({
+                date: new Date().toISOString(),
+                exam: State.currentExam,
+                mode: State.currentMode,
+                score: feedback.score_summary?.total_score ?? feedback.summary?.score_total,
+                maxScore: feedback.score_summary?.max_score ?? feedback.summary?.score_max,
+                weakTags: feedback.score_summary?.weak_tags ?? feedback.summary?.weak_tags
+            });
+
+            // Add mistakes to mistake book (with optimized context)
+            const incorrectItems = feedback.by_question.filter(q => !q.is_correct);
+            for (const item of incorrectItems) {
+                // Find the question and parent mondai in test
+                let questionData = null;
+                let parentMondai = null;
+
+                for (const group of State.test.groups) {
+                    for (const mondai of group.mondai) {
+                        const found = mondai.items.find(q => q.id === item.id);
+                        if (found) {
+                            questionData = found;
+                            parentMondai = mondai;
+                            break;
+                        }
+                    }
+                    if (questionData) break;
+                }
+
+                if (questionData) {
+                    // Build optimized question context (minimal storage)
+                    const optimizedQuestion = {
+                        id: questionData.id,
+                        type: questionData.type,
+                        prompt: questionData.prompt,
+                        choices: questionData.choices,
+                        answer_index: questionData.answer_index,
+                        explain_brief: questionData.explain_brief,
+                        tags: questionData.tags
+                    };
+
+                    // Add context text (passage or script) - truncated to save space
+                    let contextText = null;
+                    const MAX_CONTEXT_LENGTH = 500;
+
+                    // Check for passage (reading questions)
+                    if (parentMondai?.passage?.text) {
+                        contextText = parentMondai.passage.text.length > MAX_CONTEXT_LENGTH
+                            ? parentMondai.passage.text.substring(0, MAX_CONTEXT_LENGTH) + '...'
+                            : parentMondai.passage.text;
+                    }
+                    // Check for audio script (listening questions)
+                    else if (questionData.media?.script_text) {
+                        contextText = questionData.media.script_text.length > MAX_CONTEXT_LENGTH
+                            ? questionData.media.script_text.substring(0, MAX_CONTEXT_LENGTH) + '...'
+                            : questionData.media.script_text;
+                    }
+
+                    if (contextText) {
+                        optimizedQuestion.context = contextText;
+                    }
+
+                    State.userData.mistakeBook.push({
+                        date: new Date().toISOString(),
+                        exam: State.currentExam,
+                        question: optimizedQuestion,
+                        feedback: {
+                            is_correct: item.is_correct,
+                            why_wrong_vi: item.why_wrong_vi,
+                            key_point_vi: item.key_point_vi,
+                            mini_lesson_vi: item.mini_lesson_vi
+                        },
+                        userAnswer: State.answers[item.id]
+                    });
+                }
+            }
+
+            // Save to server
+            try {
+                await Api.saveUserData(State.userData);
+            } catch (err) {
+                console.warn('Failed to save user data:', err);
+            }
+        },
+
+        togglePause() {
+            State.isTestPaused = !State.isTestPaused;
+            Timer.togglePause(State.isTestPaused);
+
+            const btn = $('#btn-pause-test');
+            btn.innerHTML = State.isTestPaused ? '<i class="fa-solid fa-play"></i>' : '<i class="fa-solid fa-pause"></i>';
+            btn.title = State.isTestPaused ? 'Tiếp tục' : 'Tạm dừng';
+        },
+
+        toggleScript() {
+            const script = $('#audio-script');
+            const btn = $('#btn-show-script');
+
+            if (script.classList.contains('hidden')) {
+                script.classList.remove('hidden');
+                btn.textContent = 'Ẩn lời thoại';
+            } else {
+                script.classList.add('hidden');
+                btn.textContent = 'Hiển thị lời thoại';
+            }
+        },
+
+        escapeHtml(text) {
+            // Allow safe formatting tags for Japanese/Chinese text
+            // Allowed: u, b, i, em, strong, ruby, rt, rp, br, span
+            const allowedTags = ['u', 'b', 'i', 'em', 'strong', 'ruby', 'rt', 'rp', 'br', 'span'];
+
+            if (!text) return '';
+
+            // First, temporarily replace allowed tags with placeholders
+            let result = String(text);
+            const placeholders = [];
+
+            allowedTags.forEach(tag => {
+                // Opening tags (with optional attributes for span)
+                const openRegex = new RegExp(`<(${tag})(\\s[^>]*)?>`, 'gi');
+                result = result.replace(openRegex, (match, tagName, attrs) => {
+                    const idx = placeholders.length;
+                    // For span, only allow class attribute
+                    if (tagName.toLowerCase() === 'span' && attrs) {
+                        const classMatch = attrs.match(/class="([^"]+)"/i);
+                        placeholders.push(classMatch ? `<span class="${classMatch[1]}">` : '<span>');
+                    } else {
+                        placeholders.push(`<${tagName.toLowerCase()}>`);
+                    }
+                    return `\x00PH${idx}\x00`;
+                });
+
+                // Closing tags
+                const closeRegex = new RegExp(`</${tag}>`, 'gi');
+                result = result.replace(closeRegex, () => {
+                    const idx = placeholders.length;
+                    placeholders.push(`</${tag.toLowerCase()}>`);
+                    return `\x00PH${idx}\x00`;
+                });
+            });
+
+            // Now escape everything else
+            const div = document.createElement('div');
+            div.textContent = result;
+            result = div.innerHTML;
+
+            // Restore placeholders
+            placeholders.forEach((ph, idx) => {
+                result = result.replace(`\x00PH${idx}\x00`, ph);
+            });
+
+            return result;
+        }
+    };
+
+    // ============================================
+    // Review UI
+    // ============================================
+    const ReviewUI = {
+        render() {
+            const feedback = State.feedback;
+            const test = State.test;
+
+            // Score circle
+            // Schema update: summary -> score_summary, score_total -> total_score, score_max -> max_score
+            const scoreSummary = feedback.score_summary || feedback.summary || {};
+            const scoreValue = scoreSummary.total_score !== undefined ? scoreSummary.total_score : (scoreSummary.score_total || 0);
+            const scoreMax = scoreSummary.max_score !== undefined ? scoreSummary.max_score : (scoreSummary.score_max || this.getTotalQuestions());
+            const percentage = scoreMax > 0 ? (scoreValue / scoreMax) * 100 : 0;
+
+            $('#score-value').textContent = scoreValue;
+            $('#score-max').textContent = `/${scoreMax}`;
+
+            // Animate score ring
+            const ring = $('#score-ring');
+            const circumference = 2 * Math.PI * 45;
+            ring.style.strokeDasharray = circumference;
+            ring.style.strokeDashoffset = circumference - (percentage / 100) * circumference;
+
+            // Add gradient def if not exists
+            const svg = ring.closest('svg');
+            if (!svg.querySelector('#scoreGradient')) {
+                const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+                defs.innerHTML = `
           <linearGradient id="scoreGradient" x1="0%" y1="0%" x2="100%" y2="0%">
             <stop offset="0%" style="stop-color:#6366f1"/>
             <stop offset="100%" style="stop-color:#8b5cf6"/>
           </linearGradient>
         `;
-                    svg.insertBefore(defs, svg.firstChild);
-                }
+                svg.insertBefore(defs, svg.firstChild);
+            }
 
-                // Score by group
-                const groupsHtml = Object.entries(scoreSummary.score_by_group || {})
-                    .map(([groupId, score]) => {
-                        const group = test.groups.find(g => g.group_id === groupId);
-                        const label = group?.title_vi || groupId;
-                        return `
+            // Score by group
+            const groupsHtml = Object.entries(scoreSummary.score_by_group || {})
+                .map(([groupId, score]) => {
+                    const group = test.groups.find(g => g.group_id === groupId);
+                    const label = group?.title_vi || groupId;
+                    return `
             <div class="score-group-item">
               <span class="score-group-label">${label}</span>
               <span>${score}</span>
             </div>
           `;
-                    }).join('');
+                }).join('');
 
-                $('#score-by-group').innerHTML = groupsHtml;
-                $('#recommendation').textContent = scoreSummary.recommendation_vi || '';
+            $('#score-by-group').innerHTML = groupsHtml;
+            $('#recommendation').textContent = scoreSummary.recommendation_vi || '';
 
-                // Weak tags
-                const tagsHtml = (scoreSummary.weak_tags || [])
-                    .map(tag => `<span class="tag">${tag}</span>`)
-                    .join('');
-                $('#weak-tags').innerHTML = tagsHtml || '<span style="color: var(--text-muted)">Không có</span>';
+            // Weak tags
+            const tagsHtml = (scoreSummary.weak_tags || [])
+                .map(tag => `<span class="tag">${tag}</span>`)
+                .join('');
+            $('#weak-tags').innerHTML = tagsHtml || '<span style="color: var(--text-muted)">Không có</span>';
 
-                // Review list
-                this.renderReviewList();
-            },
+            // Review list
+            this.renderReviewList();
+        },
 
-            renderReviewList() {
-                const feedback = State.feedback;
-                const test = State.test;
-                const isJapanese = test.meta.language === 'ja-JP';
+        renderReviewList() {
+            const feedback = State.feedback;
+            const test = State.test;
+            const isJapanese = test.meta.language === 'ja-JP';
 
-                const html = feedback.by_question.map(item => {
-                    // Find question data
-                    let questionData = null;
-                    for (const group of test.groups) {
-                        for (const mondai of group.mondai) {
-                            const found = mondai.items.find(q => q.id === item.id);
-                            if (found) {
-                                questionData = found;
-                                break;
-                            }
+            const html = feedback.by_question.map(item => {
+                // Find question data
+                let questionData = null;
+                for (const group of test.groups) {
+                    for (const mondai of group.mondai) {
+                        const found = mondai.items.find(q => q.id === item.id);
+                        if (found) {
+                            questionData = found;
+                            break;
                         }
                     }
+                }
 
-                    if (!questionData) return '';
+                if (!questionData) return '';
 
-                    const userAnswer = State.answers[item.id];
-                    const correctAnswer = questionData.answer_index;
+                const userAnswer = State.answers[item.id];
+                const correctAnswer = questionData.answer_index;
 
-                    return `
+                return `
           <div class="review-item ${item.is_correct ? '' : 'incorrect'}">
             <div class="review-item-header">
               <span class="review-item-id">${item.id}</span>
@@ -2905,17 +2871,17 @@
             
             <div class="choices" style="margin-top: 12px;">
               ${questionData.choices.map((choice, idx) => {
-                        let classes = 'choice review-choice ' + (isJapanese ? '' : 'zh');
-                        if (idx === userAnswer) classes += ' user-selected';
-                        if (idx === correctAnswer) classes += ' correct-answer';
-                        if (idx === userAnswer && !item.is_correct) classes += ' wrong-answer';
-                        return `
+                    let classes = 'choice review-choice ' + (isJapanese ? '' : 'zh');
+                    if (idx === userAnswer) classes += ' user-selected';
+                    if (idx === correctAnswer) classes += ' correct-answer';
+                    if (idx === userAnswer && !item.is_correct) classes += ' wrong-answer';
+                    return `
                   <div class="${classes}">
                     <span class="choice-letter">${String.fromCharCode(65 + idx)}</span>
                     <span class="choice-text">${TestUI.escapeHtml(choice)}</span>
                   </div>
                 `;
-                    }).join('')}
+                }).join('')}
             </div>
             
             ${!item.is_correct ? `
@@ -2943,114 +2909,114 @@
             ` : ''}
           </div>
         `;
-                }).join('');
+            }).join('');
 
-                $('#review-list').innerHTML = html;
-            },
+            $('#review-list').innerHTML = html;
+        },
 
-            saveGrammar(questionId) {
-                const feedback = State.feedback;
-                // Find the item by question ID
-                const item = feedback.by_question.find(q => q.id === questionId);
-                if (!item) {
-                    showToast('Không tìm thấy dữ liệu câu hỏi', 'error');
-                    return;
-                }
-
-                const success = GrammarBook.save(
-                    item.key_point_vi,
-                    item.mini_lesson_vi || '',
-                    '', // Usage not always available from feedback
-                    item.extra_examples_target || []
-                );
-
-                if (success) {
-                    showToast('Đã lưu ngữ pháp!', 'success');
-                } else {
-                    showToast('Ngữ pháp này đã có trong sổ tay.', 'error');
-                }
-            },
-
-            async saveToNotebook(questionId) {
-                // Find question data by searching through test groups
-                let question = null;
-                for (const group of State.test.groups) {
-                    for (const mondai of group.mondai) {
-                        const found = mondai.items.find(q => q.id === questionId);
-                        if (found) {
-                            question = found;
-                            break;
-                        }
-                    }
-                    if (question) break;
-                }
-
-                if (!question) {
-                    showToast('Không tìm thấy dữ liệu câu hỏi', 'error');
-                    return;
-                }
-
-                const note = prompt('Nhập ghi chú (tùy chọn):', '');
-                if (note === null) return; // Cancelled
-
-                try {
-                    // Determine tags based on question type
-                    const tags = [];
-                    if (question.type) tags.push(question.type);
-                    if (State.currentExam) tags.push(State.currentExam);
-
-                    const result = await Api.saveToNotebook(question, note, tags);
-                    if (result.success) {
-                        showToast('Đã lưu vào kho kiến thức!', 'success');
-                    }
-                } catch (err) {
-                    console.error('Save notebook error:', err);
-                    showToast('Lỗi lưu câu hỏi: ' + err.message, 'error');
-                }
-            },
-
-            getTotalQuestions() {
-                let count = 0;
-                for (const group of State.test.groups) {
-                    for (const mondai of group.mondai) {
-                        count += mondai.items.length;
-                    }
-                }
-                return count;
+        saveGrammar(questionId) {
+            const feedback = State.feedback;
+            // Find the item by question ID
+            const item = feedback.by_question.find(q => q.id === questionId);
+            if (!item) {
+                showToast('Không tìm thấy dữ liệu câu hỏi', 'error');
+                return;
             }
-        };
 
-        // Expose for onclick handlers
-        window.ReviewUI = ReviewUI;
+            const success = GrammarBook.save(
+                item.key_point_vi,
+                item.mini_lesson_vi || '',
+                '', // Usage not always available from feedback
+                item.extra_examples_target || []
+            );
 
-        // ============================================
-        // History UI
-        // ============================================
-        const HistoryUI = {
-            render() {
-                const history = State.userData?.history || [];
-                const container = $('#history-list');
-                const emptyState = $('#history-empty');
+            if (success) {
+                showToast('Đã lưu ngữ pháp!', 'success');
+            } else {
+                showToast('Ngữ pháp này đã có trong sổ tay.', 'error');
+            }
+        },
 
-                if (history.length === 0) {
-                    container.innerHTML = '';
-                    emptyState.classList.remove('hidden');
-                    return;
+        async saveToNotebook(questionId) {
+            // Find question data by searching through test groups
+            let question = null;
+            for (const group of State.test.groups) {
+                for (const mondai of group.mondai) {
+                    const found = mondai.items.find(q => q.id === questionId);
+                    if (found) {
+                        question = found;
+                        break;
+                    }
                 }
+                if (question) break;
+            }
 
-                emptyState.classList.add('hidden');
+            if (!question) {
+                showToast('Không tìm thấy dữ liệu câu hỏi', 'error');
+                return;
+            }
 
-                const html = history.slice().reverse().map((item, idx) => {
-                    const date = new Date(item.date).toLocaleDateString('vi-VN', {
-                        year: 'numeric',
-                        month: 'short',
-                        day: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit'
-                    });
-                    const percentage = Math.round((item.score / item.maxScore) * 100);
+            const note = prompt('Nhập ghi chú (tùy chọn):', '');
+            if (note === null) return; // Cancelled
 
-                    return `
+            try {
+                // Determine tags based on question type
+                const tags = [];
+                if (question.type) tags.push(question.type);
+                if (State.currentExam) tags.push(State.currentExam);
+
+                const result = await Api.saveToNotebook(question, note, tags);
+                if (result.success) {
+                    showToast('Đã lưu vào kho kiến thức!', 'success');
+                }
+            } catch (err) {
+                console.error('Save notebook error:', err);
+                showToast('Lỗi lưu câu hỏi: ' + err.message, 'error');
+            }
+        },
+
+        getTotalQuestions() {
+            let count = 0;
+            for (const group of State.test.groups) {
+                for (const mondai of group.mondai) {
+                    count += mondai.items.length;
+                }
+            }
+            return count;
+        }
+    };
+
+    // Expose for onclick handlers
+    window.ReviewUI = ReviewUI;
+
+    // ============================================
+    // History UI
+    // ============================================
+    const HistoryUI = {
+        render() {
+            const history = State.userData?.history || [];
+            const container = $('#history-list');
+            const emptyState = $('#history-empty');
+
+            if (history.length === 0) {
+                container.innerHTML = '';
+                emptyState.classList.remove('hidden');
+                return;
+            }
+
+            emptyState.classList.add('hidden');
+
+            const html = history.slice().reverse().map((item, idx) => {
+                const date = new Date(item.date).toLocaleDateString('vi-VN', {
+                    year: 'numeric',
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                });
+                const percentage = Math.round((item.score / item.maxScore) * 100);
+
+                return `
           <div class="history-item">
             <div class="history-item-header">
               <span class="history-exam">${item.exam.toUpperCase()} - ${item.mode}</span>
@@ -3059,38 +3025,38 @@
             <div class="history-score">${item.score}/${item.maxScore} (${percentage}%)</div>
           </div>
         `;
-                }).join('');
+            }).join('');
 
-                container.innerHTML = html;
+            container.innerHTML = html;
+        }
+    };
+
+    // ============================================
+    // Mistakes UI
+    // ============================================
+    const MistakesUI = {
+        render() {
+            const mistakes = State.userData?.mistakeBook || [];
+            const container = $('#mistakes-list');
+            const emptyState = $('#mistakes-empty');
+
+            if (mistakes.length === 0) {
+                container.innerHTML = '';
+                emptyState.classList.remove('hidden');
+                return;
             }
-        };
 
-        // ============================================
-        // Mistakes UI
-        // ============================================
-        const MistakesUI = {
-            render() {
-                const mistakes = State.userData?.mistakeBook || [];
-                const container = $('#mistakes-list');
-                const emptyState = $('#mistakes-empty');
+            emptyState.classList.add('hidden');
 
-                if (mistakes.length === 0) {
-                    container.innerHTML = '';
-                    emptyState.classList.remove('hidden');
-                    return;
-                }
+            const html = mistakes.slice().reverse().slice(0, 50).map((item, idx) => {
+                const realIdx = mistakes.length - 1 - idx;
+                const date = new Date(item.date).toLocaleDateString('vi-VN');
+                const question = item.question;
+                const feedback = item.feedback;
+                const userAnswer = item.userAnswer;
+                const correctAnswer = question.answer_index;
 
-                emptyState.classList.add('hidden');
-
-                const html = mistakes.slice().reverse().slice(0, 50).map((item, idx) => {
-                    const realIdx = mistakes.length - 1 - idx;
-                    const date = new Date(item.date).toLocaleDateString('vi-VN');
-                    const question = item.question;
-                    const feedback = item.feedback;
-                    const userAnswer = item.userAnswer;
-                    const correctAnswer = question.answer_index;
-
-                    return `
+                return `
           <div class="mistake-item" data-idx="${realIdx}">
             <div class="mistake-header" onclick="MistakesUI.toggle(${realIdx})">
               <span class="mistake-meta">${item.exam.toUpperCase()} - ${date}</span>
@@ -3101,17 +3067,17 @@
             <div class="mistake-detail hidden">
               <div class="choices" style="margin-top: 12px;">
                 ${question.choices.map((choice, cIdx) => {
-                        let classes = 'choice review-choice';
-                        if (cIdx === userAnswer) classes += ' user-selected';
-                        if (cIdx === correctAnswer) classes += ' correct-answer';
-                        if (cIdx === userAnswer && cIdx !== correctAnswer) classes += ' wrong-answer';
-                        return `
+                    let classes = 'choice review-choice';
+                    if (cIdx === userAnswer) classes += ' user-selected';
+                    if (cIdx === correctAnswer) classes += ' correct-answer';
+                    if (cIdx === userAnswer && cIdx !== correctAnswer) classes += ' wrong-answer';
+                    return `
                     <div class="${classes}">
                       <span class="choice-letter">${String.fromCharCode(65 + cIdx)}</span>
                       <span class="choice-text">${TestUI.escapeHtml(choice)}</span>
                     </div>
                   `;
-                    }).join('')}
+                }).join('')}
               </div>
               
               <div class="mistake-feedback">
@@ -3122,363 +3088,363 @@
             </div>
           </div>
         `;
-                }).join('');
+            }).join('');
 
-                container.innerHTML = html;
-            },
+            container.innerHTML = html;
+        },
 
-            toggle(idx) {
-                const container = $('#mistakes-list');
-                const item = container.querySelector(`[data-idx="${idx}"]`);
-                const detail = item?.querySelector('.mistake-detail');
-                const icon = item?.querySelector('.expand-icon');
+        toggle(idx) {
+            const container = $('#mistakes-list');
+            const item = container.querySelector(`[data-idx="${idx}"]`);
+            const detail = item?.querySelector('.mistake-detail');
+            const icon = item?.querySelector('.expand-icon');
 
-                if (!detail) return;
+            if (!detail) return;
 
-                const isExpanded = !detail.classList.contains('hidden');
+            const isExpanded = !detail.classList.contains('hidden');
 
-                // Close all others
-                container.querySelectorAll('.mistake-detail').forEach(d => d.classList.add('hidden'));
-                container.querySelectorAll('.expand-icon').forEach(i => i.style.transform = 'rotate(0deg)');
+            // Close all others
+            container.querySelectorAll('.mistake-detail').forEach(d => d.classList.add('hidden'));
+            container.querySelectorAll('.expand-icon').forEach(i => i.style.transform = 'rotate(0deg)');
 
-                if (!isExpanded) {
-                    detail.classList.remove('hidden');
-                    if (icon) icon.style.transform = 'rotate(180deg)';
-                }
+            if (!isExpanded) {
+                detail.classList.remove('hidden');
+                if (icon) icon.style.transform = 'rotate(180deg)';
             }
-        };
+        }
+    };
 
-        // Expose for onclick handlers
-        window.MistakesUI = MistakesUI;
+    // Expose for onclick handlers
+    window.MistakesUI = MistakesUI;
 
-        // ============================================
-        // Grammar Book Module
-        // ============================================
-        const GrammarBook = {
-            save(point, meaning, usage, examples) {
-                if (!State.userData) return false;
+    // ============================================
+    // Grammar Book Module
+    // ============================================
+    const GrammarBook = {
+        save(point, meaning, usage, examples) {
+            if (!State.userData) return false;
 
-                const book = State.userData.grammarBook || [];
+            const book = State.userData.grammarBook || [];
 
-                // Check for duplicates
-                const exists = book.some(item => item.point === point);
-                if (exists) return false;
+            // Check for duplicates
+            const exists = book.some(item => item.point === point);
+            if (exists) return false;
 
-                book.push({
-                    point,
-                    meaning,
-                    usage,
-                    examples,
-                    date: new Date().toISOString()
-                });
+            book.push({
+                point,
+                meaning,
+                usage,
+                examples,
+                date: new Date().toISOString()
+            });
 
-                State.userData.grammarBook = book;
-                Api.saveUserData(State.userData);
-                return true;
-            },
+            State.userData.grammarBook = book;
+            Api.saveUserData(State.userData);
+            return true;
+        },
 
-            getAll() {
-                return State.userData?.grammarBook || [];
-            },
+        getAll() {
+            return State.userData?.grammarBook || [];
+        },
 
-            remove(index) {
-                if (!State.userData?.grammarBook) return;
-                State.userData.grammarBook.splice(index, 1);
-                Api.saveUserData(State.userData);
+        remove(index) {
+            if (!State.userData?.grammarBook) return;
+            State.userData.grammarBook.splice(index, 1);
+            Api.saveUserData(State.userData);
+        }
+    };
+
+    // ============================================
+    // Grammar UI
+    // ============================================
+    const GrammarUI = {
+        render() {
+            const list = GrammarBook.getAll();
+            const container = $('#grammar-list');
+
+            if (list.length === 0) {
+                container.innerHTML = '<div class="empty-state">Chưa có ngữ pháp nào được lưu.</div>';
+                return;
             }
-        };
 
-        // ============================================
-        // Grammar UI
-        // ============================================
-        const GrammarUI = {
-            render() {
-                const list = GrammarBook.getAll();
-                const container = $('#grammar-list');
-
-                if (list.length === 0) {
-                    container.innerHTML = '<div class="empty-state">Chưa có ngữ pháp nào được lưu.</div>';
-                    return;
-                }
-
-                container.innerHTML = list.slice().reverse().map((item, idx) => `
+            container.innerHTML = list.slice().reverse().map((item, idx) => `
                 <div class="grammar-item" onclick="GrammarUI.showDetail(${list.length - 1 - idx})">
                     <h3>${TestUI.escapeHtml(item.point)}</h3>
                     <div class="grammar-meaning">${TestUI.escapeHtml(item.meaning)}</div>
                 </div>
             `).join('');
 
-                // Expose globally for onclick
-                window.GrammarUI = this;
-            },
+            // Expose globally for onclick
+            window.GrammarUI = this;
+        },
 
-            showDetail(index) {
-                const list = GrammarBook.getAll();
-                const item = list[index];
-                if (!item) return;
+        showDetail(index) {
+            const list = GrammarBook.getAll();
+            const item = list[index];
+            if (!item) return;
 
-                $('#grammar-title').textContent = item.point;
-                $('#grammar-meaning').innerHTML = `<strong>Ý nghĩa</strong><p>${TestUI.escapeHtml(item.meaning)}</p>`;
-                $('#grammar-usage').innerHTML = item.usage ? `<strong>Cách dùng</strong><p>${TestUI.escapeHtml(item.usage)}</p>` : '';
+            $('#grammar-title').textContent = item.point;
+            $('#grammar-meaning').innerHTML = `<strong>Ý nghĩa</strong><p>${TestUI.escapeHtml(item.meaning)}</p>`;
+            $('#grammar-usage').innerHTML = item.usage ? `<strong>Cách dùng</strong><p>${TestUI.escapeHtml(item.usage)}</p>` : '';
 
-                if (item.examples && item.examples.length > 0) {
-                    const examplesHtml = item.examples.map(ex => `<li>${TestUI.escapeHtml(ex)}</li>`).join('');
-                    $('#grammar-examples').innerHTML = `<strong>Ví dụ</strong><ul>${examplesHtml}</ul>`;
-                } else {
-                    $('#grammar-examples').innerHTML = '';
-                }
-
-                // Mazii link
-                const query = encodeURIComponent(item.point);
-                $('#grammar-link').href = `https://mazii.net/vi-VN/search/word?dict=javi&query=${query}&hl=vi-VN`;
-
-                $('#grammar-detail').classList.remove('hidden');
-
-                // On mobile, hide list
-                if (window.innerWidth <= 768) {
-                    $('#grammar-list').classList.add('hidden');
-                }
-            },
-
-            closeDetail() {
-                $('#grammar-detail').classList.add('hidden');
-                $('#grammar-list').classList.remove('hidden');
+            if (item.examples && item.examples.length > 0) {
+                const examplesHtml = item.examples.map(ex => `<li>${TestUI.escapeHtml(ex)}</li>`).join('');
+                $('#grammar-examples').innerHTML = `<strong>Ví dụ</strong><ul>${examplesHtml}</ul>`;
+            } else {
+                $('#grammar-examples').innerHTML = '';
             }
-        };
 
-        // ============================================
-        // Theme Module
-        // ============================================
-        const Theme = {
-            currentTheme: 'dark',
+            // Mazii link
+            const query = encodeURIComponent(item.point);
+            $('#grammar-link').href = `https://mazii.net/vi-VN/search/word?dict=javi&query=${query}&hl=vi-VN`;
 
-            init() {
-                // Load from localStorage or use system preference
-                const saved = localStorage.getItem('theme');
-                if (saved) {
-                    this.currentTheme = saved;
-                } else {
-                    // Check system preference
-                    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-                    this.currentTheme = prefersDark ? 'dark' : 'light';
-                }
-                this.apply();
-            },
+            $('#grammar-detail').classList.remove('hidden');
 
-            toggle() {
-                this.currentTheme = this.currentTheme === 'dark' ? 'light' : 'dark';
-                this.apply();
-                localStorage.setItem('theme', this.currentTheme);
-            },
-
-            apply() {
-                const html = document.documentElement;
-                if (this.currentTheme === 'light') {
-                    html.setAttribute('data-theme', 'light');
-                } else {
-                    html.removeAttribute('data-theme');
-                }
-                this.updateToggleButton();
-            },
-
-            updateToggleButton() {
-                const btn = $('#btn-theme-toggle');
-                if (btn) {
-                    btn.innerHTML = this.currentTheme === 'dark' ? '<i class="fa-solid fa-sun"></i>' : '<i class="fa-solid fa-moon"></i>';
-                    btn.title = this.currentTheme === 'dark' ? 'Chuyển sang chế độ sáng' : 'Chuyển sang chế độ tối';
-                }
+            // On mobile, hide list
+            if (window.innerWidth <= 768) {
+                $('#grammar-list').classList.add('hidden');
             }
-        };
+        },
 
-        // ============================================
-        // Event Handlers
-        // ============================================
-        function initEventHandlers() {
-            // Auth
-            $('#btn-email-login').addEventListener('click', () => Auth.loginWithEmail());
-
-    $('#btn-demo-login').addEventListener('click', async (e) => {
-        const btn = e.target.closest('button');
-        if (btn.disabled) return;
-
-        btn.disabled = true;
-        const originalText = btn.innerHTML;
-        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang vào...';
-
-        try {
-            await Auth.loginDemo();
-            // Success will change screen, no need to revert
-        } catch (err) {
-            console.error(err);
-            btn.disabled = false;
-            btn.innerHTML = originalText;
-            showToast('Lỗi đăng nhập demo', 'error');
+        closeDetail() {
+            $('#grammar-detail').classList.add('hidden');
+            $('#grammar-list').classList.remove('hidden');
         }
-    });
+    };
 
-    $('#btn-logout').addEventListener('click', () => Auth.logout());
+    // ============================================
+    // Theme Module
+    // ============================================
+    const Theme = {
+        currentTheme: 'dark',
 
-    // Theme toggle
-    $('#btn-theme-toggle')?.addEventListener('click', () => Theme.toggle());
+        init() {
+            // Load from localStorage or use system preference
+            const saved = localStorage.getItem('theme');
+            if (saved) {
+                this.currentTheme = saved;
+            } else {
+                // Check system preference
+                const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+                this.currentTheme = prefersDark ? 'dark' : 'light';
+            }
+            this.apply();
+        },
 
-    // Exam selection (using wrapper classes)
-    $$('.exam-tab-wrapper').forEach(wrapper => {
-        wrapper.addEventListener('click', (e) => {
-            // Don't select if clicking on the dropdown itself or if disabled
-            if (e.target.tagName === 'SELECT' || wrapper.getAttribute('aria-disabled') === 'true') return;
+        toggle() {
+            this.currentTheme = this.currentTheme === 'dark' ? 'light' : 'dark';
+            this.apply();
+            localStorage.setItem('theme', this.currentTheme);
+        },
 
-            $$('.exam-tab-wrapper').forEach(w => w.classList.remove('active'));
-            wrapper.classList.add('active');
-            State.currentExam = wrapper.dataset.exam;
+        apply() {
+            const html = document.documentElement;
+            if (this.currentTheme === 'light') {
+                html.setAttribute('data-theme', 'light');
+            } else {
+                html.removeAttribute('data-theme');
+            }
+            this.updateToggleButton();
+        },
 
-            // Show section selector when exam is selected
-            const sectionSelector = $('#exam-section-selector');
-            // Ensure section selector is visible (though strictly already removed hidden)
-        });
-    });
-
-    // Section selection
-    $$('.section-option').forEach(option => {
-        option.addEventListener('click', () => {
-            $$('.section-option').forEach(o => o.classList.remove('selected'));
-            option.classList.add('selected');
-            State.currentSection = option.dataset.section;
-        });
-    });
-
-    // Mode selection
-    $$('.mode-card').forEach(card => {
-        card.addEventListener('click', () => {
-            $$('.mode-card').forEach(c => c.classList.remove('selected'));
-            card.classList.add('selected');
-            State.currentMode = card.dataset.mode;
-        });
-    });
-
-    // Settings toggle
-    $('.settings-toggle').addEventListener('click', () => {
-        $('.provider-settings').classList.toggle('collapsed');
-    });
-
-    // Start test
-    $('#btn-start-test').addEventListener('click', () => TestUI.startTest());
-
-    // Listening Controls
-    $('#btn-show-script')?.addEventListener('click', () => TestUI.toggleScript());
-    $('#btn-play-audio')?.addEventListener('click', () => TestUI.handleAudio());
-
-    // Audio Seek & Rewind
-    $('#audio-seek')?.addEventListener('input', (e) => {
-        if (State.ttsAudio && State.ttsAudio.duration) {
-            const pct = parseFloat(e.target.value);
-            State.ttsAudio.currentTime = (pct / 100) * State.ttsAudio.duration;
-        }
-    });
-
-    $('#btn-replay-audio')?.addEventListener('click', () => {
-        if (State.ttsAudio) {
-            State.ttsAudio.currentTime = Math.max(0, State.ttsAudio.currentTime - 5);
-            if (State.ttsAudio.paused) State.ttsAudio.play();
-        }
-    });
-
-    // Grammar Book
-    $('#btn-grammar')?.addEventListener('click', () => {
-        GrammarUI.render();
-        showScreen('grammar-screen');
-    });
-    $('#btn-back-grammar')?.addEventListener('click', () => showScreen('home-screen'));
-    $('#btn-close-grammar-detail')?.addEventListener('click', () => GrammarUI.closeDetail());
-
-    // Test navigation
-    $('#btn-prev-mondai').addEventListener('click', () => TestUI.navigateMondai(-1));
-    $('#btn-next-mondai').addEventListener('click', () => TestUI.navigateMondai(1));
-    $('#btn-pause-test').addEventListener('click', () => TestUI.togglePause());
-    $('#btn-submit-group').addEventListener('click', () => TestUI.moveToNextGroup());
-    $('#btn-quit-test')?.addEventListener('click', () => TestUI.quitTest());
-
-    // Passage controls
-    $('#btn-zoom-in').addEventListener('click', () => {
-        const passage = $('#passage-text');
-        const currentSize = parseFloat(getComputedStyle(passage).fontSize);
-        passage.style.fontSize = `${currentSize + 2}px`;
-    });
-
-    $('#btn-zoom-out').addEventListener('click', () => {
-        const passage = $('#passage-text');
-        const currentSize = parseFloat(getComputedStyle(passage).fontSize);
-        if (currentSize > 12) {
-            passage.style.fontSize = `${currentSize - 2}px`;
-        }
-    });
-
-    $('#btn-focus-mode').addEventListener('click', () => {
-        const passage = $('#passage-text').textContent;
-        $('#focus-passage').textContent = passage;
-        $('#focus-overlay').classList.remove('hidden');
-    });
-
-    $('#btn-close-focus').addEventListener('click', () => {
-        $('#focus-overlay').classList.add('hidden');
-    });
-
-    // Audio handler is already registered at line 1653 via TestUI.handleAudio()
-
-    // Review back
-    $('#btn-back-home').addEventListener('click', () => {
-        State.test = null;
-        State.feedback = null;
-        State.answers = {};
-        showScreen('home-screen');
-    });
-
-    // History
-    $('#btn-history').addEventListener('click', () => {
-        HistoryUI.render();
-        showScreen('history-screen');
-    });
-    $('#btn-history-back').addEventListener('click', () => showScreen('home-screen'));
-
-    // Mistakes
-    $('#btn-mistakes').addEventListener('click', () => {
-        MistakesUI.render();
-        showScreen('mistakes-screen');
-    });
-    $('#btn-mistakes-back').addEventListener('click', () => showScreen('home-screen'));
-
-    // Keyboard shortcuts
-    document.addEventListener('keydown', (e) => {
-        if ($('#test-screen').classList.contains('active')) {
-            if (e.key === 'ArrowLeft') {
-                TestUI.navigateMondai(-1);
-            } else if (e.key === 'ArrowRight') {
-                TestUI.navigateMondai(1);
+        updateToggleButton() {
+            const btn = $('#btn-theme-toggle');
+            if (btn) {
+                btn.innerHTML = this.currentTheme === 'dark' ? '<i class="fa-solid fa-sun"></i>' : '<i class="fa-solid fa-moon"></i>';
+                btn.title = this.currentTheme === 'dark' ? 'Chuyển sang chế độ sáng' : 'Chuyển sang chế độ tối';
             }
         }
-    });
-}
+    };
+
+    // ============================================
+    // Event Handlers
+    // ============================================
+    function initEventHandlers() {
+        // Auth
+        $('#btn-email-login').addEventListener('click', () => Auth.loginWithEmail());
+
+        $('#btn-demo-login').addEventListener('click', async (e) => {
+            const btn = e.target.closest('button');
+            if (btn.disabled) return;
+
+            btn.disabled = true;
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang vào...';
+
+            try {
+                await Auth.loginDemo();
+                // Success will change screen, no need to revert
+            } catch (err) {
+                console.error(err);
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+                showToast('Lỗi đăng nhập demo', 'error');
+            }
+        });
+
+        $('#btn-logout').addEventListener('click', () => Auth.logout());
+
+        // Theme toggle
+        $('#btn-theme-toggle')?.addEventListener('click', () => Theme.toggle());
+
+        // Exam selection (using wrapper classes)
+        $$('.exam-tab-wrapper').forEach(wrapper => {
+            wrapper.addEventListener('click', (e) => {
+                // Don't select if clicking on the dropdown itself or if disabled
+                if (e.target.tagName === 'SELECT' || wrapper.getAttribute('aria-disabled') === 'true') return;
+
+                $$('.exam-tab-wrapper').forEach(w => w.classList.remove('active'));
+                wrapper.classList.add('active');
+                State.currentExam = wrapper.dataset.exam;
+
+                // Show section selector when exam is selected
+                const sectionSelector = $('#exam-section-selector');
+                // Ensure section selector is visible (though strictly already removed hidden)
+            });
+        });
+
+        // Section selection
+        $$('.section-option').forEach(option => {
+            option.addEventListener('click', () => {
+                $$('.section-option').forEach(o => o.classList.remove('selected'));
+                option.classList.add('selected');
+                State.currentSection = option.dataset.section;
+            });
+        });
+
+        // Mode selection
+        $$('.mode-card').forEach(card => {
+            card.addEventListener('click', () => {
+                $$('.mode-card').forEach(c => c.classList.remove('selected'));
+                card.classList.add('selected');
+                State.currentMode = card.dataset.mode;
+            });
+        });
+
+        // Settings toggle
+        $('.settings-toggle').addEventListener('click', () => {
+            $('.provider-settings').classList.toggle('collapsed');
+        });
+
+        // Start test
+        $('#btn-start-test').addEventListener('click', () => TestUI.startTest());
+
+        // Listening Controls
+        $('#btn-show-script')?.addEventListener('click', () => TestUI.toggleScript());
+        $('#btn-play-audio')?.addEventListener('click', () => TestUI.handleAudio());
+
+        // Audio Seek & Rewind
+        $('#audio-seek')?.addEventListener('input', (e) => {
+            if (State.ttsAudio && State.ttsAudio.duration) {
+                const pct = parseFloat(e.target.value);
+                State.ttsAudio.currentTime = (pct / 100) * State.ttsAudio.duration;
+            }
+        });
+
+        $('#btn-replay-audio')?.addEventListener('click', () => {
+            if (State.ttsAudio) {
+                State.ttsAudio.currentTime = Math.max(0, State.ttsAudio.currentTime - 5);
+                if (State.ttsAudio.paused) State.ttsAudio.play();
+            }
+        });
+
+        // Grammar Book
+        $('#btn-grammar')?.addEventListener('click', () => {
+            GrammarUI.render();
+            showScreen('grammar-screen');
+        });
+        $('#btn-back-grammar')?.addEventListener('click', () => showScreen('home-screen'));
+        $('#btn-close-grammar-detail')?.addEventListener('click', () => GrammarUI.closeDetail());
+
+        // Test navigation
+        $('#btn-prev-mondai').addEventListener('click', () => TestUI.navigateMondai(-1));
+        $('#btn-next-mondai').addEventListener('click', () => TestUI.navigateMondai(1));
+        $('#btn-pause-test').addEventListener('click', () => TestUI.togglePause());
+        $('#btn-submit-group').addEventListener('click', () => TestUI.moveToNextGroup());
+        $('#btn-quit-test')?.addEventListener('click', () => TestUI.quitTest());
+
+        // Passage controls
+        $('#btn-zoom-in').addEventListener('click', () => {
+            const passage = $('#passage-text');
+            const currentSize = parseFloat(getComputedStyle(passage).fontSize);
+            passage.style.fontSize = `${currentSize + 2}px`;
+        });
+
+        $('#btn-zoom-out').addEventListener('click', () => {
+            const passage = $('#passage-text');
+            const currentSize = parseFloat(getComputedStyle(passage).fontSize);
+            if (currentSize > 12) {
+                passage.style.fontSize = `${currentSize - 2}px`;
+            }
+        });
+
+        $('#btn-focus-mode').addEventListener('click', () => {
+            const passage = $('#passage-text').textContent;
+            $('#focus-passage').textContent = passage;
+            $('#focus-overlay').classList.remove('hidden');
+        });
+
+        $('#btn-close-focus').addEventListener('click', () => {
+            $('#focus-overlay').classList.add('hidden');
+        });
+
+        // Audio handler is already registered at line 1653 via TestUI.handleAudio()
+
+        // Review back
+        $('#btn-back-home').addEventListener('click', () => {
+            State.test = null;
+            State.feedback = null;
+            State.answers = {};
+            showScreen('home-screen');
+        });
+
+        // History
+        $('#btn-history').addEventListener('click', () => {
+            HistoryUI.render();
+            showScreen('history-screen');
+        });
+        $('#btn-history-back').addEventListener('click', () => showScreen('home-screen'));
+
+        // Mistakes
+        $('#btn-mistakes').addEventListener('click', () => {
+            MistakesUI.render();
+            showScreen('mistakes-screen');
+        });
+        $('#btn-mistakes-back').addEventListener('click', () => showScreen('home-screen'));
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            if ($('#test-screen').classList.contains('active')) {
+                if (e.key === 'ArrowLeft') {
+                    TestUI.navigateMondai(-1);
+                } else if (e.key === 'ArrowRight') {
+                    TestUI.navigateMondai(1);
+                }
+            }
+        });
+    }
 
     // ============================================
     // Initialization
     // ============================================
     async function init() {
-    console.log('Language Exam Practice App initializing...');
+        console.log('Language Exam Practice App initializing...');
 
-    Theme.init();
-    initEventHandlers();
-    await Auth.init();
+        Theme.init();
+        initEventHandlers();
+        await Auth.init();
 
-    // Check for existing session (if Privy supports it)
-    // For now, show login screen
-    showScreen('login-screen');
+        // Check for existing session (if Privy supports it)
+        // For now, show login screen
+        showScreen('login-screen');
 
-    console.log('App initialized');
-}
+        console.log('App initialized');
+    }
 
-// Start the app
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-} else {
-    init();
-}
-}) ();
+    // Start the app
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
