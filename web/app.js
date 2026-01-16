@@ -1480,20 +1480,32 @@
             console.log(`Stream A Active: Queuing chunks ${startChunkIndex} to ${totalChunks - 1} with buffering...`);
 
             const promises = [];
-            // Track pending promises that we should wait for 
-            // (Only those >= startChunkIndex, others are already Pushed)
-            Object.keys(pendingPromisesMap).forEach(key => {
-                const idx = parseInt(key);
-                if (idx >= startChunkIndex) {
-                    promises.push(pendingPromisesMap[idx]);
-                }
-            });
-
             const chunkSize = 2;
+
             for (let i = startChunkIndex; i < totalChunks; i++) {
-                // Check if already in pending map
                 if (pendingPromisesMap[i]) {
-                    // Already added to promises above
+                    // Wrap priority promise with RETRY logic
+                    // If it resolved with error, try again immediately here
+                    const p = pendingPromisesMap[i].then(outcome => {
+                        if (outcome.error) {
+                            console.warn(`Stream A: Priority chunk ${i} failed previously. Retrying...`, outcome.error);
+                            return RequestQueue.schedule(() =>
+                                Api.generateMondaiChunk(
+                                    State.examSpec,
+                                    State.currentMode,
+                                    0, // groupIndex
+                                    i,
+                                    chunkSize,
+                                    previousMondai,
+                                    llmProvider,
+                                    targetModel
+                                )
+                            ).then(result => ({ chunkIndex: i, result }))
+                                .catch(err => ({ chunkIndex: i, error: err }));
+                        }
+                        return outcome;
+                    });
+                    promises.push(p);
                 } else {
                     const p = RequestQueue.schedule(() =>
                         Api.generateMondaiChunk(
@@ -1561,7 +1573,27 @@
                 try {
                     for (let c = 0; c < groupTotalChunks; c++) {
                         if (pendingForGroup[c]) {
-                            promises.push(pendingForGroup[c]);
+                            // Wrap priority promise with RETRY logic
+                            const p = pendingForGroup[c].then(outcome => {
+                                if (outcome.error) {
+                                    console.warn(`Stream C: Priority chunk ${c} (Group ${groupIndex}) failed previously. Retrying...`, outcome.error);
+                                    return RequestQueue.schedule(() =>
+                                        Api.generateMondaiChunk(
+                                            State.examSpec,
+                                            State.currentMode,
+                                            groupIndex,
+                                            c,
+                                            chunkSize,
+                                            [],
+                                            llmProvider,
+                                            targetModel
+                                        )
+                                    ).then(result => ({ chunkIndex: c, result }))
+                                        .catch(err => ({ chunkIndex: c, error: err }));
+                                }
+                                return outcome;
+                            });
+                            promises.push(p);
                         } else {
                             promises.push(
                                 RequestQueue.schedule(() =>
