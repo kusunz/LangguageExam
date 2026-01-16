@@ -338,11 +338,23 @@ body::before {
   cursor: not-allowed;
 }
 
-/* Soft disable: Clickable but looks disabled */
-.btn-loading-wait {
-  opacity: 0.6;
-  cursor: pointer;
-  /* Allow click to show toast */
+/* Loading Spinner */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.loading-spinner {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+  vertical-align: middle;
+  margin-right: 0.5em;
 }
 
 .btn-primary {
