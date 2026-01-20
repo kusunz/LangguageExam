@@ -1169,7 +1169,7 @@
 
                     // UI defaults
                     const timeEl = $('#audio-time');
-                    if (timeEl) timeEl.textContent = 'Buffering...';
+                    if (timeEl) timeEl.textContent = 'Đang phát';
                     const seekEl = $('#audio-seek');
                     if (seekEl) seekEl.disabled = true;
 
@@ -1237,7 +1237,8 @@
 
         // Setup combined audio for seek/timer after streaming completes
         setupCombinedAudio() {
-            if (!this.combinedBlob) return;
+            if (!this.combinedBlob) { console.log('TPS: No combined blob'); return; }
+            console.log('TPS: Setup combined audio, size:', this.combinedBlob.size);
 
             const url = URL.createObjectURL(this.combinedBlob);
 
@@ -1266,112 +1267,32 @@
             };
 
             State.ttsAudio.onloadedmetadata = () => {
+                console.log('TPS: Metadata loaded, dur:', State.ttsAudio.duration);
                 const timeEl = $('#audio-time');
                 if (timeEl) {
                     timeEl.textContent = `00:00 / ${this.formatTime(State.ttsAudio.duration)}`;
                 }
-            };
-
-            // Start playback loop
-            this.playNextInQueue(resolve, reject);
-        },
-
-        // Play next blob in the queue
-        async playNextInQueue(resolve, reject) {
-            if (this.currentIndex >= this.audioQueue.length) {
-                // Queue finished?
-                if (this.isStreamComplete) {
-                    // All done
-                    this.isPlaying = false;
-                    const btn = $('#btn-play-audio');
-                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
-
-                    // Create combined blob for Replay
-                    if (this.audioQueue.length > 0) {
-                        this.combinedBlob = new Blob(this.audioQueue, { type: 'audio/mp3' });
-                        this.setupCombinedAudio();
-                    }
-                }
-                return;
-            }
-
-            const blob = this.audioQueue[this.currentIndex];
-            const url = URL.createObjectURL(blob);
-
-            if (State.ttsAudio) {
-                if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
-            }
-
-            State.ttsAudio = new Audio(url);
-            State.ttsAudio.preload = 'auto'; // Load immediately
-
-            State.ttsAudio.onended = () => {
-                URL.revokeObjectURL(url);
-                this.currentIndex++;
-                // Start playback loop
-                this.playNextInQueue(resolve, reject);
-            };
-
-
-            State.ttsAudio.onerror = (err) => {
-                URL.revokeObjectURL(url);
-                this.currentIndex++;
-                // Try next segment instead of failing completely
-                this.playNextInQueue(resolve, reject);
+                const seek = $('#audio-seek');
+                if (seek) seek.disabled = false;
             };
 
             State.ttsAudio.onplay = () => {
                 const btn = $('#btn-play-audio');
                 if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
             };
-
-            try {
-                await State.ttsAudio.play();
-            } catch (err) {
-                this.currentIndex++;
-                this.playNextInQueue(resolve, reject);
-            }
-        },
-
-        // Setup combined audio for seek/timer after streaming completes
-        setupCombinedAudio() {
-            if (!this.combinedBlob) return;
-
-            const url = URL.createObjectURL(this.combinedBlob);
-
-            if (State.ttsAudio) {
-                State.ttsAudio.pause();
-                if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
-            }
-
-            State.ttsAudio = new Audio(url);
-            State.ttsAudio.preload = 'metadata';
-
-            // Setup time update for seek bar
-            State.ttsAudio.ontimeupdate = () => {
-                const currentTime = State.ttsAudio.currentTime;
-                const duration = State.ttsAudio.duration;
-
-                const timeEl = $('#audio-time');
-                if (timeEl && !isNaN(duration)) {
-                    timeEl.textContent = `${this.formatTime(currentTime)} / ${this.formatTime(duration)}`;
-                }
-
-                const seek = $('#audio-seek');
-                if (seek && !isNaN(duration)) {
-                    seek.value = (currentTime / duration) * 100;
-                }
+            State.ttsAudio.onpause = () => {
+                const btn = $('#btn-play-audio');
+                if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-play"></i></span> Tiếp tục`;
+            };
+            State.ttsAudio.onended = () => {
+                const btn = $('#btn-play-audio');
+                if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-left"></i></span> Nghe lại`;
             };
 
-            State.ttsAudio.onloadedmetadata = () => {
-                const timeEl = $('#audio-time');
-                if (timeEl) {
-                    timeEl.textContent = `00:00 / ${this.formatTime(State.ttsAudio.duration)}`;
-                }
-            };
-
-            // Don't auto-play - user will click "Nghe lại" to replay
+            // Don't auto-play - user will click "Nghe" to replay
         },
+
+
 
         async playBlob(blob) {
             return new Promise((resolve, reject) => {
@@ -1406,7 +1327,7 @@
                     URL.revokeObjectURL(url);
                     TTSManager.isPlaying = false;
                     const btn = $('#btn-play-audio');
-                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
+                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-play"></i></span> Nghe`;
 
                     // Reset seek
                     const seek = $('#audio-seek');
@@ -1457,7 +1378,7 @@
 
                 utterance.onend = () => {
                     const btn = $('#btn-play-audio');
-                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
+                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-play"></i></span> Nghe`;
                 };
 
                 utterance.onerror = (err) => {
@@ -1485,12 +1406,26 @@
             this.combinedBlob = null;
         },
 
+        // Helper to resume streaming safely
+        handleResumeStreaming() {
+            this.isPaused = false;
+            this.isPlaying = true;
+            if (State.ttsAudio) {
+                State.ttsAudio.play().catch(e => {
+                    if (e.name !== 'AbortError') console.warn(e);
+                });
+            }
+        },
+
         // Toggle pause for streaming TTS
         togglePause() {
             if (!State.ttsAudio) return false;
 
             if (State.ttsAudio.paused) {
-                State.ttsAudio.play();
+                State.ttsAudio.play().catch(e => {
+                    // Ignore AbortError (interrupted by pause)
+                    if (e.name !== 'AbortError') console.error(e);
+                });
                 this.isPaused = false;
                 return true; // Now playing
             } else {
@@ -1516,11 +1451,88 @@
         loadingGroupIndex: 0, // Current group being loaded
         isSubmitting: false, // Prevent duplicate submissions
 
+        simulateProgress(bar, text) {
+            if (!bar) bar = $('#loading-progress');
+            if (!text) text = $('#progress-text');
+            if (!bar) return;
+
+            if (this.progressInterval) clearInterval(this.progressInterval);
+
+            let progress = 0;
+            const startTime = Date.now();
+            const targetDuration = 25000; // 25 seconds to reach 98%
+
+            this.progressInterval = setInterval(() => {
+                const elapsed = Date.now() - startTime;
+                // Ease-out curve: fast at start, slow near end
+                const targetProgress = 98 * (1 - Math.pow(1 - Math.min(elapsed / targetDuration, 1), 2));
+                progress = Math.min(Math.round(targetProgress), 98);
+
+                bar.style.width = `${progress}%`;
+                if (text) text.textContent = `${progress}%`;
+            }, 200);
+        },
+
+        stopProgress() {
+            if (this.progressInterval) clearInterval(this.progressInterval);
+            const bar = $('#loading-progress');
+            const text = $('#progress-text');
+            if (bar) bar.style.width = '100%';
+            if (text) text.textContent = '100%';
+        },
+
 
         async startTest() {
             const llmProvider = $('#llm-provider').value;
             const targetModel = null; // Default or from settings
             const concurrency = 3; // Max parallel requests
+
+            try {
+                // 1. Extract UI selections
+                const activeExamTab = $('.exam-tab-wrapper.active');
+                if (!activeExamTab) {
+                    throw new Error('Vui lòng chọn kỳ thi');
+                }
+
+                const examType = activeExamTab.dataset.exam || 'jlpt';
+                const levelSelect = examType === 'jlpt' ? '#jlpt-level' : '#hsk-level';
+                const level = $(levelSelect)?.value || 'N2';
+
+                const activeModeCard = $('.mode-card.selected');
+                if (!activeModeCard) {
+                    throw new Error('Vui lòng chọn chế độ thi');
+                }
+                const mode = activeModeCard.dataset.mode || 'official';
+
+                const activeSectionOption = $('.section-option.selected');
+                const section = activeSectionOption?.dataset.section || 'full';
+
+                // Update global state
+                State.currentExam = examType;
+                State.currentMode = mode;
+                State.currentSection = section;
+
+                console.log(`Starting test: ${examType} ${level}, mode: ${mode}, section: ${section}`);
+
+                // 2. Load exam spec
+                let baseSpec = await ExamLoader.loadSpec(examType, level);
+
+                // 3. Apply mode scaling
+                let scaledSpec = ExamLoader.applyModeScaling(baseSpec, mode);
+
+                // 4. Filter by section
+                State.examSpec = ExamLoader.filterBySection(scaledSpec, section, mode);
+
+                if (!State.examSpec) {
+                    throw new Error('Không thể tải cấu hình đề thi');
+                }
+
+                console.log('ExamSpec loaded:', State.examSpec);
+            } catch (err) {
+                console.error('Load exam spec error:', err);
+                showToast('Lỗi tải đề thi: ' + err.message, 'error');
+                return;
+            }
 
             // Reset state
             State.test = {
@@ -1544,10 +1556,11 @@
             $('#loading-text').textContent = 'Đang tạo đề thi...';
             $('#loading-hint').textContent = 'AI đang sinh câu hỏi theo cấu trúc JLPT...';
 
-            const progressBar = $('#loading-progress-inner');
-            const progressText = $('#loading-progress-text');
+            const progressBar = $('#loading-progress');
+            const progressText = $('#progress-text');
             if (progressBar) progressBar.style.width = '0%';
             if (progressText) progressText.textContent = '0%';
+            this.simulateProgress(progressBar, progressText);
 
             try {
                 const totalGroups = State.examSpec.groups.length;
@@ -1624,7 +1637,9 @@
                 const buffer = {};
                 for (let i of criticalIndices) {
                     const result = await pendingPromisesMap[i]; // Already resolved
-                    if (result.result) {
+                    if (result.error) {
+                        console.error(`Chunk ${i} failed:`, result.error);
+                    } else if (result.result) {
                         buffer[i] = result.result.mondai;
                     }
                 }
@@ -1640,6 +1655,12 @@
                     }
                 }
 
+                // CRITICAL: Ensure we have at least SOME content before proceeding
+                if (pushedCount === 0 || State.test.groups[0].mondai.length === 0) {
+                    throw new Error('Không thể tải nội dung đề thi. Vui lòng thử lại sau.');
+                }
+
+                this.stopProgress();
                 showScreen('test-screen');
                 this.initializeTest();
                 console.log('Test Initialized with Priority Content.');
@@ -1659,6 +1680,7 @@
                 );
 
             } catch (err) {
+                this.stopProgress();
                 console.error('Start Test Error:', err);
                 showToast('Lỗi khởi tạo bài thi: ' + err.message, 'error');
                 showScreen('home-screen');
@@ -1887,6 +1909,8 @@
             return history;
         },
 
+
+
         initializeTest() {
             const test = State.test;
             const spec = State.examSpec;
@@ -1947,29 +1971,54 @@
             $('#mondai-current').textContent = Math.min(mondaiPosInGroup, totalMondaiInGroup); // Cap at total
             $('#mondai-total').textContent = totalMondaiInGroup;
 
-            // Calculate total mondai from exam spec for navigation buttons
-            const totalMondaiFromSpec = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
-            // Block navigation to unloaded mondai
-            const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
-            $('#btn-prev-mondai').disabled = globalIndex === 0;
-
-            // Soft disable for Next button if loading (allow click for toast)
-            const btnNext = $('#btn-next-mondai');
-            const isLast = globalIndex === totalMondaiFromSpec - 1;
-
-            if (isLast) {
-                btnNext.disabled = true;
-                btnNext.innerHTML = 'Next >';
-            } else if (!nextMondaiLoaded) {
-                btnNext.disabled = true; // Native disable
-                btnNext.innerHTML = '<span class="loading-spinner"></span> Loading...';
-            } else {
-                btnNext.disabled = false;
-                btnNext.innerHTML = 'Next >'; // Or specific text
-            }
+            // Update navigation buttons (prev/next state based on loaded mondai)
+            this.updateNavigationButtons();
 
             // Update header
-            $('#mondai-title').textContent = mondai.title_vi;
+            // Update header
+            // mondai_id might be "M1", "L1", "N2-L1-01" (if from chunk)
+            // We want purely "Mondai {Number}: {Title}"
+            // If title_vi already contains "Mondai", strip it to avoid duplication?
+            // Screenshot showed "Mondai N2-L1-01: Mondai 1: ..."
+            // This suggests mondai.mondai_id IS "N2-L1-01" (generated ID) and title_vi IS "Mondai 1: ..."
+
+            // Heuristic: Extract the primary identifier (1, 2, 3...)
+            // 1. If title_vi starts with "Mondai X:", just use title_vi.
+            // 2. If valid simple ID (M1, L1), construct "Mondai 1: ..."
+
+            let displayTitle = mondai.title_vi;
+            // Remove "(Task-based...)" English text if present/requested?
+            // User said "phần mở ngoặc là tiếng nhật" (brackets are Japanese). 
+            // Current title_vi: "Hiểu vấn đề (Task-Based Comprehension)" -> keep or replace English?
+            // "tiếp tục thống nhất tiêu đề ( phần mở ngoặc là tiếng nhật)" -> The content inside brackets IS/SHOULD BE Japanese?
+            // Or user means "Keep the Japanese in brackets"? 
+            // Assuming user wants cleaner title.
+
+            // Clean ID logic:
+            const rawId = mondai.mondai_id || '';
+            let simpleId = '';
+
+            // Try to parse '1' from 'M1', 'L1', 'N2-L1'
+            // If rawId is complex like 'N2-L1-01', it corresponds to 'L1'.
+            if (rawId.match(/[ML](\d+)/)) {
+                simpleId = rawId.match(/[ML](\d+)/)[1];
+            }
+
+            // If title ALREADY has "Mondai X", use it.
+            if (displayTitle.match(/^Mondai \d+:/)) {
+                // It's already good: "Mondai 1: Hiểu vấn đề"
+            } else if (simpleId) {
+                // Prepend
+                displayTitle = `Mondai ${simpleId}: ${displayTitle}`;
+            } else {
+                // Fallback if no ID found (rare)
+                if (!displayTitle.startsWith('Mondai')) {
+                    // Maybe use index? But we don't have safe index here easily without context.
+                    // Leave as is if we can't detect.
+                }
+            }
+
+            $('#mondai-title').textContent = displayTitle;
             $('#mondai-instructions').textContent = mondai.instructions_vi || '';
 
             // Render passage if exists (with zoom controls)
@@ -2048,8 +2097,10 @@
                 btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-play"></i></span> Tiếp tục`;
             } else if (state === 'loading') {
                 btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-spinner fa-spin"></i></span> Đang tải...`;
-            } else { // default/replay
-                btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
+            } else if (state === 'replay' || (State.ttsAudio && State.ttsAudio.ended)) {
+                btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-left"></i></span> Nghe lại`;
+            } else { // default (stopped/not started)
+                btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-play"></i></span> Nghe`;
             }
         },
 
@@ -2057,68 +2108,101 @@
             const btn = $('#btn-play-audio');
             if (!btn) return;
 
-            // Streaming TTS Handle (check first since it uses the same State.ttsAudio)
-            if (TTSManager.isPlaying || TTSManager.isPaused) {
-                if (State.ttsAudio && !State.ttsAudio.ended) {
-                    const isNowPlaying = TTSManager.togglePause();
-                    this.updateAudioButton(isNowPlaying ? 'playing' : 'paused');
-                    return;
-                }
+            // Debounce to prevent double-clicks/double-events
+            const now = Date.now();
+            if (this._lastAudioClick && (now - this._lastAudioClick < 500)) {
+                console.log('TPS: Audio click debounced');
+                return;
             }
+            this._lastAudioClick = now;
 
-            // HTML5 Audio Handle (non-streaming)
-            if (State.ttsAudio && State.ttsAudio.src && !State.ttsAudio.error) {
-                if (!State.ttsAudio.ended) {
-                    if (State.ttsAudio.paused) {
+            console.log('TPS: handleAudio called', {
+                isPlaying: TTSManager.isPlaying,
+                isPaused: TTSManager.isPaused,
+                hasCombinedBlob: !!TTSManager.combinedBlob,
+                hasAudio: !!State.ttsAudio,
+                audioPaused: State.ttsAudio?.paused,
+                audioEnded: State.ttsAudio?.ended
+            });
+
+            // 1. If combined blob exists (replay mode or finished stream)
+            if (TTSManager.combinedBlob && State.ttsAudio) {
+                console.log('TPS: Using combined blob interaction');
+
+                // If Ended -> Replay from start
+                if (State.ttsAudio.ended) {
+                    State.ttsAudio.currentTime = 0;
+                    try {
                         await State.ttsAudio.play();
                         this.updateAudioButton('playing');
-                    } else {
-                        State.ttsAudio.pause();
-                        this.updateAudioButton('paused');
+                    } catch (e) {
+                        console.warn('Replay failed:', e);
                     }
                     return;
                 }
-                // If ended, we restart below
-            }
 
-            // Browser TTS Handle
-            if ('speechSynthesis' in window && speechSynthesis.speaking) {
-                if (speechSynthesis.paused) {
-                    speechSynthesis.resume();
-                    this.updateAudioButton('playing');
-                } else {
-                    speechSynthesis.pause();
-                    this.updateAudioButton('paused');
+                // If Paused -> Resume (Continue)
+                if (State.ttsAudio.paused) {
+                    try {
+                        await State.ttsAudio.play();
+                        this.updateAudioButton('playing');
+                    } catch (e) {
+                        console.warn('Resume failed:', e);
+                    }
+                    return;
                 }
+
+                // If Playing -> Pause
+                if (!State.ttsAudio.paused) {
+                    State.ttsAudio.pause();
+                    this.updateAudioButton('paused');
+                    return;
+                }
+
                 return;
             }
 
-            // Start new playback logic
+            // 2. Streaming Mode Interaction
+            if (TTSManager.isPlaying) { // Currently streaming -> Pause
+                console.log('TPS: Toggling pause (streaming)');
+                const isNowPlaying = TTSManager.togglePause();
+                this.updateAudioButton(isNowPlaying ? 'playing' : 'paused');
+                return;
+            }
+
+            if (TTSManager.isPaused) { // Streaming paused -> Resume
+                console.log('TPS: Resuming paused streaming');
+                TTSManager.handleResumeStreaming(); // Helper to be safe
+                this.updateAudioButton('playing');
+                return;
+            }
+
+            // 3. Initial Start (No audio yet)
             const mondaiData = this.getCurrentMondaiData();
-            if (!mondaiData) return;
-
-            // Ensure stopped before starting new
-            TTSManager.stop();
-
-            const scriptItem = mondaiData.mondai.items.find(item => item.media?.script_text);
-            if (!scriptItem) return;
-
-            btn.disabled = true;
-            this.updateAudioButton('loading');
-
-            try {
-                // Use Streaming TTS for immediate playback
-                await TTSManager.playStreaming(scriptItem.media.script_text, State.test.meta.language);
-                // Note: TTSManager updates button on start/end, but we rely on events there
-            } catch (err) {
-                console.error(err);
-                this.updateAudioButton('default'); // Show Retry/Play icon
-            } finally {
-                btn.disabled = false;
+            const scriptItem = mondaiData?.mondai?.items?.find(item => item.media?.script_text);
+            if (scriptItem?.media?.script_text) {
+                console.log('TPS: Starting new TTS stream');
+                this.updateAudioButton('loading');
+                const lang = State.test.meta.language || 'ja-JP';
+                TTSManager.playAudio(scriptItem.media.script_text, lang);
+            } else {
+                showToast('Không có dữ liệu âm thanh cho bài này', 'info');
             }
         },
 
 
+
+
+
+
+        toggleScript() {
+            const script = $('#audio-script');
+            const btn = $('#btn-show-script');
+            if (script && btn) {
+                script.classList.toggle('hidden');
+                btn.textContent = script.classList.contains('hidden') ? 'Hiển thị lời thoại' : 'Ẩn lời thoại';
+            }
+        },
 
         getCurrentMondaiData() {
             const test = State.test;
@@ -2149,25 +2233,29 @@
             return false;
         },
 
-        // Update navigation buttons without re-rendering (for background loading)
         updateNavigationButtons() {
             if (!State.test || !State.examSpec) return;
 
             const globalIndex = this.getGlobalMondaiIndex();
             const totalMondaiFromSpec = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
             const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
+
+            // Update Previous button
+            $('#btn-prev-mondai').disabled = globalIndex === 0;
+
+            // Update Next button
             const btnNext = $('#btn-next-mondai');
             const isLast = globalIndex === totalMondaiFromSpec - 1;
 
             if (isLast) {
                 btnNext.disabled = true;
-                btnNext.innerHTML = 'Tiếp theo >';
+                btnNext.innerHTML = '>';
             } else if (!nextMondaiLoaded) {
                 btnNext.disabled = true;
-                btnNext.innerHTML = '<span class="loading-spinner"></span> Loading...';
+                btnNext.innerHTML = '> <span class="loading-spinner"><i class="fa-solid fa-spinner fa-spin"></i></span>';
             } else {
                 btnNext.disabled = false;
-                btnNext.innerHTML = 'Tiếp theo >';
+                btnNext.innerHTML = '>';
             }
 
             // Update loading indicator
@@ -2180,10 +2268,6 @@
                 }
             }
 
-            // Notify user if button just became enabled
-            if (wasDisabled && !$('#btn-next-mondai').disabled) {
-                // Toast is optional - can be noisy, so just update button silently
-            }
         },
 
         getGlobalMondaiIndex() {
@@ -3303,6 +3387,22 @@
             });
         });
 
+        // Audio controls
+        $('#btn-replay-audio')?.addEventListener('click', () => {
+            if (State.ttsAudio) {
+                State.ttsAudio.currentTime = Math.max(0, State.ttsAudio.currentTime - 5);
+            }
+        });
+
+        $('#audio-seek')?.addEventListener('input', (e) => {
+            const percent = e.target.value;
+            if (State.ttsAudio && State.ttsAudio.duration) {
+                State.ttsAudio.currentTime = (percent / 100) * State.ttsAudio.duration;
+            }
+        });
+
+        $('#btn-show-script')?.addEventListener('click', () => TestUI.toggleScript());
+
         // Section selection
         $$('.section-option').forEach(option => {
             option.addEventListener('click', () => {
@@ -3332,21 +3432,6 @@
         // Listening Controls
         $('#btn-show-script')?.addEventListener('click', () => TestUI.toggleScript());
         $('#btn-play-audio')?.addEventListener('click', () => TestUI.handleAudio());
-
-        // Audio Seek & Rewind
-        $('#audio-seek')?.addEventListener('input', (e) => {
-            if (State.ttsAudio && State.ttsAudio.duration) {
-                const pct = parseFloat(e.target.value);
-                State.ttsAudio.currentTime = (pct / 100) * State.ttsAudio.duration;
-            }
-        });
-
-        $('#btn-replay-audio')?.addEventListener('click', () => {
-            if (State.ttsAudio) {
-                State.ttsAudio.currentTime = Math.max(0, State.ttsAudio.currentTime - 5);
-                if (State.ttsAudio.paused) State.ttsAudio.play();
-            }
-        });
 
         // Grammar Book
         $('#btn-grammar')?.addEventListener('click', () => {
@@ -3388,7 +3473,21 @@
             $('#focus-overlay').classList.add('hidden');
         });
 
-        // Audio handler is already registered at line 1653 via TestUI.handleAudio()
+        // Audio controls
+        $('#btn-play-audio')?.addEventListener('click', () => TestUI.handleAudio());
+        $('#btn-replay-audio')?.addEventListener('click', () => {
+            if (State.ttsAudio && State.ttsAudio.duration) {
+                State.ttsAudio.currentTime = Math.max(0, State.ttsAudio.currentTime - 5);
+            }
+        });
+        $('#btn-show-script')?.addEventListener('click', () => TestUI.toggleScript());
+
+        // Audio seek bar
+        $('#audio-seek')?.addEventListener('input', (e) => {
+            if (State.ttsAudio && State.ttsAudio.duration) {
+                State.ttsAudio.currentTime = (e.target.value / 100) * State.ttsAudio.duration;
+            }
+        });
 
         // Review back
         $('#btn-back-home').addEventListener('click', () => {

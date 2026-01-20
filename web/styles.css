@@ -928,8 +928,7 @@ body::before {
   align-items: center;
   justify-content: center;
   gap: var(--space-md);
-  padding: var(--space-sm);
-  margin: 0 var(--space-md);
+  padding: var(--space-sm) var(--space-md);
   border-radius: var(--radius-md);
   flex-shrink: 0;
 }
@@ -1614,6 +1613,7 @@ body::before {
   font-size: var(--text-sm);
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }

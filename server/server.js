@@ -471,6 +471,51 @@ async function callGeminiWithModel(prompt, model, options = {}) {
     throw error;
   }
 
+  // Helper to clean JSON string (remove markdown, find first { and last })
+  function cleanJson(text) {
+    if (!text) return text;
+    // Remove markdown code blocks
+    let cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '');
+
+    // Find first '{'
+    const start = cleaned.indexOf('{');
+    if (start === -1) return cleaned;
+
+    // Robust extraction: count braces to find the matching closing brace
+    let braceCount = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = start; i < cleaned.length; i++) {
+      const char = cleaned[i];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (char === '\\') {
+        escape = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+
+      if (!inString) {
+        if (char === '{') braceCount++;
+        else if (char === '}') braceCount--;
+
+        if (braceCount === 0) {
+          // Found the matching end
+          return cleaned.substring(start, i + 1);
+        }
+      }
+    }
+
+    // Fallback: return from start to end if no balanced closure found
+    return cleaned.substring(start);
+  }
+
   const data = await response.json();
 
   if (!data.candidates || !data.candidates[0]?.content?.parts?.[0]?.text) {
@@ -482,12 +527,13 @@ async function callGeminiWithModel(prompt, model, options = {}) {
 
   // Try to parse JSON, with repair for truncated responses
   try {
-    return JSON.parse(text);
+    const cleanedText = cleanJson(text);
+    return JSON.parse(cleanedText);
   } catch (parseErr) {
     log('WARN', `JSON parse failed, attempting repair...`, { error: parseErr.message });
 
     // Attempt to repair truncated JSON
-    const repaired = repairTruncatedJSON(text);
+    const repaired = repairTruncatedJSON(cleanJson(text));
     if (repaired) {
       log('INFO', 'JSON repair successful');
       return repaired;
@@ -1490,7 +1536,7 @@ Schema:
   "mondai": [
     {
       "mondai_id": "<string>",
-      "title_vi": "<string>",
+      "title_vi": "<Vietnamese Title> (<Japanese Title>)",
       "instructions_vi": "<Vietnamese instructions>",
       "passage": { "title": "<optional>", "text": "<for reading>" },
       "items": [
@@ -1705,7 +1751,12 @@ REPEAT = FAILURE.` : 'First chunk - establish diverse foundation.'}
 -------------------------
 OUTPUT RULE
 -------------------------
-Return RAW JSON only. No explanations, no meta text.
+Return RAW JSON ONLY. 
+- DO NOT use markdown code blocks (no \`\`\`json).
+- DO NOT start with "Here is the JSON...".
+- DO NOT end with explanations.
+- The output must start clearly with '{' and end with '}'.
+
 {
   "mondai": [
     {
@@ -1729,7 +1780,7 @@ Return RAW JSON only. No explanations, no meta text.
   ]
 }
 
-GENERATE JSON NOW:`;
+GENERATE JSON NOW (NO MARKDOWN):`;
 }
 
 function buildGradeTestPrompt(test, answers) {
