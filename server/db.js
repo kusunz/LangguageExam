@@ -72,6 +72,25 @@ async function initDb() {
       );
     `);
 
+    // Exam Sessions table (for secure answer storage)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS exam_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id TEXT REFERENCES users(id),
+        exam_id TEXT NOT NULL,
+        answers JSONB NOT NULL,
+        is_practice_mode BOOLEAN DEFAULT false,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMP WITH TIME ZONE DEFAULT (CURRENT_TIMESTAMP + INTERVAL '4 hours')
+      );
+    `);
+
+    // Create index for faster lookups
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_exam_sessions_expires 
+      ON exam_sessions(expires_at);
+    `);
+
     await client.query('COMMIT');
     console.log('Database initialized successfully');
     return true;

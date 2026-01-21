@@ -41,6 +41,16 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
+// Strict rate limiting for answer verification (prevent brute-force)
+const verifyAnswerLimiter = rateLimit({
+  windowMs: 1000, // 1 second
+  max: 5, // 5 requests per second
+  message: { error: 'Too many verification requests, slow down' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.user?.userId || req.ip
+});
+
 // Data directory
 // Data directory (Legacy/Local usage only - skipped for cloud)
 const DATA_DIR = path.join(__dirname, 'data');
@@ -395,6 +405,73 @@ async function saveQuestionsFromTest(testData) {
   } catch (e) {
     console.error('Error saving questions to bank:', e);
   }
+}
+
+// ============ Answer Hash Security Helper ============
+
+/**
+ * Generate answer hash for quick grading verification
+ * Uses SHA-256 with secret key to prevent reverse engineering
+ * @param {string} questionId - Question ID
+ * @param {number} answerIndex - Correct answer index (0-3)
+ * @returns {string} - SHA-256 hash
+ */
+function generateAnswerHash(questionId, answerIndex) {
+  const SECRET = process.env.ANSWER_HASH_SECRET || 'default-secret-change-me-in-production';
+
+  if (!process.env.ANSWER_HASH_SECRET) {
+    log('WARN', 'ANSWER_HASH_SECRET not set, using default (INSECURE for production)');
+  }
+
+  const hashInput = `${questionId}:${answerIndex}:${SECRET}`;
+  return crypto.createHash('sha256').update(hashInput).digest('hex');
+}
+
+/**
+ * Replace answer_index with answer_hash in response
+ * Allows client-side quick grading verification while hiding actual answers
+ * @param {object} data - Response data with questions
+ * @returns {object} - Data with answer_hash instead of answer_index
+ */
+function hashifyAnswers(data) {
+  if (!data) return data;
+
+  // Deep clone to avoid mutating original
+  const hashed = JSON.parse(JSON.stringify(data));
+
+  // Process mondai array
+  if (hashed.mondai && Array.isArray(hashed.mondai)) {
+    hashed.mondai.forEach(m => {
+      if (m.items && Array.isArray(m.items)) {
+        m.items.forEach(item => {
+          if (item.id && typeof item.answer_index === 'number') {
+            item.answer_hash = generateAnswerHash(item.id, item.answer_index);
+            delete item.answer_index; // Remove actual answer
+          }
+        });
+      }
+    });
+  }
+
+  // Process groups structure
+  if (hashed.groups && Array.isArray(hashed.groups)) {
+    hashed.groups.forEach(group => {
+      if (group.mondai && Array.isArray(group.mondai)) {
+        group.mondai.forEach(m => {
+          if (m.items && Array.isArray(m.items)) {
+            m.items.forEach(item => {
+              if (item.id && typeof item.answer_index === 'number') {
+                item.answer_hash = generateAnswerHash(item.id, item.answer_index);
+                delete item.answer_index; // Remove actual answer
+              }
+            });
+          }
+        });
+      }
+    });
+  }
+
+  return hashed;
 }
 
 // ============ LLM Endpoints ============
@@ -845,7 +922,10 @@ app.post('/api/generate-group', authMiddleware, async (req, res) => {
 // Generate a chunk of mondai (2-3 at a time for faster progressive loading)
 app.post('/api/generate-mondai-chunk', authMiddleware, async (req, res) => {
   try {
-    const { examSpec, mode, groupIndex, chunkIndex, chunkSize = 3, previousMondai = [], provider, model } = req.body;
+    const {
+      examSpec, mode, groupIndex, chunkIndex, chunkSize = 3,
+      previousMondai = [], provider, model
+    } = req.body;
     const llmProvider = provider || process.env.DEFAULT_LLM_PROVIDER || 'gemini';
 
     const group = examSpec.groups[groupIndex];
@@ -936,8 +1016,16 @@ app.post('/api/generate-mondai-chunk', authMiddleware, async (req, res) => {
     // Async save generated questions to Knowledge Bank
     saveQuestionsFromTest({ groups: [{ mondai: validatedMondai }] }).catch(e => console.error('Bank save error chunk:', e));
 
-    log('INFO', `Generated mondai chunk ${chunkIndex + 1} for group ${groupIndex + 1}: ${validatedMondai.length} mondai`);
-    res.json(response);
+    // SECURITY: Replace answer_index with answer_hash
+    const hashedResponse = hashifyAnswers(response);
+
+    log('INFO', `Generated mondai chunk ${chunkIndex + 1}`, {
+      groupIndex: groupIndex + 1,
+      mondaiCount: validatedMondai.length,
+      security: 'answer_hash'
+    });
+
+    res.json(hashedResponse);
   } catch (err) {
     console.error('Generate mondai chunk error:', err);
     log('ERROR', 'Generate mondai chunk failed', { error: err.message, stack: err.stack?.substring(0, 500) });
@@ -946,10 +1034,39 @@ app.post('/api/generate-mondai-chunk', authMiddleware, async (req, res) => {
 });
 
 
+// Answer Verification Endpoint (for client-side quick grading)
+app.post('/api/verify-answer', authMiddleware, verifyAnswerLimiter, (req, res) => {
+  try {
+    const { questionId, answerIndex } = req.body;
+
+    // Validate input
+    if (!questionId || typeof answerIndex !== 'number') {
+      return res.status(400).json({ error: 'Invalid request: questionId and answerIndex required' });
+    }
+
+    if (answerIndex < 0 || answerIndex > 3) {
+      return res.status(400).json({ error: 'Invalid answer index: must be 0-3' });
+    }
+
+    // Generate hash for the provided answer
+    const hash = generateAnswerHash(questionId, answerIndex);
+
+    res.json({ hash });
+
+  } catch (err) {
+    console.error('Verify answer error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
 app.post('/api/grade-test', authMiddleware, async (req, res) => {
   try {
     const { test, answers, provider } = req.body;
     const llmProvider = provider || process.env.DEFAULT_LLM_PROVIDER || 'gemini';
+
+    // Note: Quick grading is now handled client-side using answer_hash verification
+    // This endpoint is only for AI detailed grading
 
     const prompt = buildGradeTestPrompt(test, answers);
 

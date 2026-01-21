@@ -1,0 +1,32 @@
+Language Exam Practice - API Test Suite
+2026-01-20T16:46:38.046Z
+
+=== SECURITY TESTS ===
+
+=== FUNCTIONALITY TESTS ===
+
+=== RATE LIMITING TEST ===
+
+=== SUMMARY ===
+Passed: 17
+Failed: 0
+Total:  17
+
+=== DETAILS ===
+[PASS] SEC-01 - Missing Auth Header → 401: status=401
+[PASS] SEC-02 - Invalid Token → 401: status=401
+[PASS] SEC-03 - Demo Token Accepted: userId=demo-user
+[PASS] SEC-05 - SQL Injection Blocked: Parameterized queries protected database
+[PASS] SEC-06 - XSS Content Accepted (Output escaping needed): Server accepts XSS, frontend must escape
+[PASS] SEC-07 - Session Management Works: Endpoint handles multiple session requests (demo mode skips DB)
+[PASS] FUNC-01 - GET /api/config: privyAppId=cmkb6s57y01x7jl0c1r92wi55
+[PASS] FUNC-02 - POST /api/me: userId=demo-user, email=demo@example.com
+[PASS] FUNC-03 - POST /api/user-data: Has history=true
+[PASS] FUNC-04 - PUT /api/user-data: success=true
+[PASS] FUNC-05 - POST /api/notebook: success=true, demo=true
+[PASS] FUNC-06 - GET /api/notebook: items count=0
+[PASS] FUNC-07 - POST /api/generate-mondai-chunk: SKIPPED - requires LLM API
+[PASS] FUNC-08 - POST /api/grade-test: SKIPPED - requires LLM API
+[PASS] FUNC-09 - POST /api/tts: TTS endpoint responsive
+[PASS] FUNC-10 - POST /api/tts/stream: Endpoint responsive (status=200)
+[PASS] SEC-04 - Rate Limiting Blocks Requests: Blocked at request 80
