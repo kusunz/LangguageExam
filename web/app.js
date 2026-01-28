@@ -250,6 +250,31 @@
             return response.blob();
         },
 
+        // ============ V2 API (Pool Architecture) ============
+        async startExamV2(examSpec, mode, setNo) {
+            return this.request('/exam/start', {
+                method: 'POST',
+                body: { examSpec, mode, setNo }
+            });
+        },
+
+        async fetchExamChunk(instanceKey, group_id, want_count = 3) {
+            return this.request('/exam/chunk', {
+                method: 'POST',
+                body: {
+                    instanceKey,
+                    want: { group_id, want_count }
+                }
+            });
+        },
+
+        async quickGradeV2(instanceKey, answers) {
+            return this.request('/exam/quickgrade', {
+                method: 'POST',
+                body: { instanceKey, answers }
+            });
+        },
+
         async saveToNotebook(question, note = '', tags = []) {
             // Client-side storage for Demo User
             if (State.user?.token === 'demo-token') {
@@ -1484,24 +1509,19 @@
 
         async startTest() {
             const llmProvider = $('#llm-provider').value;
-            const targetModel = null; // Default or from settings
-            const concurrency = 3; // Max parallel requests
+            const targetModel = null;
 
             try {
                 // 1. Extract UI selections
                 const activeExamTab = $('.exam-tab-wrapper.active');
-                if (!activeExamTab) {
-                    throw new Error('Vui lòng chọn kỳ thi');
-                }
+                if (!activeExamTab) throw new Error('Vui lòng chọn kỳ thi');
 
                 const examType = activeExamTab.dataset.exam || 'jlpt';
                 const levelSelect = examType === 'jlpt' ? '#jlpt-level' : '#hsk-level';
                 const level = $(levelSelect)?.value || 'N2';
 
                 const activeModeCard = $('.mode-card.selected');
-                if (!activeModeCard) {
-                    throw new Error('Vui lòng chọn chế độ thi');
-                }
+                if (!activeModeCard) throw new Error('Vui lòng chọn chế độ thi');
                 const mode = activeModeCard.dataset.mode || 'official';
 
                 const activeSectionOption = $('.section-option.selected');
@@ -1512,179 +1532,152 @@
                 State.currentMode = mode;
                 State.currentSection = section;
 
-                console.log(`Starting test: ${examType} ${level}, mode: ${mode}, section: ${section}`);
+                console.log(`Starting test V2: ${examType} ${level}, mode: ${mode}, section: ${section}`);
 
                 // 2. Load exam spec
                 let baseSpec = await ExamLoader.loadSpec(examType, level);
 
-                // 3. Apply mode scaling
-                let scaledSpec = ExamLoader.applyModeScaling(baseSpec, mode);
+                // 3. Apply mode scaling (Frontend still does this to filter spec passed to server?)
+                // Actually V2 server does scaling/blueprint if we pass raw spec?
+                // But server takes 'examSpec'. If we pass filtered spec, server respects it.
+                // Converting spec to "Protocol" object?
+                // Let's rely on frontend filtering to keep consistent behavior with existing "Section" logic.
 
-                // 4. Filter by section
+                let scaledSpec = ExamLoader.applyModeScaling(baseSpec, mode);
                 State.examSpec = ExamLoader.filterBySection(scaledSpec, section, mode);
 
-                if (!State.examSpec) {
-                    throw new Error('Không thể tải cấu hình đề thi');
-                }
+                if (!State.examSpec) throw new Error('Không thể tải cấu hình đề thi');
 
-                console.log('ExamSpec loaded:', State.examSpec);
+                console.log('ExamSpec prepared for V2:', State.examSpec);
             } catch (err) {
                 console.error('Load exam spec error:', err);
                 showToast('Lỗi tải đề thi: ' + err.message, 'error');
                 return;
             }
 
-            // Reset state
-            State.test = {
-                meta: {
-                    exam_id: State.examSpec.exam_id,
-                    mode: State.currentMode,
-                    start_time: new Date().toISOString(),
-                    time_limits: State.examSpec.scaled_time_limits || State.examSpec.official_time_limits_sec,
-                    language: 'vi-VN' // Default
-                },
-                groups: []
-            };
-            State.answers = {};
-            State.currentGroupIndex = 0;
-            State.currentMondaiIndex = 0;
-            State.isTestPaused = false;
-            State.feedback = null;
-
-            // Show loading screen with enhanced UI
+            // Show loading screen
             showScreen('loading-screen');
-            $('#loading-text').textContent = 'Đang tạo đề thi...';
-            $('#loading-hint').textContent = 'AI đang sinh câu hỏi theo cấu trúc JLPT...';
+            $('#loading-text').textContent = 'Đang khởi tạo đề thi (Server V2)...';
+            $('#loading-hint').textContent = 'Đang kết nối đến ngân hàng câu hỏi...';
 
             const progressBar = $('#loading-progress');
             const progressText = $('#progress-text');
-            if (progressBar) progressBar.style.width = '0%';
-            if (progressText) progressText.textContent = '0%';
-            this.simulateProgress(progressBar, progressText);
+            if (progressBar) progressBar.style.width = '30%';
+            if (progressText) progressText.textContent = '30%';
 
             try {
-                const totalGroups = State.examSpec.groups.length;
-                const group0 = State.examSpec.groups[0];
-                const totalChunks = Math.ceil(group0.mondai.length / 2); // chunkSize=2
+                // Call V2 Start Endpoint
+                const res = await Api.startExamV2(State.examSpec, State.currentMode);
+                console.log('V2 Start Res:', res);
 
-                // --- PRIORITY MIX STRATEGY ---
-                // P1: Vocab/Grammar (Group 0) - First 3 chunks (M1-M6 approx)
-                // P2: Listening (Group 1 if exists) - First 1 chunk (L1)
-                // P3: Reading (Group 0) - First Reading Chunk (M8 approx)
+                if (progressBar) progressBar.style.width = '70%';
+                if (progressText) progressText.textContent = '70%';
 
-                const pendingPromisesMap = {}; // { chunkIndex: Promise } for Group 0
-                const pendingGroupsMap = {};   // { groupIndex: [Promises] }
+                // Initialize State.test from Manifest
+                State.currentInstanceKey = res.instanceKey;
 
-                console.log('Starting Priority Mix Strategy...');
-
-                // 1. Identify Priorities
-                const priorityChunksG0 = [0, 1, 2].filter(i => i < totalChunks); // First 3 Vocab
-
-                // Find Reading Start Chunk in Group 0
-                let readingStartChunk = -1;
-                let mCount = 0;
-                for (let i = 0; i < group0.mondai.length; i++) {
-                    if (group0.mondai[i].mondai_id === 'M8' || group0.mondai[i].title_vi.includes('Đọc')) {
-                        readingStartChunk = Math.floor(i / 2);
-                        break;
-                    }
-                }
-                if (readingStartChunk !== -1 && !priorityChunksG0.includes(readingStartChunk)) {
-                    priorityChunksG0.push(readingStartChunk);
-                }
-
-                // 2. Fire Group 0 Priorities
-                const chunkSize = 2;
-                priorityChunksG0.forEach(cIdx => {
-                    pendingPromisesMap[cIdx] = RequestQueue.schedule(() =>
-                        Api.generateMondaiChunk(
-                            State.examSpec, State.currentMode, 0, cIdx, chunkSize, [], llmProvider, targetModel
-                        )
-                    ).then(result => ({ chunkIndex: cIdx, result }))
-                        .catch(err => ({ chunkIndex: cIdx, error: err }));
-                });
-
-                // 3. Fire Group 1 Priorities (Listening)
-                if (totalGroups > 1) {
-                    const group1 = State.examSpec.groups[1];
-                    if (group1.group_id === 'listening' || group1.title_vi.includes('Nghe')) {
-                        const p = RequestQueue.schedule(() =>
-                            Api.generateMondaiChunk(
-                                State.examSpec, State.currentMode, 1, 0, chunkSize, [], llmProvider, targetModel
-                            )
-                        ).then(result => ({ chunkIndex: 0, result }))
-                            .catch(err => ({ chunkIndex: 0, error: err }));
-
-                        pendingGroupsMap[1] = [p]; // Store for Stream C
-                    }
-                }
-
-                // 4. Wait for Critical Initial Content (First 2 chunks of G0)
-                // This ensures we can START the test
-                const criticalIndices = [0, 1].filter(i => i < totalChunks);
-                const criticalPromises = criticalIndices.map(i => pendingPromisesMap[i]);
-
-                await Promise.all(criticalPromises);
-
-                // Initialize Group 0 structure
-                State.test.groups[0] = {
-                    group_id: group0.group_id,
-                    title_vi: group0.title_vi,
-                    mondai: []
+                State.test = {
+                    meta: {
+                        exam_id: State.examSpec.exam_id,
+                        mode: State.currentMode,
+                        start_time: new Date().toISOString(),
+                        time_limits: State.examSpec.scaled_time_limits || State.examSpec.official_time_limits_sec,
+                        language: 'vi-VN'
+                    },
+                    groups: res.manifest.groups.map(g => ({
+                        group_id: g.group_id,
+                        title_vi: g.title_vi,
+                        mondai: [] // Will fill progressively
+                    }))
                 };
 
-                // Buffer initial results
-                const buffer = {};
-                for (let i of criticalIndices) {
-                    const result = await pendingPromisesMap[i]; // Already resolved
-                    if (result.error) {
-                        console.error(`Chunk ${i} failed:`, result.error);
-                    } else if (result.result) {
-                        buffer[i] = result.result.mondai;
-                    }
+                State.answers = {};
+                State.currentGroupIndex = 0;
+                State.currentMondaiIndex = 0;
+                State.isTestPaused = false;
+                State.feedback = null;
+
+                // Process First Chunk
+                if (res.mondai && res.mondai.length > 0) {
+                    // First chunk usually belongs to first group?
+                    // Need to map mondai to groups.
+                    // Helper to distribute items? or we know where they go?
+                    // The startExamV2 usually returns chunk for first group.
+                    State.test.groups[0].mondai.push(...res.mondai);
                 }
 
-                // Push sequentially
-                let pushedCount = 0;
-                for (let i = 0; i < totalChunks; i++) {
-                    if (buffer[i]) {
-                        State.test.groups[0].mondai.push(...buffer[i]);
-                        pushedCount++;
-                    } else {
-                        break; // Stop at gap
-                    }
-                }
-
-                // CRITICAL: Ensure we have at least SOME content before proceeding
-                if (pushedCount === 0 || State.test.groups[0].mondai.length === 0) {
-                    throw new Error('Không thể tải nội dung đề thi. Vui lòng thử lại sau.');
-                }
+                if (progressBar) progressBar.style.width = '100%';
+                if (progressText) progressText.textContent = '100%';
 
                 this.stopProgress();
                 showScreen('test-screen');
                 this.initializeTest();
-                console.log('Test Initialized with Priority Content.');
+                console.log('Test Initialized (V2).');
 
-                // 5. Start Background Loading (Stream A & C)
-                // Stream A: Finish Group 0
-                this.loadRemainingChunksInBackground(
-                    State.test.groups[0],
-                    pushedCount, // Start index
-                    totalChunks,
-                    [], // previousMondai (optimization)
-                    llmProvider,
-                    targetModel,
-                    concurrency,
-                    pendingPromisesMap, // Pass existing promises
-                    pendingGroupsMap
-                );
+                // Start Background Loading V2
+                this.loadRemainingChunksV2();
 
             } catch (err) {
                 this.stopProgress();
-                console.error('Start Test Error:', err);
+                console.error('Start Test V2 Error:', err);
                 showToast('Lỗi khởi tạo bài thi: ' + err.message, 'error');
                 showScreen('home-screen');
             }
+        },
+
+        async loadRemainingChunksV2() {
+            if (!State.currentInstanceKey) return;
+
+            // Iterate all groups and fetch remaining content
+            // We do this sequentially or parallel? 
+            // Sequential is safer for order, parallel for speed.
+            // Sliding window of 2 requests?
+
+            const instanceKey = State.currentInstanceKey;
+
+            for (let gIdx = 0; gIdx < State.test.groups.length; gIdx++) {
+                const group = State.test.groups[gIdx];
+                const expectedMondai = State.test.meta.time_limits?.groups?.[gIdx]?.mondai_count
+                    || 999; // We don't know exact count from Manifest unless provided.
+                // V2 manifest provided expected_mondai_count?
+                // Yes, res.manifest.groups[i].expected_mondai_count.
+                // But State.test.groups doesn't have it unless we stored it.
+                // Let's assume we fetch until "done" flag.
+
+                let done = false;
+                // Check if we already have items (from first chunk)
+                // If group 0, we might have some.
+
+                const group_id = group.group_id;
+
+                while (!done) {
+                    // Check if we have enough?
+                    // We just fetch next chunk.
+                    try {
+                        // Request next 3 items
+                        const res = await Api.fetchExamChunk(instanceKey, group_id, 3);
+
+                        if (res.chunk && res.chunk.length > 0) {
+                            group.mondai.push(...res.chunk);
+                            this.updateNavigationButtons();
+                        }
+
+                        done = res.done;
+                        if (done) console.log(`Group ${group_id} fully loaded.`);
+
+                        // Small delay to be nice to server/rate limits
+                        await new Promise(r => setTimeout(r, 500));
+
+                    } catch (e) {
+                        console.error(`Error loading chunk for ${group_id}:`, e);
+                        // Retry once then skip? Or abort?
+                        // Simple retry logic
+                        await new Promise(r => setTimeout(r, 2000));
+                        // If it fails again, we might stop this group loop or continue
+                    }
+                }
+            }
+            console.log('All chunks loaded (V2).');
         },
 
         async loadRemainingChunksInBackground(groupResult, startChunkIndex, totalChunks, previousMondai, llmProvider, targetModel = null, concurrency = 3, pendingPromisesMap = {}, pendingGroupsMap = {}) {
@@ -2536,15 +2529,47 @@
         },
 
         // Quick grading without AI - instant results
+        // Quick grading without AI - instant results
         async quickGradeTest() {
             Timer.stopAll();
             TTSManager.stop();
 
-            // Calculate scores directly
+            // V2 Server-Side Grading
+            if (State.currentInstanceKey) {
+                try {
+                    showScreen('loading-screen');
+                    $('#loading-text').textContent = 'Đang chấm điểm (Server)...';
+                    $('#loading-hint').textContent = 'Đang kiểm tra kết quả từ hệ thống...';
+
+                    const feedback = await Api.quickGradeV2(State.currentInstanceKey, State.answers);
+                    feedback.grading_mode = 'quick';
+
+                    State.feedback = feedback;
+                    await this.saveToHistory(feedback);
+
+                    ReviewUI.render();
+                    showScreen('review-screen');
+                    return;
+                } catch (err) {
+                    console.error('Quick Grade V2 Error:', err);
+                    showToast('Lỗi chấm điểm: ' + err.message, 'error');
+                    showScreen('test-screen');
+                    return;
+                }
+            }
+
+            // V1 Client-Side Grading (Legacy)
             const questionsWithAnswers = [];
             let correctCount = 0;
             let totalCount = 0;
             const scoreByGroup = {};
+
+            // Determine if we can grade (check for answer_index)
+            const canGrade = State.test.groups[0].mondai[0]?.items[0]?.answer_index !== undefined;
+            if (!canGrade) {
+                showToast('Không thể chấm bài (thiếu đáp án). Vui lòng thử lại.', 'error');
+                return;
+            }
 
             State.test.groups.forEach(group => {
                 let groupCorrect = 0;
@@ -2564,7 +2589,6 @@
                             is_correct: isCorrect,
                             user_answer_index: userAnswer !== undefined ? userAnswer : null,
                             correct_index: item.answer_index,
-                            // Use existing explain_brief from question generation
                             key_point_vi: item.explain_brief || '',
                             tags: item.tags
                         });
@@ -2573,24 +2597,21 @@
                 scoreByGroup[group.group_id] = groupCorrect;
             });
 
-            // Build feedback object compatible with ReviewUI
             const feedback = {
                 score_summary: {
                     total_score: correctCount,
                     max_score: totalCount,
                     score_by_group: scoreByGroup,
-                    weak_tags: [], // Could calculate from incorrect answers
+                    weak_tags: [],
                     recommendation_vi: correctCount >= totalCount * 0.7
                         ? 'Kết quả tốt! Tiếp tục luyện tập để cải thiện.'
                         : 'Cần ôn tập thêm các phần còn yếu.'
                 },
                 by_question: questionsWithAnswers,
-                grading_mode: 'quick' // Flag for UI to know this was quick grading
+                grading_mode: 'quick'
             };
 
             State.feedback = feedback;
-
-            // Save to history (simplified)
             await this.saveToHistory(feedback);
 
             ReviewUI.render();

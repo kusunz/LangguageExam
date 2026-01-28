@@ -359,7 +359,94 @@ async function runTests() {
     await FUNC_09_TTS();
     await FUNC_10_TTSStream();
 
-    // Rate limiting test LAST (will block requests for 15min after)
+    // V2 Tests
+    console.log('\n=== V2 ARCHITECTURE TESTS ===');
+    logLines.push('\n=== V2 ARCHITECTURE TESTS ===');
+    await V2_01_StartExam();
+    await V2_02_GetChunk();
+    await V2_03_Prefetch();
+    // await V2_04_QuickGrade(); // Needs valid instanceKey with real questions
+
+    // ============ V2 TESTS ============
+
+    let v2InstanceKey = null;
+
+    async function V2_01_StartExam() {
+        // Requires DB. If no DB, this will return 503 or error.
+        const res = await request('/api/exam/start', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer demo-token' },
+            body: {
+                examSpec: { exam_id: 'jlpt_n2', level: 'N2', default_level: 'N2', groups: [] }, // Mock spec or minimal
+                mode: 'basic'
+            }
+        });
+
+        if (res.status === 200 && res.data.instanceKey) {
+            v2InstanceKey = res.data.instanceKey;
+            log('PASS', 'V2-01', 'POST /api/exam/start', `Instance created: ${v2InstanceKey.substring(0, 8)}...`);
+
+            // Verify manifest structure
+            if (res.data.manifest && res.data.manifest.groups) {
+                log('PASS', 'V2-01-B', 'Manifest Structure', `Groups: ${res.data.manifest.groups.length}`);
+            } else {
+                log('FAIL', 'V2-01-B', 'Manifest Structure', 'Missing groups');
+            }
+
+            // Verify First Chunk Integrity
+            if (res.data.mondai && Array.isArray(res.data.mondai)) {
+                const hasIndex = res.data.mondai.some(m => m.items && m.items.some(i => i.answer_index !== undefined));
+                if (!hasIndex) {
+                    log('PASS', 'V2-01-C', 'Security Check', 'No answer_index in first chunk');
+                } else {
+                    log('FAIL', 'V2-01-C', 'Security Check', 'Found answer_index LEAK!');
+                }
+            }
+
+        } else if (res.status === 503) {
+            log('SKIP', 'V2-01', 'POST /api/exam/start', 'DB Unavailable (Expected in some envs)');
+        } else {
+            log('FAIL', 'V2-01', 'POST /api/exam/start', `Status ${res.status}: ${JSON.stringify(res.data)}`);
+        }
+    }
+
+    async function V2_02_GetChunk() {
+        if (!v2InstanceKey) {
+            log('SKIP', 'V2-02', 'POST /api/exam/chunk', 'No instance key');
+            return;
+        }
+
+        const res = await request('/api/exam/chunk', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer demo-token' },
+            body: {
+                instanceKey: v2InstanceKey,
+                want: { group_id: 'main', want_count: 1 }
+            }
+        });
+
+        if (res.status === 200 && res.data.chunk) {
+            log('PASS', 'V2-02', 'POST /api/exam/chunk', `Got ${res.data.chunk.length} items`);
+        } else {
+            log('FAIL', 'V2-02', 'POST /api/exam/chunk', `Status ${res.status}`);
+        }
+    }
+
+    async function V2_03_Prefetch() {
+        const res = await request('/api/exam/prefetch-tts', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer demo-token' },
+            body: {
+                items: [{ text: 'こんにちは', language: 'ja-JP' }]
+            }
+        });
+
+        if (res.status === 200 && res.data.ok) {
+            log('PASS', 'V2-03', 'POST /api/exam/prefetch-tts', `Scheduled: ${res.data.scheduled}`);
+        } else {
+            log('FAIL', 'V2-03', 'POST /api/exam/prefetch-tts', `Status ${res.status}`);
+        }
+    }
     console.log('\n=== RATE LIMITING TEST (runs last) ===');
     logLines.push('\n=== RATE LIMITING TEST ===');
     await SEC_04_RateLimiting();
