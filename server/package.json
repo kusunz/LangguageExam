@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test": "node test-api.js",
+    "test:v2": "node test-v2.js"
   },
   "dependencies": {
     "@deepgram/sdk": "^4.11.3",
@@ -17,6 +19,6 @@
     "pg": "^8.16.3"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": "22.x"
   }
 }

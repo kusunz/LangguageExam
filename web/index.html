@@ -97,6 +97,29 @@
               </select>
             </div>
           </div>
+
+          <!-- Section Selector - appears when exam is selected -->
+          <div id="exam-section-selector" class="exam-section-selector hidden">
+            <h4>Chọn phần ôn tập</h4>
+            <div class="section-options">
+              <button class="section-option selected" data-section="full">
+                <i class="fa-solid fa-trophy"></i>
+                <span>Full bài</span>
+              </button>
+              <button class="section-option" data-section="vocab-grammar">
+                <i class="fa-solid fa-book"></i>
+                <span>Từ vựng - Ngữ pháp</span>
+              </button>
+              <button class="section-option" data-section="reading">
+                <i class="fa-solid fa-file-lines"></i>
+                <span>Đọc hiểu</span>
+              </button>
+              <button class="section-option" data-section="listening">
+                <i class="fa-solid fa-headphones"></i>
+                <span>Nghe</span>
+              </button>
+            </div>
+          </div>
         </div>
 
         <!-- Section Selector - appears when exam is selected -->
@@ -263,9 +286,9 @@
             <input type="range" id="audio-seek" class="audio-seek" value="0" min="0" step="0.1">
           </div>
           <span id="audio-status" class="audio-status"></span>
-          <p class="audio-note text-muted"><i class="fa-solid fa-info-circle"></i> Chức năng phát lại/điều chỉnh thời
-            gian chỉ khả dụng sau khi
-            nghe hết lần đầu</p>
+          <p class="audio-note text-muted"><i class="fa-solid fa-info-circle"></i> Các chức năng chỉ khả dụng sau khi
+            nghe
+            xong</p>
           <button id="btn-show-script" class="btn btn-ghost btn-sm hidden">Hiển thị lời thoại</button>
           <div id="audio-script" class="audio-script hidden"></div>
         </div>

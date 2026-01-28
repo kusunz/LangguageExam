@@ -1,0 +1,111 @@
+                    }
+                });
+            });
+
+            await Promise.all(promises);
+            console.log('Stream A Complete: First group fully loaded.');
+        },
+
+        async loadRemainingGroupsInBackground(llmProvider, targetModel = null, concurrency = 3) {
+            const totalGroups = State.examSpec.groups.length;
+            const chunkSize = 2;
+
+            // Create promises for ALL remaining groups to run in parallel
+            const groupPromises = [];
+
+            for (let groupIndex = 1; groupIndex < totalGroups; groupIndex++) {
+                groupPromises.push((async () => {
+                    this.loadingGroupIndex = groupIndex;
+                    const group = State.examSpec.groups[groupIndex];
+                    const totalChunks = Math.ceil(group.mondai.length / chunkSize);
+
+                    const groupResult = {
+                        group_id: group.group_id,
+                        title_vi: group.title_vi,
+                        mondai: []
+                    };
+                    State.test.groups[groupIndex] = groupResult; // Pre-allocate slot
+
+                    let previousMondai = [];
+
+                    try {
+                        // Load chunks for this group (Sliding Window via Queue)
+                        const chunks = [];
+                        const groupTotalChunks = Math.ceil(group.mondai.length / chunkSize);
+
+                        // Queue ALL chunks for this group
+                        const promises = [];
+                        for (let i = 0; i < groupTotalChunks; i++) {
+                            promises.push(
+                                RequestQueue.schedule(() =>
+                                    Api.generateMondaiChunk(
+                                        State.examSpec,
+                                        State.currentMode,
+                                        this.loadingGroupIndex,
+                                        i,
+                                        chunkSize,
+                                        [], // Context
+                                        llmProvider,
+                                        targetModel
+                                    )
+                                ).then(result => ({ chunkIndex: i, result }))
+                                    .catch(err => ({ chunkIndex: i, error: err }))
+                            );
+                        }
+
+                        // Use Buffer for this group too
+                        let nextIdx = 0;
+                        const buffer = {};
+
+                        promises.forEach(p => {
+                            p.then(({ chunkIndex, result }) => {
+                                if (result) buffer[chunkIndex] = result.mondai;
+                                while (buffer[nextIdx]) {
+                                    groupResult.mondai.push(...buffer[nextIdx]);
+                                    delete buffer[nextIdx];
+                                    nextIdx++;
+                                }
+                            });
+                        });
+
+                        await Promise.all(promises);
+                        State.examSpec,
+                            State.currentMode,
+                            groupIndex,
+                            chunkIndex,
+                            chunkSize,
+                            previousMondai,
+                            llmProvider,
+                            targetModel
+                                );
+                // Note: push order might be mixed within batch, but sorting ideally happens 
+                // if we stored by index. For simplicity in this stream, simple push is used 
+                // assuming independence or acceptable minor reorder. 
+                // Ideally we should use same sort logic as above but let's keep it fast.
+                groupResult.mondai.push(...chunkResult.mondai);
+
+                // Update navigation buttons after each chunk
+                TestUI.updateNavigationButtons();
+            }));
+            previousMondai = [...groupResult.mondai];
+        }
+
+                        console.log(`Stream C Update: Group ${groupIndex + 1} (${group.title_vi}) fully loaded`);
+    } catch (err) {
+        console.error(`Stream C Error: Failed to load group ${groupIndex + 1}:`, err);
+        this.pendingGroups[groupIndex] = { error: err.message };
+    }
+})());
+            }
+
+await Promise.all(groupPromises);
+this.loadingGroupIndex = -1;
+console.log('Stream C Complete: All groups loaded');
+        },
+
+
+isGroupReady(groupIndex) {
+    return State.test.groups[groupIndex] !== undefined;
+},
+
+simulateProgress(bar, text) {

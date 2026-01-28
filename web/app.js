@@ -18,6 +18,41 @@
     };
 
     // ============================================
+    // Concurrency Helper (Sliding Window)
+    // ============================================
+    const RequestQueue = {
+        queue: [],
+        active: 0,
+        limit: 5,
+
+        setLimit(n) {
+            this.limit = n;
+            this.process();
+        },
+
+        async schedule(fn) {
+            return new Promise((resolve, reject) => {
+                this.queue.push({ fn, resolve, reject });
+                this.process();
+            });
+        },
+
+        process() {
+            if (this.active >= this.limit || this.queue.length === 0) return;
+
+            this.active++;
+            const { fn, resolve, reject } = this.queue.shift();
+
+            fn().then(resolve)
+                .catch(reject)
+                .finally(() => {
+                    this.active--;
+                    this.process();
+                });
+        }
+    };
+
+    // ============================================
     // State Management
     // ============================================
     const State = {
@@ -213,6 +248,31 @@
             }
 
             return response.blob();
+        },
+
+        // ============ V2 API (Pool Architecture) ============
+        async startExamV2(examSpec, mode, setNo) {
+            return this.request('/exam/start', {
+                method: 'POST',
+                body: { examSpec, mode, setNo }
+            });
+        },
+
+        async fetchExamChunk(instanceKey, group_id, want_count = 3) {
+            return this.request('/exam/chunk', {
+                method: 'POST',
+                body: {
+                    instanceKey,
+                    want: { group_id, want_count }
+                }
+            });
+        },
+
+        async quickGradeV2(instanceKey, answers) {
+            return this.request('/exam/quickgrade', {
+                method: 'POST',
+                body: { instanceKey, answers }
+            });
         },
 
         async saveToNotebook(question, note = '', tags = []) {
@@ -1104,9 +1164,106 @@
             }
         },
 
+        // Stream audio chunks for immediate playback
+        async playStreaming(text, language, provider, speed, voice) {
+            return new Promise(async (resolve, reject) => {
+                try {
+                    this.stop(); // Reset state
+                    this.isPlaying = true;
+
+                    const btn = $('#btn-play-audio');
+                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-spinner fa-spin"></i></span> Đang tải...`;
+
+                    const response = await fetch(`${CONFIG.apiBase}/tts/stream`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            ...(State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
+                        },
+                        body: JSON.stringify({ text, language })
+                    });
+
+                    if (!response.ok) throw new Error('TTS Stream Request Failed');
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+
+                    // Start processing stream
+                    this.isStreamComplete = false;
+
+                    // UI defaults
+                    const timeEl = $('#audio-time');
+                    if (timeEl) timeEl.textContent = 'Đang phát';
+                    const seekEl = $('#audio-seek');
+                    if (seekEl) seekEl.disabled = true;
+
+                    // Read loop
+                    (async () => {
+                        try {
+                            while (true) {
+                                const { done, value } = await reader.read();
+                                if (done) {
+                                    this.isStreamComplete = true;
+                                    // If queue was empty and we were waiting, this triggers finish
+                                    if (this.currentIndex >= this.audioQueue.length && (!State.ttsAudio || State.ttsAudio.paused)) {
+                                        // check if playing, if not, finish
+                                        this.playNextInQueue(resolve, reject);
+                                    }
+                                    break;
+                                }
+
+                                buffer += decoder.decode(value, { stream: true });
+                                const lines = buffer.split('\n\n');
+                                buffer = lines.pop(); // Keep incomplete chunk
+
+                                for (const line of lines) {
+                                    if (line.startsWith('data: ')) {
+                                        const jsonStr = line.slice(6);
+                                        try {
+                                            const data = JSON.parse(jsonStr);
+                                            if (data.type === 'audio' && data.audio) {
+                                                // Convert base64 to blob
+                                                const byteCharacters = atob(data.audio);
+                                                const byteNumbers = new Array(byteCharacters.length);
+                                                for (let i = 0; i < byteCharacters.length; i++) {
+                                                    byteNumbers[i] = byteCharacters.charCodeAt(i);
+                                                }
+                                                const byteArray = new Uint8Array(byteNumbers);
+                                                const blob = new Blob([byteArray], { type: 'audio/mp3' });
+
+                                                this.audioQueue.push(blob);
+
+                                                // If this is the FIRST chunk, start playing immediately!
+                                                if (this.audioQueue.length === 1 && !State.ttsAudio) {
+                                                    this.playNextInQueue(resolve, reject);
+                                                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
+                                                }
+                                            } else if (data.type === 'error') {
+                                                console.error('Stream Error:', data.message);
+                                            }
+                                        } catch (e) {
+                                            console.warn('JSON Parse Error in stream:', e);
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (err) {
+                            console.error('Stream Reader Error:', err);
+                            reject(err);
+                        }
+                    })();
+
+                } catch (err) {
+                    reject(err);
+                }
+            });
+        },
+
         // Setup combined audio for seek/timer after streaming completes
         setupCombinedAudio() {
-            if (!this.combinedBlob) return;
+            if (!this.combinedBlob) { console.log('TPS: No combined blob'); return; }
+            console.log('TPS: Setup combined audio, size:', this.combinedBlob.size);
 
             const url = URL.createObjectURL(this.combinedBlob);
 
@@ -1135,14 +1292,32 @@
             };
 
             State.ttsAudio.onloadedmetadata = () => {
+                console.log('TPS: Metadata loaded, dur:', State.ttsAudio.duration);
                 const timeEl = $('#audio-time');
                 if (timeEl) {
                     timeEl.textContent = `00:00 / ${this.formatTime(State.ttsAudio.duration)}`;
                 }
+                const seek = $('#audio-seek');
+                if (seek) seek.disabled = false;
             };
 
-            // Don't auto-play - user will click "Nghe lại" to replay
+            State.ttsAudio.onplay = () => {
+                const btn = $('#btn-play-audio');
+                if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-pause"></i></span> Tạm dừng`;
+            };
+            State.ttsAudio.onpause = () => {
+                const btn = $('#btn-play-audio');
+                if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-play"></i></span> Tiếp tục`;
+            };
+            State.ttsAudio.onended = () => {
+                const btn = $('#btn-play-audio');
+                if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-left"></i></span> Nghe lại`;
+            };
+
+            // Don't auto-play - user will click "Nghe" to replay
         },
+
+
 
         async playBlob(blob) {
             return new Promise((resolve, reject) => {
@@ -1177,7 +1352,7 @@
                     URL.revokeObjectURL(url);
                     TTSManager.isPlaying = false;
                     const btn = $('#btn-play-audio');
-                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
+                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-play"></i></span> Nghe`;
 
                     // Reset seek
                     const seek = $('#audio-seek');
@@ -1228,7 +1403,7 @@
 
                 utterance.onend = () => {
                     const btn = $('#btn-play-audio');
-                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
+                    if (btn) btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-play"></i></span> Nghe`;
                 };
 
                 utterance.onerror = (err) => {
@@ -1256,12 +1431,26 @@
             this.combinedBlob = null;
         },
 
+        // Helper to resume streaming safely
+        handleResumeStreaming() {
+            this.isPaused = false;
+            this.isPlaying = true;
+            if (State.ttsAudio) {
+                State.ttsAudio.play().catch(e => {
+                    if (e.name !== 'AbortError') console.warn(e);
+                });
+            }
+        },
+
         // Toggle pause for streaming TTS
         togglePause() {
             if (!State.ttsAudio) return false;
 
             if (State.ttsAudio.paused) {
-                State.ttsAudio.play();
+                State.ttsAudio.play().catch(e => {
+                    // Ignore AbortError (interrupted by pause)
+                    if (e.name !== 'AbortError') console.error(e);
+                });
                 this.isPaused = false;
                 return true; // Now playing
             } else {
@@ -1287,398 +1476,375 @@
         loadingGroupIndex: 0, // Current group being loaded
         isSubmitting: false, // Prevent duplicate submissions
 
+        simulateProgress(bar, text) {
+            if (!bar) bar = $('#loading-progress');
+            if (!text) text = $('#progress-text');
+            if (!bar) return;
+
+            if (this.progressInterval) clearInterval(this.progressInterval);
+
+            let progress = 0;
+            const startTime = Date.now();
+            const targetDuration = 25000; // 25 seconds to reach 98%
+
+            this.progressInterval = setInterval(() => {
+                const elapsed = Date.now() - startTime;
+                // Ease-out curve: fast at start, slow near end
+                const targetProgress = 98 * (1 - Math.pow(1 - Math.min(elapsed / targetDuration, 1), 2));
+                progress = Math.min(Math.round(targetProgress), 98);
+
+                bar.style.width = `${progress}%`;
+                if (text) text.textContent = `${progress}%`;
+            }, 200);
+        },
+
+        stopProgress() {
+            if (this.progressInterval) clearInterval(this.progressInterval);
+            const bar = $('#loading-progress');
+            const text = $('#progress-text');
+            if (bar) bar.style.width = '100%';
+            if (text) text.textContent = '100%';
+        },
+
+
         async startTest() {
-            const examType = State.currentExam; // e.g., "jlpt" or "hsk"
-            const mode = State.currentMode;
             const llmProvider = $('#llm-provider').value;
-            const progressBar = $('#loading-progress');
-            const progressText = $('#progress-text');
-
-            // Get selected level from the appropriate dropdown
-            let selectedLevel;
-            if (examType === 'jlpt') {
-                selectedLevel = $('#jlpt-level')?.value || 'N2';
-            } else if (examType === 'hsk') {
-                selectedLevel = $('#hsk-level')?.value || 'HSK5';
-            } else {
-                selectedLevel = 'N2'; // Default fallback
-            }
-
-            // Reset test flags
-            this.pendingGroups = [];
-            this.loadingGroupIndex = 0;
-            this.isSubmitting = false;
-
-            // Debounce Start Button
-            const startBtn = $('#btn-start-test');
-            if (startBtn.disabled) return;
-            startBtn.disabled = true;
-            const originalBtnText = startBtn.innerHTML;
-            startBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang khởi tạo...';
-
-            showScreen('loading-screen');
-            $('#loading-text').textContent = 'Đang tạo đề thi...';
-
-            // Section hint
-            const sectionNames = {
-                'vocab-grammar': ' - Từ vựng & Ngữ pháp',
-                'reading': ' - Đọc hiểu',
-                'listening': ' - Nghe'
-            };
-            const sectionLabel = sectionNames[State.currentSection] || '';
-            $('#loading-hint').textContent = `Đang tạo đề ${examType.toUpperCase()} ${selectedLevel}${sectionLabel}...`;
-
-            progressBar.style.width = '0%';
-            progressText.textContent = '0%';
-
-            // Start simulated progress (will stop at 98% until gen completes)
-            const progressInterval = this.simulateProgress(progressBar, progressText);
+            const targetModel = null;
 
             try {
-                // Load exam spec with dynamic level
-                const rawSpec = await ExamLoader.loadSpec(examType, selectedLevel);
-                let scaledSpec = ExamLoader.applyModeScaling(rawSpec, mode);
+                // 1. Extract UI selections
+                const activeExamTab = $('.exam-tab-wrapper.active');
+                if (!activeExamTab) throw new Error('Vui lòng chọn kỳ thi');
 
-                // Filter by section (pass mode for reading mondai count)
-                State.examSpec = ExamLoader.filterBySection(scaledSpec, State.currentSection, mode);
+                const examType = activeExamTab.dataset.exam || 'jlpt';
+                const levelSelect = examType === 'jlpt' ? '#jlpt-level' : '#hsk-level';
+                const level = $(levelSelect)?.value || 'N2';
 
-                // Calculate total mondai for progress tracking
-                const totalMondai = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
+                const activeModeCard = $('.mode-card.selected');
+                if (!activeModeCard) throw new Error('Vui lòng chọn chế độ thi');
+                const mode = activeModeCard.dataset.mode || 'official';
 
-                // Determine model and concurrency based on level (Adaptive Optimization)
-                // N5/N4 are simple enough for 2.5-pro (faster, higher concurrency)
-                // N1/N2/N3 use 3-pro (more accurate, lower concurrency due to 25 RPM limit)
-                const isLowLevel = ['N5', 'N4'].includes(selectedLevel);
-                const targetModel = isLowLevel ? 'gemini-2.5-pro' : null; // null = default 3-pro
+                const activeSectionOption = $('.section-option.selected');
+                const section = activeSectionOption?.dataset.section || 'full';
 
-                // Check if this is a single-section exam (only 1 group)
-                const isSingleSection = State.examSpec.groups.length === 1;
+                // Update global state
+                State.currentExam = examType;
+                State.currentMode = mode;
+                State.currentSection = section;
 
-                // Concurrency strategy:
-                // 2.5-pro (N4/N5): 7 parallel for BOTH single and full exam (250 RPM allows this)
-                // 3-pro (N1/N2/N3):
-                //   - Single-section: 5 parallel (safe under 25 RPM)
-                //   - Full exam: 4 parallel (1 per section to ensure coherence)
-                let concurrency;
-                if (targetModel === 'gemini-2.5-pro') {
-                    concurrency = 7; // High RPM allows full parallelism
-                } else {
-                    // 3-pro: more conservative due to 25 RPM limit
-                    concurrency = isSingleSection ? 5 : 4;
-                }
+                console.log(`Starting test V2: ${examType} ${level}, mode: ${mode}, section: ${section}`);
 
-                const chunkSize = 2; // 2 mondai per chunk for faster response
-                let generatedMondai = 0;
+                // 2. Load exam spec
+                let baseSpec = await ExamLoader.loadSpec(examType, level);
 
-                // Initialize test structure
+                // 3. Apply mode scaling (Frontend still does this to filter spec passed to server?)
+                // Actually V2 server does scaling/blueprint if we pass raw spec?
+                // But server takes 'examSpec'. If we pass filtered spec, server respects it.
+                // Converting spec to "Protocol" object?
+                // Let's rely on frontend filtering to keep consistent behavior with existing "Section" logic.
+
+                let scaledSpec = ExamLoader.applyModeScaling(baseSpec, mode);
+                State.examSpec = ExamLoader.filterBySection(scaledSpec, section, mode);
+
+                if (!State.examSpec) throw new Error('Không thể tải cấu hình đề thi');
+
+                console.log('ExamSpec prepared for V2:', State.examSpec);
+            } catch (err) {
+                console.error('Load exam spec error:', err);
+                showToast('Lỗi tải đề thi: ' + err.message, 'error');
+                return;
+            }
+
+            // Show loading screen
+            showScreen('loading-screen');
+            $('#loading-text').textContent = 'Đang khởi tạo đề thi (Server V2)...';
+            $('#loading-hint').textContent = 'Đang kết nối đến ngân hàng câu hỏi...';
+
+            const progressBar = $('#loading-progress');
+            const progressText = $('#progress-text');
+            if (progressBar) progressBar.style.width = '30%';
+            if (progressText) progressText.textContent = '30%';
+
+            try {
+                // Call V2 Start Endpoint
+                const res = await Api.startExamV2(State.examSpec, State.currentMode);
+                console.log('V2 Start Res:', res);
+
+                if (progressBar) progressBar.style.width = '70%';
+                if (progressText) progressText.textContent = '70%';
+
+                // Initialize State.test from Manifest
+                State.currentInstanceKey = res.instanceKey;
+
                 State.test = {
-                    meta: null,
-                    groups: []
+                    meta: {
+                        exam_id: State.examSpec.exam_id,
+                        mode: State.currentMode,
+                        start_time: new Date().toISOString(),
+                        time_limits: State.examSpec.scaled_time_limits || State.examSpec.official_time_limits_sec,
+                        language: 'vi-VN'
+                    },
+                    groups: res.manifest.groups.map(g => ({
+                        group_id: g.group_id,
+                        title_vi: g.title_vi,
+                        mondai: [] // Will fill progressively
+                    }))
                 };
 
-                // Generate first group using chunked approach for faster start
-                const firstGroup = State.examSpec.groups[0];
-                const firstGroupResult = {
-                    group_id: firstGroup.group_id,
-                    title_vi: firstGroup.title_vi,
-                    mondai: []
-                };
-
-                // Universal Initial Batch: Always load 2 chunks (if not parallel-all) 
-                // to provide buffer for Full exams or Large Single exams of ALL languages/levels.
-                const initialBatchSize = 2;
-
-                const totalChunks = Math.ceil(firstGroup.mondai.length / chunkSize);
-                let previousMondai = [];
-
-                // Determine max parallel chunks for single-section parallel loading
-                const maxParallelChunks = (targetModel === 'gemini-2.5-pro') ? 7 : 5;
-                const canParallelLoadAll = isSingleSection && totalChunks <= maxParallelChunks;
-
-                if (canParallelLoadAll) {
-                    // PARALLEL LOADING: Send ALL chunks at once for single-section exams
-                    console.log(`Parallel loading (${targetModel || '3-pro'}): Sending ALL ${totalChunks} chunks simultaneously for single-section exam`);
-
-                    const chunkPromises = [];
-                    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-                        chunkPromises.push(
-                            Api.generateMondaiChunk(
-                                State.examSpec,
-                                mode,
-                                0, // groupIndex
-                                chunkIndex,
-                                chunkSize,
-                                [], // No previous context for parallel
-                                llmProvider,
-                                targetModel
-                            ).then(result => ({ chunkIndex, result }))
-                                .catch(err => ({ chunkIndex, error: err }))
-                        );
-                    }
-
-                    // Wait for ALL chunks to complete
-                    const results = await Promise.all(chunkPromises);
-                    results.sort((a, b) => a.chunkIndex - b.chunkIndex);
-
-                    for (const { chunkIndex, result, error } of results) {
-                        if (result) {
-                            if (result.meta && !State.test.meta) {
-                                State.test.meta = result.meta;
-                            }
-                            firstGroupResult.mondai.push(...result.mondai);
-                        } else if (error) {
-                            console.error(`Chunk ${chunkIndex} failed:`, error);
-                        }
-                    }
-
-                    // All chunks loaded - show test immediately
-                    State.test.groups = [firstGroupResult];
-                    State.answers = {};
-                    State.currentGroupIndex = 0;
-                    State.currentMondaiIndex = 0;
-
-                    clearInterval(progressInterval);
-                    progressBar.style.width = '100%';
-                    progressText.textContent = '100%';
-                    await new Promise(resolve => setTimeout(resolve, 200));
-
-                    this.initializeTest();
-                    startBtn.disabled = false;
-                    startBtn.innerHTML = originalBtnText;
-                    showScreen('test-screen');
-
-                    console.log('Parallel loading complete: All mondai ready');
-                    return;
-                }
-
-                // BATCHED INITIAL LOADING: Load initialBatchSize chunks before showing test
-                // For vocab/grammar in full exam: load 2 chunks (4 mondai) in parallel first
-                console.log(`Initial batch loading: ${initialBatchSize} chunks before showing test`);
-
-                const initialChunks = Math.min(initialBatchSize, totalChunks);
-                const initialPromises = [];
-
-                for (let chunkIndex = 0; chunkIndex < initialChunks; chunkIndex++) {
-                    initialPromises.push(
-                        Api.generateMondaiChunk(
-                            State.examSpec,
-                            mode,
-                            0, // groupIndex
-                            chunkIndex,
-                            chunkSize,
-                            [], // No previous context for parallel initial batch
-                            llmProvider,
-                            targetModel
-                        ).then(result => ({ chunkIndex, result }))
-                            .catch(err => ({ chunkIndex, error: err }))
-                    );
-                }
-
-                // Wait for initial batch to complete
-                const initialResults = await Promise.all(initialPromises);
-                initialResults.sort((a, b) => a.chunkIndex - b.chunkIndex);
-
-                for (const { chunkIndex, result, error } of initialResults) {
-                    if (result) {
-                        if (result.meta && !State.test.meta) {
-                            State.test.meta = result.meta;
-                        }
-                        firstGroupResult.mondai.push(...result.mondai);
-                    } else if (error) {
-                        console.error(`Initial chunk ${chunkIndex} failed:`, error);
-                    }
-                }
-
-                // Update progress
-                generatedMondai = firstGroupResult.mondai.length;
-                const progress = Math.min(90, Math.round((generatedMondai / totalMondai) * 95));
-                progressBar.style.width = `${progress}%`;
-                progressText.textContent = `${progress}%`;
-
-                // Initialize with initial batch data
-                State.test.groups = [firstGroupResult];
                 State.answers = {};
                 State.currentGroupIndex = 0;
                 State.currentMondaiIndex = 0;
+                State.isTestPaused = false;
+                State.feedback = null;
 
-                // Stop simulated progress and complete to 100%
-                clearInterval(progressInterval);
-                progressBar.style.width = '100%';
-                progressText.textContent = '100%';
-                await new Promise(resolve => setTimeout(resolve, 200));
-
-                this.initializeTest();
-                startBtn.disabled = false;
-                startBtn.innerHTML = originalBtnText;
-                showScreen('test-screen');
-
-                console.log(`Initial batch complete: ${firstGroupResult.mondai.length} mondai ready`);
-
-                // Continue loading remaining chunks in background
-                if (initialChunks < totalChunks) {
-                    this.loadRemainingChunksInBackground(
-                        firstGroupResult,
-                        initialChunks,
-                        totalChunks,
-                        [...firstGroupResult.mondai], // Pass context
-                        llmProvider,
-                        targetModel,
-                        concurrency
-                    );
+                // Process First Chunk
+                if (res.mondai && res.mondai.length > 0) {
+                    // First chunk usually belongs to first group?
+                    // Need to map mondai to groups.
+                    // Helper to distribute items? or we know where they go?
+                    // The startExamV2 usually returns chunk for first group.
+                    State.test.groups[0].mondai.push(...res.mondai);
                 }
 
-                // Fallback: if first chunk didn't work, use full result
-                State.test.groups = [firstGroupResult];
-                State.answers = {};
-                State.currentGroupIndex = 0;
-                State.currentMondaiIndex = 0;
+                if (progressBar) progressBar.style.width = '100%';
+                if (progressText) progressText.textContent = '100%';
 
-                progressBar.style.width = '100%';
-                progressText.textContent = '100%';
-
-                await new Promise(resolve => setTimeout(resolve, 300));
-
-                this.initializeTest();
-
-                // Re-enable start button
-                startBtn.disabled = false;
-                startBtn.innerHTML = originalBtnText;
-
+                this.stopProgress();
                 showScreen('test-screen');
+                this.initializeTest();
+                console.log('Test Initialized (V2).');
 
-                // Start loading remaining groups in background
-                this.loadRemainingGroupsInBackground(llmProvider, targetModel, concurrency);
+                // Start Background Loading V2
+                this.loadRemainingChunksV2();
 
             } catch (err) {
-                clearInterval(progressInterval);
-                progressBar.style.width = '0%';
-                console.error('Start test error:', err);
-                showToast('Không thể tạo đề thi: ' + err.message, 'error');
-
-                // Re-enable start button
-                startBtn.disabled = false;
-                startBtn.innerHTML = originalBtnText;
-
+                this.stopProgress();
+                console.error('Start Test V2 Error:', err);
+                showToast('Lỗi khởi tạo bài thi: ' + err.message, 'error');
                 showScreen('home-screen');
             }
         },
 
-        async loadRemainingChunksInBackground(groupResult, startChunkIndex, totalChunks, previousMondai, llmProvider, targetModel = null, concurrency = 3) {
-            // STREAM C START: Fire off remaining groups (Listening, etc.) IMMEDIATELY
-            // Do not await this. Let it run in parallel with the current group loading.
-            console.log('Starting Stream C: Loading remaining groups (Listening) in background...');
-            this.loadRemainingGroupsInBackground(llmProvider, targetModel, concurrency);
+        async loadRemainingChunksV2() {
+            if (!State.currentInstanceKey) return;
 
-            // STREAM A + B START: Load current group chunks
-            const chunkSize = 2; // Match startTest chunk size
-            const batchSize = concurrency; // Dynamic batch size
+            // Iterate all groups and fetch remaining content
+            // We do this sequentially or parallel? 
+            // Sequential is safer for order, parallel for speed.
+            // Sliding window of 2 requests?
 
-            // Create batches of chunks to load
-            const chunksToLoad = [];
-            for (let i = startChunkIndex; i < totalChunks; i++) {
-                chunksToLoad.push(i);
-            }
+            const instanceKey = State.currentInstanceKey;
 
-            console.log(`Stream A/B Active: Loading ${chunksToLoad.length} chunks for current group...`);
+            for (let gIdx = 0; gIdx < State.test.groups.length; gIdx++) {
+                const group = State.test.groups[gIdx];
+                const expectedMondai = State.test.meta.time_limits?.groups?.[gIdx]?.mondai_count
+                    || 999; // We don't know exact count from Manifest unless provided.
+                // V2 manifest provided expected_mondai_count?
+                // Yes, res.manifest.groups[i].expected_mondai_count.
+                // But State.test.groups doesn't have it unless we stored it.
+                // Let's assume we fetch until "done" flag.
 
-            // Process batches for current group
-            while (chunksToLoad.length > 0) {
-                const batch = chunksToLoad.splice(0, batchSize);
-                const promises = batch.map(chunkIndex => {
-                    return Api.generateMondaiChunk(
-                        State.examSpec,
-                        State.currentMode,
-                        0, // groupIndex
-                        chunkIndex,
-                        chunkSize,
-                        previousMondai,
-                        llmProvider,
-                        targetModel
-                    ).then(result => ({ chunkIndex, result }))
-                        .catch(err => ({ chunkIndex, error: err }));
-                });
+                let done = false;
+                // Check if we already have items (from first chunk)
+                // If group 0, we might have some.
 
-                // Wait for batch
-                const results = await Promise.all(promises);
-                results.sort((a, b) => a.chunkIndex - b.chunkIndex);
+                const group_id = group.group_id;
 
-                for (const { chunkIndex, result, error } of results) {
-                    if (result) {
-                        groupResult.mondai.push(...result.mondai);
-                        // Optional: Notify UI update here if we want real-time render
+                while (!done) {
+                    // Check if we have enough?
+                    // We just fetch next chunk.
+                    try {
+                        // Request next 3 items
+                        const res = await Api.fetchExamChunk(instanceKey, group_id, 3);
+
+                        if (res.chunk && res.chunk.length > 0) {
+                            group.mondai.push(...res.chunk);
+                            this.updateNavigationButtons();
+                        }
+
+                        done = res.done;
+                        if (done) console.log(`Group ${group_id} fully loaded.`);
+
+                        // Small delay to be nice to server/rate limits
+                        await new Promise(r => setTimeout(r, 500));
+
+                    } catch (e) {
+                        console.error(`Error loading chunk for ${group_id}:`, e);
+                        // Retry once then skip? Or abort?
+                        // Simple retry logic
+                        await new Promise(r => setTimeout(r, 2000));
+                        // If it fails again, we might stop this group loop or continue
                     }
                 }
-                previousMondai = [...groupResult.mondai];
-
-                // Update navigation buttons after each batch
-                this.updateNavigationButtons();
             }
-            console.log('Stream A/B Complete: First group fully loaded.');
+            console.log('All chunks loaded (V2).');
         },
 
-        async loadRemainingGroupsInBackground(llmProvider, targetModel = null, concurrency = 3) {
-            const totalGroups = State.examSpec.groups.length;
+        async loadRemainingChunksInBackground(groupResult, startChunkIndex, totalChunks, previousMondai, llmProvider, targetModel = null, concurrency = 3, pendingPromisesMap = {}, pendingGroupsMap = {}) {
+            // STREAM C START: Fire off remaining groups (Listening, etc.)
+            console.log('Starting Stream C: Queuing remaining groups...');
+            this.loadRemainingGroupsInBackground(llmProvider, targetModel, concurrency, pendingGroupsMap);
+
+            // STREAM A: Sliding Window Load
+            console.log(`Stream A Active: Queuing chunks ${startChunkIndex} to ${totalChunks - 1} with buffering...`);
+
+            const promises = [];
             const chunkSize = 2;
 
-            // Create promises for ALL remaining groups to run in parallel
-            const groupPromises = [];
-
-            for (let groupIndex = 1; groupIndex < totalGroups; groupIndex++) {
-                groupPromises.push((async () => {
-                    this.loadingGroupIndex = groupIndex;
-                    const group = State.examSpec.groups[groupIndex];
-                    const totalChunks = Math.ceil(group.mondai.length / chunkSize);
-
-                    const groupResult = {
-                        group_id: group.group_id,
-                        title_vi: group.title_vi,
-                        mondai: []
-                    };
-                    State.test.groups[groupIndex] = groupResult; // Pre-allocate slot
-
-                    let previousMondai = [];
-
-                    try {
-                        // Load chunks for this group (also parallel batched)
-                        const chunks = [];
-                        for (let i = 0; i < totalChunks; i++) chunks.push(i);
-                        const batchSize = concurrency; // Use dynamic concurrency (req 4 for 2.5-pro)
-
-                        while (chunks.length > 0) {
-                            const batch = chunks.splice(0, batchSize);
-                            await Promise.all(batch.map(async (chunkIndex) => {
-                                const chunkResult = await Api.generateMondaiChunk(
+            for (let i = startChunkIndex; i < totalChunks; i++) {
+                if (pendingPromisesMap[i]) {
+                    // Wrap priority promise with RETRY logic
+                    // If it resolved with error, try again immediately here
+                    const p = pendingPromisesMap[i].then(outcome => {
+                        if (outcome.error) {
+                            console.warn(`Stream A: Priority chunk ${i} failed previously. Retrying...`, outcome.error);
+                            return RequestQueue.schedule(() =>
+                                Api.generateMondaiChunk(
                                     State.examSpec,
                                     State.currentMode,
-                                    groupIndex,
-                                    chunkIndex,
+                                    0, // groupIndex
+                                    i,
                                     chunkSize,
                                     previousMondai,
                                     llmProvider,
                                     targetModel
-                                );
-                                // Note: push order might be mixed within batch, but sorting ideally happens 
-                                // if we stored by index. For simplicity in this stream, simple push is used 
-                                // assuming independence or acceptable minor reorder. 
-                                // Ideally we should use same sort logic as above but let's keep it fast.
-                                groupResult.mondai.push(...chunkResult.mondai);
-
-                                // Update navigation buttons after each chunk
-                                TestUI.updateNavigationButtons();
-                            }));
-                            previousMondai = [...groupResult.mondai];
+                                )
+                            ).then(result => ({ chunkIndex: i, result }))
+                                .catch(err => ({ chunkIndex: i, error: err }));
                         }
-
-                        console.log(`Stream C Update: Group ${groupIndex + 1} (${group.title_vi}) fully loaded`);
-                    } catch (err) {
-                        console.error(`Stream C Error: Failed to load group ${groupIndex + 1}:`, err);
-                        this.pendingGroups[groupIndex] = { error: err.message };
-                    }
-                })());
+                        return outcome;
+                    });
+                    promises.push(p);
+                } else {
+                    const p = RequestQueue.schedule(() =>
+                        Api.generateMondaiChunk(
+                            State.examSpec,
+                            State.currentMode,
+                            0, // groupIndex
+                            i,
+                            chunkSize,
+                            previousMondai,
+                            llmProvider,
+                            targetModel
+                        )
+                    ).then(result => ({ chunkIndex: i, result }))
+                        .catch(err => ({ chunkIndex: i, error: err }));
+                    promises.push(p);
+                }
             }
 
+            let nextIndex = startChunkIndex;
+            const buffer = {};
+            // Pre-fill buffer with any completed pending promises that haven't been pushed
+            // (handled by the promise.then below)
+
+            promises.forEach(p => {
+                p.then(({ chunkIndex, result, error }) => {
+                    if (result) {
+                        buffer[chunkIndex] = result.mondai;
+                    }
+                    while (buffer[nextIndex]) {
+                        groupResult.mondai.push(...buffer[nextIndex]);
+                        delete buffer[nextIndex];
+                        nextIndex++;
+                        this.updateNavigationButtons();
+                    }
+                });
+            });
+
+            await Promise.all(promises);
+            console.log('Stream A Complete: First group fully loaded.');
+        },
+
+        async loadRemainingGroupsInBackground(llmProvider, targetModel = null, concurrency = 3, pendingGroupsMap = {}) {
+            const totalGroups = State.examSpec.groups.length;
+            const remainingIndices = [];
+            for (let i = 1; i < totalGroups; i++) remainingIndices.push(i);
+
+            const groupPromises = remainingIndices.map(async (groupIndex) => {
+                const group = State.examSpec.groups[groupIndex];
+
+                // Ensure slot
+                if (!State.test.groups[groupIndex]) {
+                    State.test.groups[groupIndex] = {
+                        group_id: group.group_id,
+                        title_vi: group.title_vi,
+                        mondai: []
+                    };
+                }
+                const groupResult = State.test.groups[groupIndex];
+
+                const pendingForGroup = pendingGroupsMap[groupIndex] || [];
+                const chunkSize = 2;
+                const groupTotalChunks = Math.ceil(group.mondai.length / chunkSize);
+                const promises = [];
+
+                try {
+                    for (let c = 0; c < groupTotalChunks; c++) {
+                        if (pendingForGroup[c]) {
+                            // Wrap priority promise with RETRY logic
+                            const p = pendingForGroup[c].then(outcome => {
+                                if (outcome.error) {
+                                    console.warn(`Stream C: Priority chunk ${c} (Group ${groupIndex}) failed previously. Retrying...`, outcome.error);
+                                    return RequestQueue.schedule(() =>
+                                        Api.generateMondaiChunk(
+                                            State.examSpec,
+                                            State.currentMode,
+                                            groupIndex,
+                                            c,
+                                            chunkSize,
+                                            [],
+                                            llmProvider,
+                                            targetModel
+                                        )
+                                    ).then(result => ({ chunkIndex: c, result }))
+                                        .catch(err => ({ chunkIndex: c, error: err }));
+                                }
+                                return outcome;
+                            });
+                            promises.push(p);
+                        } else {
+                            promises.push(
+                                RequestQueue.schedule(() =>
+                                    Api.generateMondaiChunk(
+                                        State.examSpec,
+                                        State.currentMode,
+                                        groupIndex,
+                                        c,
+                                        chunkSize,
+                                        [],
+                                        llmProvider,
+                                        targetModel
+                                    )
+                                ).then(result => ({ chunkIndex: c, result }))
+                                    .catch(err => ({ chunkIndex: c, error: err }))
+                            );
+                        }
+                    }
+
+                    // Buffer logic
+                    let nextIdx = 0;
+                    const buffer = {};
+
+                    promises.forEach(p => {
+                        p.then(({ chunkIndex, result }) => {
+                            if (result) buffer[chunkIndex] = result.mondai;
+                            while (buffer[nextIdx]) {
+                                groupResult.mondai.push(...buffer[nextIdx]);
+                                delete buffer[nextIdx];
+                                nextIdx++;
+                            }
+                        });
+                    });
+
+                    await Promise.all(promises);
+                    console.log(`Stream C Update: Group ${groupIndex + 1} (${group.title_vi}) fully loaded`);
+                } catch (err) {
+                    console.error(`Stream C Error: Group ${groupIndex + 1}:`, err);
+                }
+            });
+
             await Promise.all(groupPromises);
-            this.loadingGroupIndex = -1;
             console.log('Stream C Complete: All groups loaded');
         },
 
@@ -1735,6 +1901,8 @@
 
             return history;
         },
+
+
 
         initializeTest() {
             const test = State.test;
@@ -1796,29 +1964,54 @@
             $('#mondai-current').textContent = Math.min(mondaiPosInGroup, totalMondaiInGroup); // Cap at total
             $('#mondai-total').textContent = totalMondaiInGroup;
 
-            // Calculate total mondai from exam spec for navigation buttons
-            const totalMondaiFromSpec = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
-            // Block navigation to unloaded mondai
-            const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
-            $('#btn-prev-mondai').disabled = globalIndex === 0;
-
-            // Soft disable for Next button if loading (allow click for toast)
-            const btnNext = $('#btn-next-mondai');
-            const isLast = globalIndex === totalMondaiFromSpec - 1;
-
-            if (isLast) {
-                btnNext.disabled = true;
-                btnNext.classList.remove('btn-loading-wait');
-            } else if (!nextMondaiLoaded) {
-                btnNext.disabled = false; // Clickable
-                btnNext.classList.add('btn-loading-wait'); // Visual only
-            } else {
-                btnNext.disabled = false;
-                btnNext.classList.remove('btn-loading-wait');
-            }
+            // Update navigation buttons (prev/next state based on loaded mondai)
+            this.updateNavigationButtons();
 
             // Update header
-            $('#mondai-title').textContent = mondai.title_vi;
+            // Update header
+            // mondai_id might be "M1", "L1", "N2-L1-01" (if from chunk)
+            // We want purely "Mondai {Number}: {Title}"
+            // If title_vi already contains "Mondai", strip it to avoid duplication?
+            // Screenshot showed "Mondai N2-L1-01: Mondai 1: ..."
+            // This suggests mondai.mondai_id IS "N2-L1-01" (generated ID) and title_vi IS "Mondai 1: ..."
+
+            // Heuristic: Extract the primary identifier (1, 2, 3...)
+            // 1. If title_vi starts with "Mondai X:", just use title_vi.
+            // 2. If valid simple ID (M1, L1), construct "Mondai 1: ..."
+
+            let displayTitle = mondai.title_vi;
+            // Remove "(Task-based...)" English text if present/requested?
+            // User said "phần mở ngoặc là tiếng nhật" (brackets are Japanese). 
+            // Current title_vi: "Hiểu vấn đề (Task-Based Comprehension)" -> keep or replace English?
+            // "tiếp tục thống nhất tiêu đề ( phần mở ngoặc là tiếng nhật)" -> The content inside brackets IS/SHOULD BE Japanese?
+            // Or user means "Keep the Japanese in brackets"? 
+            // Assuming user wants cleaner title.
+
+            // Clean ID logic:
+            const rawId = mondai.mondai_id || '';
+            let simpleId = '';
+
+            // Try to parse '1' from 'M1', 'L1', 'N2-L1'
+            // If rawId is complex like 'N2-L1-01', it corresponds to 'L1'.
+            if (rawId.match(/[ML](\d+)/)) {
+                simpleId = rawId.match(/[ML](\d+)/)[1];
+            }
+
+            // If title ALREADY has "Mondai X", use it.
+            if (displayTitle.match(/^Mondai \d+:/)) {
+                // It's already good: "Mondai 1: Hiểu vấn đề"
+            } else if (simpleId) {
+                // Prepend
+                displayTitle = `Mondai ${simpleId}: ${displayTitle}`;
+            } else {
+                // Fallback if no ID found (rare)
+                if (!displayTitle.startsWith('Mondai')) {
+                    // Maybe use index? But we don't have safe index here easily without context.
+                    // Leave as is if we can't detect.
+                }
+            }
+
+            $('#mondai-title').textContent = displayTitle;
             $('#mondai-instructions').textContent = mondai.instructions_vi || '';
 
             // Render passage if exists (with zoom controls)
@@ -1897,8 +2090,10 @@
                 btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-play"></i></span> Tiếp tục`;
             } else if (state === 'loading') {
                 btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-spinner fa-spin"></i></span> Đang tải...`;
-            } else { // default/replay
-                btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-right"></i></span> Nghe lại`;
+            } else if (state === 'replay' || (State.ttsAudio && State.ttsAudio.ended)) {
+                btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-rotate-left"></i></span> Nghe lại`;
+            } else { // default (stopped/not started)
+                btn.innerHTML = `<span class="play-icon"><i class="fa-solid fa-play"></i></span> Nghe`;
             }
         },
 
@@ -1906,67 +2101,101 @@
             const btn = $('#btn-play-audio');
             if (!btn) return;
 
-            // Streaming TTS Handle (check first since it uses the same State.ttsAudio)
-            if (TTSManager.isPlaying || TTSManager.isPaused) {
-                if (State.ttsAudio && !State.ttsAudio.ended) {
-                    const isNowPlaying = TTSManager.togglePause();
-                    this.updateAudioButton(isNowPlaying ? 'playing' : 'paused');
-                    return;
-                }
+            // Debounce to prevent double-clicks/double-events
+            const now = Date.now();
+            if (this._lastAudioClick && (now - this._lastAudioClick < 500)) {
+                console.log('TPS: Audio click debounced');
+                return;
             }
+            this._lastAudioClick = now;
 
-            // HTML5 Audio Handle (non-streaming)
-            if (State.ttsAudio && State.ttsAudio.src && !State.ttsAudio.error) {
-                if (!State.ttsAudio.ended) {
-                    if (State.ttsAudio.paused) {
+            console.log('TPS: handleAudio called', {
+                isPlaying: TTSManager.isPlaying,
+                isPaused: TTSManager.isPaused,
+                hasCombinedBlob: !!TTSManager.combinedBlob,
+                hasAudio: !!State.ttsAudio,
+                audioPaused: State.ttsAudio?.paused,
+                audioEnded: State.ttsAudio?.ended
+            });
+
+            // 1. If combined blob exists (replay mode or finished stream)
+            if (TTSManager.combinedBlob && State.ttsAudio) {
+                console.log('TPS: Using combined blob interaction');
+
+                // If Ended -> Replay from start
+                if (State.ttsAudio.ended) {
+                    State.ttsAudio.currentTime = 0;
+                    try {
                         await State.ttsAudio.play();
                         this.updateAudioButton('playing');
-                    } else {
-                        State.ttsAudio.pause();
-                        this.updateAudioButton('paused');
+                    } catch (e) {
+                        console.warn('Replay failed:', e);
                     }
                     return;
                 }
-                // If ended, we restart below
-            }
 
-            // Browser TTS Handle
-            if ('speechSynthesis' in window && speechSynthesis.speaking) {
-                if (speechSynthesis.paused) {
-                    speechSynthesis.resume();
-                    this.updateAudioButton('playing');
-                } else {
-                    speechSynthesis.pause();
-                    this.updateAudioButton('paused');
+                // If Paused -> Resume (Continue)
+                if (State.ttsAudio.paused) {
+                    try {
+                        await State.ttsAudio.play();
+                        this.updateAudioButton('playing');
+                    } catch (e) {
+                        console.warn('Resume failed:', e);
+                    }
+                    return;
                 }
+
+                // If Playing -> Pause
+                if (!State.ttsAudio.paused) {
+                    State.ttsAudio.pause();
+                    this.updateAudioButton('paused');
+                    return;
+                }
+
                 return;
             }
 
-            // Start new playback logic
+            // 2. Streaming Mode Interaction
+            if (TTSManager.isPlaying) { // Currently streaming -> Pause
+                console.log('TPS: Toggling pause (streaming)');
+                const isNowPlaying = TTSManager.togglePause();
+                this.updateAudioButton(isNowPlaying ? 'playing' : 'paused');
+                return;
+            }
+
+            if (TTSManager.isPaused) { // Streaming paused -> Resume
+                console.log('TPS: Resuming paused streaming');
+                TTSManager.handleResumeStreaming(); // Helper to be safe
+                this.updateAudioButton('playing');
+                return;
+            }
+
+            // 3. Initial Start (No audio yet)
             const mondaiData = this.getCurrentMondaiData();
-            if (!mondaiData) return;
-
-            // Ensure stopped before starting new
-            TTSManager.stop();
-
-            const scriptItem = mondaiData.mondai.items.find(item => item.media?.script_text);
-            if (!scriptItem) return;
-
-            btn.disabled = true;
-            this.updateAudioButton('loading');
-
-            try {
-                await TTSManager.playAudio(scriptItem.media.script_text, State.test.meta.language);
-                // Note: TTSManager updates button on start/end, but we rely on events there
-            } catch (err) {
-                console.error(err);
-                this.updateAudioButton('default'); // Show Retry/Play icon
-            } finally {
-                btn.disabled = false;
+            const scriptItem = mondaiData?.mondai?.items?.find(item => item.media?.script_text);
+            if (scriptItem?.media?.script_text) {
+                console.log('TPS: Starting new TTS stream');
+                this.updateAudioButton('loading');
+                const lang = State.test.meta.language || 'ja-JP';
+                TTSManager.playAudio(scriptItem.media.script_text, lang);
+            } else {
+                showToast('Không có dữ liệu âm thanh cho bài này', 'info');
             }
         },
 
 
+
+
+
+
+        toggleScript() {
+            const script = $('#audio-script');
+            const btn = $('#btn-show-script');
+            if (script && btn) {
+                script.classList.toggle('hidden');
+                btn.textContent = script.classList.contains('hidden') ? 'Hiển thị lời thoại' : 'Ẩn lời thoại';
+            }
+        },
 
         getCurrentMondaiData() {
             const test = State.test;
@@ -1997,25 +2226,29 @@
             return false;
         },
 
-        // Update navigation buttons without re-rendering (for background loading)
         updateNavigationButtons() {
             if (!State.test || !State.examSpec) return;
 
             const globalIndex = this.getGlobalMondaiIndex();
             const totalMondaiFromSpec = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
             const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
+
+            // Update Previous button
+            $('#btn-prev-mondai').disabled = globalIndex === 0;
+
+            // Update Next button
             const btnNext = $('#btn-next-mondai');
             const isLast = globalIndex === totalMondaiFromSpec - 1;
 
             if (isLast) {
                 btnNext.disabled = true;
-                btnNext.classList.remove('btn-loading-wait');
+                btnNext.innerHTML = '>';
             } else if (!nextMondaiLoaded) {
-                btnNext.disabled = false;
-                btnNext.classList.add('btn-loading-wait');
+                btnNext.disabled = true;
+                btnNext.innerHTML = '> <span class="loading-spinner"><i class="fa-solid fa-spinner fa-spin"></i></span>';
             } else {
                 btnNext.disabled = false;
-                btnNext.classList.remove('btn-loading-wait');
+                btnNext.innerHTML = '>';
             }
 
             // Update loading indicator
@@ -2028,10 +2261,6 @@
                 }
             }
 
-            // Notify user if button just became enabled
-            if (wasDisabled && !$('#btn-next-mondai').disabled) {
-                // Toast is optional - can be noisy, so just update button silently
-            }
         },
 
         getGlobalMondaiIndex() {
@@ -2046,7 +2275,27 @@
             const container = $('#questions-container');
             const isJapanese = language === 'ja-JP';
 
-            container.innerHTML = items.map((item, idx) => `
+            container.innerHTML = items.map((item, idx) => {
+                // Detect "Still generating" placeholder content which might come from LLM/Server during partial loads
+                const isPlaceholder = item.choices && item.choices.some(c =>
+                    c && (c.includes('tạo đề') ||
+                        c.includes('Vui lòng đợi') ||
+                        c.includes('Generating') ||
+                        c.includes('đang tạo'))
+                );
+
+                if (isPlaceholder) {
+                    return `
+        <div class="question-item placeholder-item" data-question-id="${item.id}">
+          <div class="question-number">Câu ${idx + 1}</div>
+          <div class="question-prompt text-muted" style="text-align: center; padding: 2rem; color: #888;">
+            <i class="fa-solid fa-spinner fa-spin"></i> Đang hoàn thiện nội dung câu hỏi...
+          </div>
+        </div>
+      `;
+                }
+
+                return `
         <div class="question-item" data-question-id="${item.id}">
           <div class="question-number">Câu ${idx + 1}</div>
           <div class="question-prompt ${isJapanese ? '' : 'zh'}">${this.escapeHtml(item.prompt)}</div>
@@ -2061,7 +2310,8 @@
             `).join('')}
           </div>
         </div>
-      `).join('');
+      `;
+            }).join('');
 
             // Add click handlers
             container.querySelectorAll('.choice').forEach(btn => {
@@ -2111,7 +2361,6 @@
 
             // Block forward navigation to unloaded mondai
             if (direction > 0 && !this.isMondaiLoaded(newIndex)) {
-                showToast('Vui lòng đợi chút, vẫn đang tạo đề...', 'info');
                 return;
             }
 
@@ -2280,15 +2529,47 @@
         },
 
         // Quick grading without AI - instant results
+        // Quick grading without AI - instant results
         async quickGradeTest() {
             Timer.stopAll();
             TTSManager.stop();
 
-            // Calculate scores directly
+            // V2 Server-Side Grading
+            if (State.currentInstanceKey) {
+                try {
+                    showScreen('loading-screen');
+                    $('#loading-text').textContent = 'Đang chấm điểm (Server)...';
+                    $('#loading-hint').textContent = 'Đang kiểm tra kết quả từ hệ thống...';
+
+                    const feedback = await Api.quickGradeV2(State.currentInstanceKey, State.answers);
+                    feedback.grading_mode = 'quick';
+
+                    State.feedback = feedback;
+                    await this.saveToHistory(feedback);
+
+                    ReviewUI.render();
+                    showScreen('review-screen');
+                    return;
+                } catch (err) {
+                    console.error('Quick Grade V2 Error:', err);
+                    showToast('Lỗi chấm điểm: ' + err.message, 'error');
+                    showScreen('test-screen');
+                    return;
+                }
+            }
+
+            // V1 Client-Side Grading (Legacy)
             const questionsWithAnswers = [];
             let correctCount = 0;
             let totalCount = 0;
             const scoreByGroup = {};
+
+            // Determine if we can grade (check for answer_index)
+            const canGrade = State.test.groups[0].mondai[0]?.items[0]?.answer_index !== undefined;
+            if (!canGrade) {
+                showToast('Không thể chấm bài (thiếu đáp án). Vui lòng thử lại.', 'error');
+                return;
+            }
 
             State.test.groups.forEach(group => {
                 let groupCorrect = 0;
@@ -2308,7 +2589,6 @@
                             is_correct: isCorrect,
                             user_answer_index: userAnswer !== undefined ? userAnswer : null,
                             correct_index: item.answer_index,
-                            // Use existing explain_brief from question generation
                             key_point_vi: item.explain_brief || '',
                             tags: item.tags
                         });
@@ -2317,24 +2597,21 @@
                 scoreByGroup[group.group_id] = groupCorrect;
             });
 
-            // Build feedback object compatible with ReviewUI
             const feedback = {
                 score_summary: {
                     total_score: correctCount,
                     max_score: totalCount,
                     score_by_group: scoreByGroup,
-                    weak_tags: [], // Could calculate from incorrect answers
+                    weak_tags: [],
                     recommendation_vi: correctCount >= totalCount * 0.7
                         ? 'Kết quả tốt! Tiếp tục luyện tập để cải thiện.'
                         : 'Cần ôn tập thêm các phần còn yếu.'
                 },
                 by_question: questionsWithAnswers,
-                grading_mode: 'quick' // Flag for UI to know this was quick grading
+                grading_mode: 'quick'
             };
 
             State.feedback = feedback;
-
-            // Save to history (simplified)
             await this.saveToHistory(feedback);
 
             ReviewUI.render();
@@ -3131,6 +3408,22 @@
             });
         });
 
+        // Audio controls
+        $('#btn-replay-audio')?.addEventListener('click', () => {
+            if (State.ttsAudio) {
+                State.ttsAudio.currentTime = Math.max(0, State.ttsAudio.currentTime - 5);
+            }
+        });
+
+        $('#audio-seek')?.addEventListener('input', (e) => {
+            const percent = e.target.value;
+            if (State.ttsAudio && State.ttsAudio.duration) {
+                State.ttsAudio.currentTime = (percent / 100) * State.ttsAudio.duration;
+            }
+        });
+
+        $('#btn-show-script')?.addEventListener('click', () => TestUI.toggleScript());
+
         // Section selection
         $$('.section-option').forEach(option => {
             option.addEventListener('click', () => {
@@ -3160,21 +3453,6 @@
         // Listening Controls
         $('#btn-show-script')?.addEventListener('click', () => TestUI.toggleScript());
         $('#btn-play-audio')?.addEventListener('click', () => TestUI.handleAudio());
-
-        // Audio Seek & Rewind
-        $('#audio-seek')?.addEventListener('input', (e) => {
-            if (State.ttsAudio && State.ttsAudio.duration) {
-                const pct = parseFloat(e.target.value);
-                State.ttsAudio.currentTime = (pct / 100) * State.ttsAudio.duration;
-            }
-        });
-
-        $('#btn-replay-audio')?.addEventListener('click', () => {
-            if (State.ttsAudio) {
-                State.ttsAudio.currentTime = Math.max(0, State.ttsAudio.currentTime - 5);
-                if (State.ttsAudio.paused) State.ttsAudio.play();
-            }
-        });
 
         // Grammar Book
         $('#btn-grammar')?.addEventListener('click', () => {
@@ -3216,7 +3494,21 @@
             $('#focus-overlay').classList.add('hidden');
         });
 
-        // Audio handler is already registered at line 1653 via TestUI.handleAudio()
+        // Audio controls
+        $('#btn-play-audio')?.addEventListener('click', () => TestUI.handleAudio());
+        $('#btn-replay-audio')?.addEventListener('click', () => {
+            if (State.ttsAudio && State.ttsAudio.duration) {
+                State.ttsAudio.currentTime = Math.max(0, State.ttsAudio.currentTime - 5);
+            }
+        });
+        $('#btn-show-script')?.addEventListener('click', () => TestUI.toggleScript());
+
+        // Audio seek bar
+        $('#audio-seek')?.addEventListener('input', (e) => {
+            if (State.ttsAudio && State.ttsAudio.duration) {
+                State.ttsAudio.currentTime = (e.target.value / 100) * State.ttsAudio.duration;
+            }
+        });
 
         // Review back
         $('#btn-back-home').addEventListener('click', () => {

@@ -44,7 +44,7 @@
             "mondai": [
                 {
                     "mondai_id": "M1",
-                    "title_vi": "Chữ Hán (Kanji)",
+                    "title_vi": "Hán Tự (Kanji)",
                     "instructions_vi": "Chọn cách đọc đúng cho phần gạch chân.",
                     "types": [
                         "kanji"
@@ -80,7 +80,7 @@
                 },
                 {
                     "mondai_id": "M5",
-                    "title_vi": "Ngữ pháp - Chọn đáp án",
+                    "title_vi": "Ngữ pháp",
                     "instructions_vi": "Chọn đáp án đúng nhất để điền vào chỗ trống.",
                     "types": [
                         "grammar_select"
@@ -167,7 +167,7 @@
                 },
                 {
                     "mondai_id": "L2",
-                    "title_vi": "Hiểu ý chính",
+                    "title_vi": "Ý chính",
                     "instructions_vi": "Nghe và chọn đáp án phù hợp nhất.",
                     "types": [
                         "listening_main"
