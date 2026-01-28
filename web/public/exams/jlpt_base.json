@@ -1,0 +1,216 @@
+{
+    "exam_id": "jlpt",
+    "display_name_vi": "JLPT",
+    "language": "ja-JP",
+    "level_options": [
+        "N5",
+        "N4",
+        "N3",
+        "N2",
+        "N1"
+    ],
+    "default_level": "N5",
+    "modes": {
+        "basic": {
+            "time_scale": 0.3333,
+            "question_scale": 0.3333
+        },
+        "standard": {
+            "time_scale": 0.6667,
+            "question_scale": 0.6667
+        },
+        "official": {
+            "time_scale": 1.0,
+            "question_scale": 1.0
+        }
+    },
+    "official_time_limits_sec": {
+        "groups": [
+            {
+                "group_id": "main",
+                "time_sec": 6300
+            },
+            {
+                "group_id": "listening",
+                "time_sec": 3000
+            }
+        ],
+        "overall_time_sec": 9300
+    },
+    "groups": [
+        {
+            "group_id": "main",
+            "title_vi": "Kiến thức ngôn ngữ & Đọc hiểu",
+            "mondai": [
+                {
+                    "mondai_id": "M1",
+                    "title_vi": "Hán Tự (Kanji)",
+                    "instructions_vi": "Chọn cách đọc đúng cho phần gạch chân.",
+                    "types": [
+                        "kanji"
+                    ],
+                    "count_official": 5
+                },
+                {
+                    "mondai_id": "M2",
+                    "title_vi": "Từ vựng - Ngữ cảnh",
+                    "instructions_vi": "Chọn từ thích hợp nhất để điền vào chỗ trống.",
+                    "types": [
+                        "vocab_context"
+                    ],
+                    "count_official": 7
+                },
+                {
+                    "mondai_id": "M3",
+                    "title_vi": "Từ vựng - Đồng nghĩa",
+                    "instructions_vi": "Chọn từ có nghĩa gần nhất với từ gạch chân.",
+                    "types": [
+                        "vocab_synonym"
+                    ],
+                    "count_official": 5
+                },
+                {
+                    "mondai_id": "M4",
+                    "title_vi": "Từ vựng - Cách dùng",
+                    "instructions_vi": "Chọn câu sử dụng từ đúng cách.",
+                    "types": [
+                        "vocab_usage"
+                    ],
+                    "count_official": 5
+                },
+                {
+                    "mondai_id": "M5",
+                    "title_vi": "Ngữ pháp",
+                    "instructions_vi": "Chọn đáp án đúng nhất để điền vào chỗ trống.",
+                    "types": [
+                        "grammar_select"
+                    ],
+                    "count_official": 12
+                },
+                {
+                    "mondai_id": "M6",
+                    "title_vi": "Ngữ pháp - Sắp xếp câu",
+                    "instructions_vi": "Sắp xếp các từ cho sẵn thành câu đúng.",
+                    "types": [
+                        "grammar_order"
+                    ],
+                    "count_official": 5
+                },
+                {
+                    "mondai_id": "M7",
+                    "title_vi": "Ngữ pháp trong văn bản",
+                    "instructions_vi": "Đọc đoạn văn và chọn từ ngữ thích hợp.",
+                    "types": [
+                        "grammar_passage"
+                    ],
+                    "count_official": 5
+                },
+                {
+                    "mondai_id": "M8",
+                    "title_vi": "Đọc hiểu - Đoạn ngắn",
+                    "instructions_vi": "Đọc đoạn văn ngắn và trả lời câu hỏi.",
+                    "types": [
+                        "reading_short"
+                    ],
+                    "count_official": 5
+                },
+                {
+                    "mondai_id": "M9",
+                    "title_vi": "Đọc hiểu - Đoạn trung bình",
+                    "instructions_vi": "Đọc đoạn văn và trả lời các câu hỏi.",
+                    "types": [
+                        "reading_mid"
+                    ],
+                    "count_official": 9
+                },
+                {
+                    "mondai_id": "M10",
+                    "title_vi": "Đọc hiểu - So sánh",
+                    "instructions_vi": "Đọc hai đoạn văn và so sánh nội dung.",
+                    "types": [
+                        "reading_compare"
+                    ],
+                    "count_official": 2
+                },
+                {
+                    "mondai_id": "M11",
+                    "title_vi": "Đọc hiểu - Đoạn dài",
+                    "instructions_vi": "Đọc bài văn dài và trả lời các câu hỏi.",
+                    "types": [
+                        "reading_long"
+                    ],
+                    "count_official": 4
+                },
+                {
+                    "mondai_id": "M12",
+                    "title_vi": "Đọc hiểu - Thông tin",
+                    "instructions_vi": "Đọc thông báo/quảng cáo và tìm thông tin cần thiết.",
+                    "types": [
+                        "reading_info"
+                    ],
+                    "count_official": 2
+                }
+            ]
+        },
+        {
+            "group_id": "listening",
+            "title_vi": "Nghe hiểu",
+            "mondai": [
+                {
+                    "mondai_id": "L1",
+                    "title_vi": "Hiểu vấn đề",
+                    "instructions_vi": "Nghe hội thoại và xác định vấn đề chính.",
+                    "types": [
+                        "listening_task"
+                    ],
+                    "count_official": 5
+                },
+                {
+                    "mondai_id": "L2",
+                    "title_vi": "Ý chính",
+                    "instructions_vi": "Nghe và chọn đáp án phù hợp nhất.",
+                    "types": [
+                        "listening_main"
+                    ],
+                    "count_official": 6
+                },
+                {
+                    "mondai_id": "L3",
+                    "title_vi": "Hiểu khái quát",
+                    "instructions_vi": "Nghe đoạn hội thoại ngắn và trả lời.",
+                    "types": [
+                        "listening_general"
+                    ],
+                    "count_official": 5
+                },
+                {
+                    "mondai_id": "L4",
+                    "title_vi": "Phản hồi nhanh",
+                    "instructions_vi": "Nghe câu hỏi và chọn phản hồi phù hợp.",
+                    "types": [
+                        "listening_quick"
+                    ],
+                    "count_official": 12
+                },
+                {
+                    "mondai_id": "L5",
+                    "title_vi": "Hiểu tổng hợp",
+                    "instructions_vi": "Nghe đoạn dài và trả lời các câu hỏi.",
+                    "types": [
+                        "listening_integrated"
+                    ],
+                    "count_official": 4
+                }
+            ]
+        }
+    ],
+    "ui": {
+        "navigation_mode": "mondai",
+        "show_script_in_test": false,
+        "reveal_script_in_review": true,
+        "reading_focus_tools": {
+            "enable_zoom": true,
+            "enable_focus_mode": true
+        }
+    }
+}

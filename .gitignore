@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.agent/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# User data
+server/data/
+
+# Build outputs
+dist/
+build/
+.vercel/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+server/server.log
+
+# Cache
+.cache/
+*.cache
+
+# Private project notes
+.project-notes.md

@@ -1,0 +1,23 @@
+# Server Environment Configuration
+# Copy this to .env and fill in your values
+
+# Server
+PORT=3000
+NODE_ENV=development
+
+# Privy Auth (https://console.privy.io)
+PRIVY_APP_ID=your-privy-app-id
+PRIVY_APP_SECRET=your-privy-app-secret
+
+# LLM Providers (at least one required)
+OPENAI_API_KEY=your-openai-api-key
+GEMINI_API_KEY=your-gemini-api-key
+
+# TTS Providers (optional, browser TTS as fallback)
+DEEPGRAM_API_KEY=your-deepgram-api-key
+
+# Default LLM provider: openai | gemini
+DEFAULT_LLM_PROVIDER=gemini
+
+# Default TTS mode: auto | gemini | deepgram | browser
+DEFAULT_TTS_MODE=auto
