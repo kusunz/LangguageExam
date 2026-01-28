@@ -3534,9 +3534,10 @@
         initEventHandlers();
         await Auth.init();
 
-        // Check for existing session (if Privy supports it)
-        // For now, show login screen
-        showScreen('login-screen');
+        // Only show login screen if no session was restored
+        if (!State.user) {
+            showScreen('login-screen');
+        }
 
         console.log('App initialized');
     }
