@@ -543,6 +543,13 @@
         },
 
         async handleAuthSuccess(user, isRestore = false) {
+            // Show loading state during session restore
+            if (isRestore) {
+                showScreen('loading-screen');
+                $('#loading-text').textContent = 'Đang khôi phục phiên...';
+                $('#loading-hint').textContent = 'Vui lòng chờ trong giây lát';
+            }
+
             State.user = {
                 email: user.email || 'demo@example.com',
                 token: user.token || 'demo-token'
