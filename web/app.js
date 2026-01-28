@@ -3408,22 +3408,6 @@
             });
         });
 
-        // Audio controls
-        $('#btn-replay-audio')?.addEventListener('click', () => {
-            if (State.ttsAudio) {
-                State.ttsAudio.currentTime = Math.max(0, State.ttsAudio.currentTime - 5);
-            }
-        });
-
-        $('#audio-seek')?.addEventListener('input', (e) => {
-            const percent = e.target.value;
-            if (State.ttsAudio && State.ttsAudio.duration) {
-                State.ttsAudio.currentTime = (percent / 100) * State.ttsAudio.duration;
-            }
-        });
-
-        $('#btn-show-script')?.addEventListener('click', () => TestUI.toggleScript());
-
         // Section selection
         $$('.section-option').forEach(option => {
             option.addEventListener('click', () => {
@@ -3449,10 +3433,6 @@
 
         // Start test
         $('#btn-start-test').addEventListener('click', () => TestUI.startTest());
-
-        // Listening Controls
-        $('#btn-show-script')?.addEventListener('click', () => TestUI.toggleScript());
-        $('#btn-play-audio')?.addEventListener('click', () => TestUI.handleAudio());
 
         // Grammar Book
         $('#btn-grammar')?.addEventListener('click', () => {
