@@ -29,7 +29,10 @@ async function runTest() {
         console.log('\n[1] Testing POST /api/exam/start...');
         const startRes = await fetch(`${baseUrl}/api/exam/start`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer demo-token'
+            },
             body: JSON.stringify({
                 examSpec: {
                     exam_id: 'jlpt_base_N2',
@@ -80,7 +83,10 @@ async function runTest() {
         console.log('\n[2] Testing POST /api/exam/chunk...');
         const chunkRes = await fetch(`${baseUrl}/api/exam/chunk`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer demo-token'
+            },
             body: JSON.stringify({
                 instanceKey: startData.instanceKey,
                 want: { group_id: 'vocab', want_count: 2 }
@@ -108,7 +114,10 @@ async function runTest() {
 
         const gradeRes = await fetch(`${baseUrl}/api/exam/quickgrade`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer demo-token'
+            },
             body: JSON.stringify({
                 instanceKey: startData.instanceKey,
                 answers: answers
