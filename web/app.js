@@ -546,8 +546,8 @@
             // Show loading state during session restore
             if (isRestore) {
                 showScreen('loading-screen');
-                $('#loading-text').textContent = 'Đang khôi phục phiên...';
-                $('#loading-hint').textContent = 'Vui lòng chờ trong giây lát';
+                $('#loading-text').textContent = 'Đang đăng nhập...';
+                $('#loading-hint').textContent = 'Chờ xíu';
             }
 
             State.user = {
