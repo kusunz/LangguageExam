@@ -525,23 +525,16 @@ async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
 
   const TARGET_PER_BUCKET = 50; // Start small for cost control (Plan said 100)
 
-  // 1. Check/Create Snapshot
-  let snapshotRes = await db.query(`
-    SELECT id FROM pool_snapshots 
-    WHERE exam_id=$1 AND level=$2 AND date_ymd=$3 AND mode=$4
-  `, [examSpec.exam_id, level, dateYmd, mode]);
+  // 1. UPSERT Snapshot (race-safe)
+  const snapshotRes = await db.query(`
+    INSERT INTO pool_snapshots (exam_id, level, mode, snapshot_date)
+    VALUES ($1, $2, $3, $4::date)
+    ON CONFLICT (exam_id, level, mode, snapshot_date)
+    DO UPDATE SET exam_id = EXCLUDED.exam_id
+    RETURNING id
+  `, [examSpec.exam_id, level, mode, dateYmd]);
 
-  let snapshotId;
-  if (snapshotRes.rows.length === 0) {
-    const createRes = await db.query(`
-      INSERT INTO pool_snapshots (exam_id, level, date_ymd, mode)
-      VALUES ($1, $2, $3, $4)
-      RETURNING id
-    `, [examSpec.exam_id, level, dateYmd, mode]);
-    snapshotId = createRes.rows[0].id;
-  } else {
-    snapshotId = snapshotRes.rows[0].id;
-  }
+  const snapshotId = snapshotRes.rows[0].id;
 
   // 2. Check Buckets and Fill
   for (const group of examSpec.groups) {
@@ -647,29 +640,21 @@ async function generateMondaiForBucket(params) {
 
           // Save to Bank
           await db.query(`
-            INSERT INTO mondai_bank (hash, exam_id, group_id, mondai_id, primary_type, content, meta)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO mondai_bank (hash, exam_id, level, group_id, mondai_id, primary_type, content, meta)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)
             ON CONFLICT (hash) DO NOTHING
           `, [
-            hash, examSpec.exam_id, group.group_id, mondaiDef.mondai_id, mondaiDef.types[0],
+            hash, examSpec.exam_id, level, group.group_id, mondaiDef.mondai_id, mondaiDef.types[0],
             JSON.stringify(m),
-            JSON.stringify({ level, mode, generated_at: new Date().toISOString() })
+            JSON.stringify({ mode, generated_at: new Date().toISOString() })
           ]);
 
-          // Link to Bucket
-          // Check redundancy in bucket done by checking if hash in use? 
-          // pool_snapshot_items allows same hash multiple times? 
-          // No, usually we want unique items per bucket if possible, or weighted.
-          // But here verify "ON CONFLICT DO NOTHING" in bank handles duplicate content.
-          // Then we insert into pool_snapshot_items.
-
+          // Link to Bucket with ON CONFLICT (more efficient than WHERE NOT EXISTS)
           await db.query(`
-            INSERT INTO pool_snapshot_items (snapshot_id, bucket_key, mondai_hash)
-            SELECT $1, $2, $3
-            WHERE NOT EXISTS (
-              SELECT 1 FROM pool_snapshot_items WHERE snapshot_id=$1 AND bucket_key=$2 AND mondai_hash=$3
-            )
-          `, [snapshotId, bucketKey, hash]);
+            INSERT INTO pool_snapshot_items (snapshot_id, bucket_key, mondai_hash, group_id)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (snapshot_id, bucket_key, mondai_hash) DO NOTHING
+          `, [snapshotId, bucketKey, hash, group.group_id]);
 
           remaining--;
         }
@@ -837,10 +822,13 @@ async function sampleMondaiFromBucket(snapshotId, bucketKey, rng, usedHashes) {
     WHERE snapshot_id=$1 AND bucket_key=$2
   `, [snapshotId, bucketKey]);
 
-  const available = res.rows.filter(r => !usedHashes.includes(r.mondai_hash));
+  // Use Set for O(1) lookup instead of O(n) array.includes
+  const usedSet = new Set(usedHashes);
+  const available = res.rows.filter(r => !usedSet.has(r.mondai_hash));
   if (available.length === 0) throw new Error('Bucket empty or exhausted');
 
-  const idx = Math.floor(rng() * available.length);
+  // Clamp rng output to avoid array overflow
+  const idx = Math.floor(Math.min(rng(), 0.999999) * available.length);
   return available[idx].mondai_hash;
 }
 
