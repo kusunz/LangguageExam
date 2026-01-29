@@ -616,6 +616,10 @@
         },
 
         async logout() {
+            // Stop any running timers
+            Timer.stopAll();
+            TTSManager.stop();
+
             if (this.privy) {
                 try {
                     await this.privy.auth.logout();
@@ -624,9 +628,31 @@
                     console.log('Privy session cleanup:', e.message || 'already logged out');
                 }
             }
+
+            // Clear localStorage
             localStorage.removeItem('user');
+
+            // Reset ALL state to initial values
             State.user = null;
             State.userData = null;
+            State.examSpec = null;
+            State.test = null;
+            State.answers = {};
+            State.currentGroupIndex = 0;
+            State.currentMondaiIndex = 0;
+            State.currentInstanceKey = null;
+            State.timers = { overall: 0, group: 0 };
+            State.isTestPaused = false;
+            State.feedback = null;
+            State.ttsAudio = null;
+
+            // Reset login button states
+            const demoBtn = $('#btn-demo-login');
+            if (demoBtn) {
+                demoBtn.disabled = false;
+                demoBtn.innerHTML = '<i class="fa-solid fa-play"></i> Vào Demo';
+            }
+
             showScreen('login-screen');
         },
 
