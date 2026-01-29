@@ -1,14 +1,22 @@
-const { Pool } = require('pg');
+// Use Neon serverless driver on Vercel for better cold start handling
+const IS_VERCEL = process.env.VERCEL === '1' || process.env.VERCEL_ENV;
+const { Pool } = IS_VERCEL
+  ? require('@neondatabase/serverless')
+  : require('pg');
+
+// Log which driver is being used
+console.log(`[DB] Using ${IS_VERCEL ? '@neondatabase/serverless' : 'pg'} driver`);
+console.log(`[DB] DATABASE_URL set: ${!!process.env.DATABASE_URL}`);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DB_SSL === 'false' ? undefined : {
     rejectUnauthorized: false // Required for Neon
   },
-  // Neon serverless config - longer timeouts for cold starts
-  connectionTimeoutMillis: 30000, // 30s for cold start
-  idleTimeoutMillis: 30000,       // 30s idle before disconnect
-  max: 10                         // Max pool size
+  // Neon serverless handles timeouts internally, but keep for pg fallback
+  connectionTimeoutMillis: 30000,
+  idleTimeoutMillis: 30000,
+  max: 10
 });
 
 async function initDb() {
