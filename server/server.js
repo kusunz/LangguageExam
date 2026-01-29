@@ -521,7 +521,9 @@ function generateMondaiHash(mondai) {
  * Lazy generation if missing or insufficient
  */
 async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
-  if (!IS_DB_AVAILABLE) return null; // Fallback to live gen if no DB
+  // Wait for DB initialization instead of checking boolean
+  const ok = await db.initDb();
+  if (!ok) return null;
 
   const TARGET_PER_BUCKET = 50; // Start small for cost control (Plan said 100)
 
@@ -570,101 +572,56 @@ async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
 async function generateMondaiForBucket(params) {
   const { examSpec, level, mode, group, mondaiDef, bucketKey, snapshotId, count, plan } = params;
 
-  // Use lower tier model for bulk generation if possible, or standard logic
-  // For now verify logic relies on default model behavior or context
-
-  const BATCH_SIZE = 3;
-  let remaining = count;
+  let remaining = Math.max(0, Number(count) || 0);
+  if (remaining === 0) return;
 
   while (remaining > 0) {
-    const currentBatch = Math.min(remaining, BATCH_SIZE);
+    const prompt = buildMondaiChunkPrompt(examSpec, mode, group, 0, [mondaiDef], 0, []);
 
-    // Reuse buildMondaiChunkPrompt: needs careful args
-    // We want to generate 'currentBatch' items of THIS mondai_id
-    // But buildMondaiChunkPrompt is designed for progressive flow (1 mondai at a time usually)
-    // We can ask it to generate specific mondai definition
-    // We'll pass [mondaiDef] repeated? No, the prompt builder iterates.
-    // Actually buildMondaiChunkPrompt takes (examSpec, mode, group, groupIndex, mondaiList, startIndex, context)
-    // We can pass a constructed list of just this mondaiDef repeated 'currentBatch' times?
-    // OR just call it once per item?
-    // Optimization: Ask for 3 questions/items?
-    // The Prompt is typically "Generate mondai chunk for these mondai IDs"
-    // Let's create a temporary group structure
-
-    const tempGroup = { ...group, mondai: [mondaiDef] };
-    // We want 'currentBatch' instances of this Mondai? 
-    // Usually JLPT has 1 instance of M1, 1 of M2 per exam.
-    // But here we are building a POOL of different variants of M1.
-    // So we invoke the prompt to generate M1 multiple times?
-    // The LLM Prompt usually generates ONE instance of the list passed.
-    // So if we want 3 variants, we need 3 calls OR ask for 3 distinct variants?
-    // Prompt structure: "Generate the next 2-3 mondai".
-    // If we pass [M1, M1, M1], it might be confused.
-    // Better to loop and call 1 by 1 or small batch if distinct mondai types.
-    // Since we are filling ONE bucket (e.g. valid variants of M1), we should call loop.
-
-    // Let's call for 1 instance at a time for safety/quality, but parallelize?
-    // Or just generating 3 variants in one prompt? 
-    // "Create 3 distinct variations of Mondai M1"
-    // buildMondaiChunkPrompt might not support that explicitly.
-    // We will stick to 1 by 1 for now to ensure quality and format compliance.
-    // It's a background process anyway (lazy/cron).
-
-    // Actually, to be faster, if remaining >= 3, we can try to ask for 3?
-    // But let's keep it simple: Loop.
-
-    const prompt = buildMondaiChunkPrompt(
-      examSpec, mode, group, 0, [mondaiDef], 0, []
-    );
-
-    // Modify prompt to ask for VARIATION if needed? 
-    // The prompt includes "Make a unique question". 
-    // LLM temperature handles variety.
-
-    // Call LLM
     try {
-      // Use PRO model for quality even in pool? Or Flash for speed?
-      // Plan said: "Use free tier for pool generation".
-      const result = await callGemini(prompt, {
-        temperature: 0.8, // High temp for variety
-        proOnly: false // Allow flash
-      });
+      const result = await callGemini(prompt, { temperature: 0.8, proOnly: false, plan });
+      const mondaiList = Array.isArray(result?.mondai) ? result.mondai : [];
 
-      if (result && result.mondai) {
-        for (const m of result.mondai) {
-          // Normalize and hash
-          m.mondai_id = mondaiDef.mondai_id; // Ensure ID matches
-          m.primary_type = mondaiDef.types[0];
+      if (mondaiList.length === 0) {
+        remaining -= 1;
+        continue;
+      }
 
-          const hash = generateMondaiHash(m);
+      for (const m of mondaiList) {
+        if (remaining <= 0) break;
+        // Normalize and hash
+        m.mondai_id = mondaiDef.mondai_id; // Ensure ID matches
+        m.primary_type = mondaiDef.types[0];
 
-          // Save to Bank
-          await db.query(`
+        const hash = generateMondaiHash(m);
+
+        // Save to Bank
+        await db.query(`
             INSERT INTO mondai_bank (hash, exam_id, level, group_id, mondai_id, primary_type, content, meta)
             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)
             ON CONFLICT (hash) DO NOTHING
           `, [
-            hash, examSpec.exam_id, level, group.group_id, mondaiDef.mondai_id, mondaiDef.types[0],
-            JSON.stringify(m),
-            JSON.stringify({ mode, generated_at: new Date().toISOString() })
-          ]);
+          hash, examSpec.exam_id, level, group.group_id, mondaiDef.mondai_id, mondaiDef.types[0],
+          JSON.stringify(m),
+          JSON.stringify({ mode, generated_at: new Date().toISOString() })
+        ]);
 
-          // Link to Bucket with ON CONFLICT (more efficient than WHERE NOT EXISTS)
-          await db.query(`
+        // Link to Bucket with ON CONFLICT (more efficient than WHERE NOT EXISTS)
+        await db.query(`
             INSERT INTO pool_snapshot_items (snapshot_id, bucket_key, mondai_hash, group_id)
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (snapshot_id, bucket_key, mondai_hash) DO NOTHING
           `, [snapshotId, bucketKey, hash, group.group_id]);
 
-          remaining--;
-        }
+        remaining--;
       }
-    } catch (e) {
-      console.error('Pool generation error:', e);
-      // Skip to next to avoid infinite loop
-      remaining--;
     }
+    } catch (e) {
+    console.error('Pool generation error:', e);
+    // Skip to next to avoid infinite loop
+    remaining--;
   }
+}
 }
 
 /**
@@ -816,20 +773,20 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
 }
 
 async function sampleMondaiFromBucket(snapshotId, bucketKey, rng, usedHashes) {
-  // Query available items
+  const used = Array.isArray(usedHashes) ? new Set(usedHashes) : new Set();
+
   const res = await db.query(`
-    SELECT mondai_hash FROM pool_snapshot_items 
+    SELECT mondai_hash
+    FROM pool_snapshot_items
     WHERE snapshot_id=$1 AND bucket_key=$2
   `, [snapshotId, bucketKey]);
 
-  // Use Set for O(1) lookup instead of O(n) array.includes
-  const usedSet = new Set(usedHashes);
-  const available = res.rows.filter(r => !usedSet.has(r.mondai_hash));
+  const available = (res.rows || []).filter((r) => r?.mondai_hash && !used.has(r.mondai_hash));
   if (available.length === 0) throw new Error('Bucket empty or exhausted');
 
-  // Clamp rng output to avoid array overflow
-  const idx = Math.floor(Math.min(rng(), 0.999999) * available.length);
-  return available[idx].mondai_hash;
+  const x = rng();
+  const clamped = Math.max(0, Math.min(0.999999, Number.isFinite(x) ? x : 0));
+  return available[Math.floor(clamped * available.length)].mondai_hash;
 }
 
 // ============ LLM Endpoints ============
@@ -2508,7 +2465,10 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
     const { examSpec, mode, setNo } = req.body;
     const userId = req.user.userId;
 
-    if (!IS_DB_AVAILABLE) return res.status(503).json({ error: 'DB unavailable for V2' });
+    // Wait for DB initialization
+    if (!(await db.initDb())) {
+      return res.status(503).json({ error: 'DB unavailable for V2' });
+    }
 
     const user = await loadUserData(userId, req.user.email);
     const plan = user.plan || 'free';
@@ -2589,7 +2549,11 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
 app.post('/api/exam/chunk', authMiddleware, async (req, res) => {
   try {
     const { instanceKey, want } = req.body;
-    if (!IS_DB_AVAILABLE) return res.status(503).json({ error: 'DB unavailable' });
+
+    // Wait for DB initialization
+    if (!(await db.initDb())) {
+      return res.status(503).json({ error: 'DB unavailable' });
+    }
 
     const chunk = await deliverNextChunk(instanceKey, want);
 
@@ -2608,7 +2572,11 @@ app.post('/api/exam/chunk', authMiddleware, async (req, res) => {
 app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
   try {
     const { instanceKey, answers } = req.body;
-    if (!IS_DB_AVAILABLE) return res.status(503).json({ error: 'DB unavailable' });
+
+    // Wait for DB initialization
+    if (!(await db.initDb())) {
+      return res.status(503).json({ error: 'DB unavailable' });
+    }
 
     const inst = await db.query(
       'SELECT blueprint, user_id FROM exam_instances_cache WHERE instance_key=$1',
