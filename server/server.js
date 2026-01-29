@@ -229,7 +229,7 @@ async function saveUserData(userId, data) {
   }
 }
 
-// Helper: Manage Sessions
+// Helper: Manage Sessions (Max 1 session per user - new login forces logout of previous)
 async function manageSession(userId, existingSessionId) {
   // 1. Clean up expired sessions
   await db.pool.query('DELETE FROM sessions WHERE expires_at < NOW()');
@@ -246,20 +246,10 @@ async function manageSession(userId, existingSessionId) {
     }
   }
 
-  // 3. Create new session (Enforce limit 3)
-  const countRes = await db.pool.query('SELECT COUNT(*) FROM sessions WHERE user_id = $1', [userId]);
-  const count = parseInt(countRes.rows[0].count);
+  // 3. Delete ALL existing sessions for this user (enforce 1 session limit)
+  await db.pool.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
 
-  if (count >= 3) {
-    // Delete oldest session
-    await db.pool.query(`
-      DELETE FROM sessions WHERE id IN (
-        SELECT id FROM sessions WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1
-      )
-    `, [userId]);
-  }
-
-  // Create new session
+  // 4. Create new session
   const newSessionRes = await db.pool.query(`
     INSERT INTO sessions (user_id, token, expires_at)
     VALUES ($1, 'valid', NOW() + INTERVAL '7 days')
@@ -274,14 +264,19 @@ app.post('/api/user-data', authMiddleware, async (req, res) => {
   try {
     const { sessionId } = req.body; // Frontend sends current session ID if exists
 
-    // Manage Session
-    const activeSessionId = await manageSession(req.user.userId, sessionId);
+    // Manage Session (only if DB available and not demo user)
+    let activeSessionId = null;
+    if (IS_DB_AVAILABLE && req.user.userId !== 'demo-user') {
+      activeSessionId = await manageSession(req.user.userId, sessionId);
+    }
 
     // Load Data
     const data = await loadUserData(req.user.userId, req.user.email);
 
-    // Update last login
-    await db.pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [req.user.userId]);
+    // Update last login (only if DB available and not demo)
+    if (IS_DB_AVAILABLE && req.user.userId !== 'demo-user') {
+      await db.pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [req.user.userId]);
+    }
 
     res.json({ ...data, sessionId: activeSessionId });
   } catch (err) {
@@ -289,6 +284,7 @@ app.post('/api/user-data', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Failed to load user data' });
   }
 });
+
 
 // Save user data
 app.put('/api/user-data', authMiddleware, async (req, res) => {
