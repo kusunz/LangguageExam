@@ -56,7 +56,16 @@ async function initDb() {
   let client;
   try {
     console.log('[DB] Attempting to connect...');
-    client = await pool.connect();
+
+    // Add explicit timeout for connect (Vercel has 10s function timeout by default)
+    const connectWithTimeout = Promise.race([
+      pool.connect(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Connection timeout after 8s')), 8000)
+      )
+    ]);
+
+    client = await connectWithTimeout;
     console.log('[DB] Connected, running migrations...');
     await client.query('BEGIN');
 
