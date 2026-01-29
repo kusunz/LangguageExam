@@ -482,6 +482,7 @@ function sanitizeMondaiForClient(data) {
         delete item.answer_index;
         delete item.correct_answer;
         delete item.answer_key;
+        delete item.answer_keys; // Ensure plural is also removed
         delete item.explanation_source; // Internal notes
       });
     }
@@ -548,19 +549,19 @@ function generateMondaiHash(mondai) {
 
 // ============ V2 Pool Architecture ============
 
+const ON_DEMAND_BATCH = 1;
+const WARM_TARGET_PER_BUCKET = 50;
+
 /**
- * Ensure pool snapshot exists and has sufficient items
- * Lazy generation if missing or insufficient
+ * Ensure pool snapshot exists (Meta only)
+ * Does NOT actively fill pool (Lazy generation is handled by blueprint builder)
  */
 async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
   // Wait for DB initialization instead of checking boolean
   const ok = await db.initDb();
   if (!ok) return null;
 
-  const TARGET_PER_BUCKET = 50; // Start small for cost control (Plan said 100)
-
   // 1. UPSERT Snapshot (race-safe)
-  // Uses date_ymd column (consistent with db.js)
   const snapshotRes = await db.query(`
     INSERT INTO pool_snapshots (exam_id, level, mode, date_ymd)
     VALUES ($1, $2, $3, $4)
@@ -569,34 +570,7 @@ async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
     RETURNING id
   `, [examSpec.exam_id, level, mode, dateYmd]);
 
-  const snapshotId = snapshotRes.rows[0]?.id;
-
-  // 2. Check Buckets and Fill
-  for (const group of examSpec.groups) {
-    for (const mondaiDef of group.mondai) {
-      if (!mondaiDef.types || mondaiDef.types.length === 0) continue;
-
-      const primaryType = mondaiDef.types[0];
-      const bucketKey = getBucketKey(group.group_id, mondaiDef.mondai_id, primaryType);
-
-      const countRes = await db.query(`
-        SELECT COUNT(*) FROM pool_snapshot_items
-        WHERE snapshot_id=$1 AND bucket_key=$2
-      `, [snapshotId, bucketKey]);
-
-      const currentCount = parseInt(countRes.rows[0].count);
-      if (currentCount < TARGET_PER_BUCKET) {
-        // Need to fill
-        await generateMondaiForBucket({
-          examSpec, level, mode, group, mondaiDef, bucketKey, snapshotId,
-          count: TARGET_PER_BUCKET - currentCount,
-          plan
-        });
-      }
-    }
-  }
-
-  return snapshotId;
+  return snapshotRes.rows[0]?.id;
 }
 
 /**
@@ -720,7 +694,24 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
       // For Vocab: 1 mondai slot = 1 set of questions (micro chunk).
 
       try {
-        const hash = await sampleMondaiFromBucket(snapshotId, bucketKey, rng, Array.from(usedHashes));
+        let hash;
+        try {
+          hash = await sampleMondaiFromBucket(snapshotId, bucketKey, rng, Array.from(usedHashes));
+        } catch (e) {
+          // On-demand generation if bucket empty/exhausted
+          // Log only important event
+          console.log(`[Blueprint] Bucket empty/exhausted: ${bucketKey}. Triggering on-demand generation.`);
+
+          await generateMondaiForBucket({
+            examSpec, level, mode, group, mondaiDef, bucketKey, snapshotId,
+            count: ON_DEMAND_BATCH,
+            plan
+          });
+
+          // Retry sampling (if this fails, we skip this slot)
+          hash = await sampleMondaiFromBucket(snapshotId, bucketKey, rng, Array.from(usedHashes));
+        }
+
         usedHashes.add(hash);
 
         // Determine item type for reading
@@ -734,7 +725,8 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
           delivery_mode: isReading ? 'whole' : 'flexible'
         });
       } catch (e) {
-        console.warn(`Failed to sample for ${bucketKey}:`, e.message);
+        // Soft fail for individual slots if generation fails
+        console.warn(`Failed to fill slot for ${bucketKey} after retry:`, e.message);
       }
     }
     blueprint.groups.push(groupBlueprint);
@@ -2472,6 +2464,7 @@ async function deliverNextChunk(instanceKey, want) {
   let cursor = deliveryState.cursors?.[want.group_id] || 0;
 
   const mondaiToDeliver = [];
+  let blueprintModified = false;
 
   // Deliver items until we satisfy want_count or run out
   // Logic: 
@@ -2482,13 +2475,45 @@ async function deliverNextChunk(instanceKey, want) {
     const slot = group.mondai_slots[cursor];
 
     // Load mondai content
+    let content = null;
     const mRes = await db.query(
       'SELECT content FROM mondai_bank WHERE hash=$1',
       [slot.mondai_hash]
     );
 
     if (mRes.rows.length > 0) {
-      const content = parseJsonb(mRes.rows[0].content);
+      content = parseJsonb(mRes.rows[0].content);
+    } else {
+      // SAFETY NET: Content missing from bank (data inconsistency)
+      // Attempt to repair by finding another item from the same bucket
+      console.warn(`[Chunk] Missing content for hash ${slot.mondai_hash}. Attempting repair...`);
+      try {
+        const snapRes = await db.query(
+          'SELECT snapshot_id, bucket_key FROM pool_snapshot_items WHERE mondai_hash=$1 LIMIT 1',
+          [slot.mondai_hash]
+        );
+
+        if (snapRes.rows.length > 0) {
+          const { snapshot_id, bucket_key } = snapRes.rows[0];
+          // Resample (using simple random as this is emergency fallback)
+          const newHash = await sampleMondaiFromBucket(snapshot_id, bucket_key, Math.random, [slot.mondai_hash]);
+
+          // Fetch new content
+          const mRes2 = await db.query('SELECT content FROM mondai_bank WHERE hash=$1', [newHash]);
+          if (mRes2.rows.length > 0) {
+            content = parseJsonb(mRes2.rows[0].content);
+            // Update Blueprint (Persistent Repair)
+            slot.mondai_hash = newHash;
+            blueprintModified = true;
+            console.log(`[Chunk] Repaired slot with new hash ${newHash}`);
+          }
+        }
+      } catch (e) {
+        console.error('[Chunk] Repair failed:', e.message);
+      }
+    }
+
+    if (content) {
       mondaiToDeliver.push(content);
     }
 
@@ -2505,10 +2530,17 @@ async function deliverNextChunk(instanceKey, want) {
   if (!deliveryState.cursors) deliveryState.cursors = {};
   deliveryState.cursors[want.group_id] = cursor;
 
-  await db.query(
-    'UPDATE exam_instances_cache SET delivery_state=$1 WHERE instance_key=$2',
-    [JSON.stringify(deliveryState), instanceKey]
-  );
+  if (blueprintModified) {
+    await db.query(
+      'UPDATE exam_instances_cache SET delivery_state=$1, blueprint=$2 WHERE instance_key=$3',
+      [JSON.stringify(deliveryState), JSON.stringify(blueprint), instanceKey]
+    );
+  } else {
+    await db.query(
+      'UPDATE exam_instances_cache SET delivery_state=$1 WHERE instance_key=$2',
+      [JSON.stringify(deliveryState), instanceKey]
+    );
+  }
 
   return {
     mondai: mondaiToDeliver,
