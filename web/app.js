@@ -1605,7 +1605,7 @@
 
             // Show loading screen
             showScreen('loading-screen');
-            $('#loading-text').textContent = 'Đang khởi tạo đề thi (Server V2)...';
+            $('#loading-text').textContent = 'Đang khởi tạo đề thi...';
             $('#loading-hint').textContent = 'Đang kết nối đến ngân hàng câu hỏi...';
 
             const progressBar = $('#loading-progress');
