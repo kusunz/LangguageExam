@@ -59,8 +59,12 @@ const verifyAnswerLimiter = rateLimit({
 
 // Data directory
 // Data directory (Legacy/Local usage only - skipped for cloud)
-const DATA_DIR = path.join(__dirname, 'data');
-fs.mkdir(DATA_DIR, { recursive: true }).catch(() => { });
+// On Vercel, filesystem is read-only except /tmp
+const IS_VERCEL = process.env.VERCEL === '1' || process.env.VERCEL_ENV;
+const DATA_DIR = IS_VERCEL ? '/tmp/data' : path.join(__dirname, 'data');
+if (!IS_VERCEL) {
+  fs.mkdir(DATA_DIR, { recursive: true }).catch(() => { });
+}
 
 // Privy JWKS for token verification
 const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
@@ -153,22 +157,17 @@ app.post('/api/me', authMiddleware, (req, res) => {
 // ============ DB Helper Functions ============
 
 async function loadUserData(userId, email) {
-  // If DB is NOT available, use File System (even for demo user to support testing)
+  // If DB is NOT available, return default data (no persistent storage)
   if (!IS_DB_AVAILABLE) {
-    const filePath = path.join(DATA_DIR, `${userId}.json`);
-    try {
-      const content = await fs.readFile(filePath, 'utf8');
-      return JSON.parse(content);
-    } catch (e) {
-      // Return default if file doesn't exist
-      return {
-        history: [],
-        mistakeBook: [],
-        weakTags: [],
-        nickname: userId === 'demo-user' ? 'Demo User' : null,
-        settings: {}
-      };
-    }
+    console.log(`[WARN] DB unavailable, returning ephemeral data for user ${userId}`);
+    // On Vercel/cloud, just return default without file ops
+    return {
+      history: [],
+      mistakeBook: [],
+      weakTags: [],
+      nickname: userId === 'demo-user' ? 'Demo User' : null,
+      settings: {}
+    };
   }
 
   // Standard Demo Mode (when DB is available but user is demo)
@@ -204,11 +203,10 @@ async function loadUserData(userId, email) {
 }
 
 async function saveUserData(userId, data) {
-  // Fallback to File System if DB unavailable
+  // If DB unavailable, skip save entirely (ephemeral mode)
   if (!IS_DB_AVAILABLE) {
-    const filePath = path.join(DATA_DIR, `${userId}.json`);
-    await fs.writeFile(filePath, JSON.stringify(data, null, 2));
-    return;
+    console.log(`[WARN] DB unavailable, skipping save for user ${userId}`);
+    return; // No-op, data is ephemeral
   }
 
   if (IS_DEMO_MODE || userId === 'demo-user') return;
