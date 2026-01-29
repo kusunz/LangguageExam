@@ -182,12 +182,12 @@ async function loadUserData(userId, email) {
   }
 
   try {
-    const res = await db.pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+    const res = await db.query('SELECT * FROM users WHERE id = $1', [userId]);
 
     if (res.rows.length === 0) {
       // Create new user if not exists
       const initialData = { history: [], mistakeBook: {}, weakTags: [], settings: {} };
-      await db.pool.query(
+      await db.query(
         'INSERT INTO users (id, email, data) VALUES ($1, $2, $3)',
         [userId, email || '', JSON.stringify(initialData)]
       );
@@ -215,12 +215,12 @@ async function saveUserData(userId, data) {
   const { nickname, ttsCache, ...jsonData } = data;
 
   if (nickname) {
-    await db.pool.query(
+    await db.query(
       'UPDATE users SET data = $1, nickname = $2 WHERE id = $3',
       [JSON.stringify(jsonData), nickname, userId]
     );
   } else {
-    await db.pool.query(
+    await db.query(
       'UPDATE users SET data = $1 WHERE id = $2',
       [JSON.stringify(jsonData), userId]
     );
@@ -230,25 +230,25 @@ async function saveUserData(userId, data) {
 // Helper: Manage Sessions (Max 1 session per user - new login forces logout of previous)
 async function manageSession(userId, existingSessionId) {
   // 1. Clean up expired sessions
-  await db.pool.query('DELETE FROM sessions WHERE expires_at < NOW()');
+  await db.query('DELETE FROM sessions WHERE expires_at < NOW()');
 
   // 2. Check if existing session is valid (must be a valid UUID)
   const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(existingSessionId);
 
   if (existingSessionId && isUUID) {
-    const res = await db.pool.query('SELECT id FROM sessions WHERE id = $1 AND user_id = $2', [existingSessionId, userId]);
+    const res = await db.query('SELECT id FROM sessions WHERE id = $1 AND user_id = $2', [existingSessionId, userId]);
     if (res.rows.length > 0) {
       // Refresh expiry (extend by 7 days)
-      await db.pool.query("UPDATE sessions SET expires_at = NOW() + INTERVAL '7 days' WHERE id = $1", [existingSessionId]);
+      await db.query("UPDATE sessions SET expires_at = NOW() + INTERVAL '7 days' WHERE id = $1", [existingSessionId]);
       return existingSessionId;
     }
   }
 
   // 3. Delete ALL existing sessions for this user (enforce 1 session limit)
-  await db.pool.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
+  await db.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
 
   // 4. Create new session
-  const newSessionRes = await db.pool.query(`
+  const newSessionRes = await db.query(`
     INSERT INTO sessions (user_id, token, expires_at)
     VALUES ($1, 'valid', NOW() + INTERVAL '7 days')
     RETURNING id
@@ -273,7 +273,7 @@ app.post('/api/user-data', authMiddleware, async (req, res) => {
 
     // Update last login (only if DB available and not demo)
     if (IS_DB_AVAILABLE && req.user.userId !== 'demo-user') {
-      await db.pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [req.user.userId]);
+      await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [req.user.userId]);
     }
 
     res.json({ ...data, sessionId: activeSessionId });
@@ -311,7 +311,7 @@ app.post('/api/notebook', authMiddleware, async (req, res) => {
     const hash = generateQuestionHash(question);
 
     // Upsert question to bank (ignore if exists)
-    await db.pool.query(
+    await db.query(
       `INSERT INTO questions (hash, content, keywords) 
        VALUES ($1, $2, $3) 
        ON CONFLICT (hash) DO NOTHING`,
@@ -319,13 +319,13 @@ app.post('/api/notebook', authMiddleware, async (req, res) => {
     );
 
     if (action === 'remove') {
-      await db.pool.query(
+      await db.query(
         'DELETE FROM user_notebook WHERE user_id = $1 AND question_hash = $2',
         [userId, hash]
       );
     } else {
       // Upsert notebook entry
-      await db.pool.query(
+      await db.query(
         `INSERT INTO user_notebook (user_id, question_hash, note, tags)
          VALUES ($1, $2, $3, $4)
          ON CONFLICT (user_id, question_hash) 
@@ -347,7 +347,7 @@ app.get('/api/notebook', authMiddleware, async (req, res) => {
     const userId = req.user.userId;
     if (IS_DEMO_MODE || userId === 'demo-user') return res.json({ items: [] });
 
-    const result = await db.pool.query(`
+    const result = await db.query(`
       SELECT n.*, q.content, q.hash
       FROM user_notebook n
       JOIN questions q ON n.question_hash = q.hash
@@ -393,7 +393,7 @@ async function saveQuestionsFromTest(testData) {
         for (const item of mondai.items) {
           const hash = generateQuestionHash(item);
           // Fire and forget insert
-          db.pool.query(
+          db.query(
             `INSERT INTO questions (hash, content, keywords) 
              VALUES ($1, $2, $3) 
              ON CONFLICT (hash) DO NOTHING`,
@@ -526,14 +526,14 @@ async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
   const TARGET_PER_BUCKET = 50; // Start small for cost control (Plan said 100)
 
   // 1. Check/Create Snapshot
-  let snapshotRes = await db.pool.query(`
+  let snapshotRes = await db.query(`
     SELECT id FROM pool_snapshots 
     WHERE exam_id=$1 AND level=$2 AND date_ymd=$3 AND mode=$4
   `, [examSpec.exam_id, level, dateYmd, mode]);
 
   let snapshotId;
   if (snapshotRes.rows.length === 0) {
-    const createRes = await db.pool.query(`
+    const createRes = await db.query(`
       INSERT INTO pool_snapshots (exam_id, level, date_ymd, mode)
       VALUES ($1, $2, $3, $4)
       RETURNING id
@@ -551,7 +551,7 @@ async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
       const primaryType = mondaiDef.types[0];
       const bucketKey = getBucketKey(group.group_id, mondaiDef.mondai_id, primaryType);
 
-      const countRes = await db.pool.query(`
+      const countRes = await db.query(`
         SELECT COUNT(*) FROM pool_snapshot_items
         WHERE snapshot_id=$1 AND bucket_key=$2
       `, [snapshotId, bucketKey]);
@@ -646,7 +646,7 @@ async function generateMondaiForBucket(params) {
           const hash = generateMondaiHash(m);
 
           // Save to Bank
-          await db.pool.query(`
+          await db.query(`
             INSERT INTO mondai_bank (hash, exam_id, group_id, mondai_id, primary_type, content, meta)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (hash) DO NOTHING
@@ -663,7 +663,7 @@ async function generateMondaiForBucket(params) {
           // But here verify "ON CONFLICT DO NOTHING" in bank handles duplicate content.
           // Then we insert into pool_snapshot_items.
 
-          await db.pool.query(`
+          await db.query(`
             INSERT INTO pool_snapshot_items (snapshot_id, bucket_key, mondai_hash)
             SELECT $1, $2, $3
             WHERE NOT EXISTS (
@@ -771,7 +771,7 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
 
     const candidates = await Promise.all(readingSlots.map(async slot => {
       // Fetch cost from DB
-      const res = await db.pool.query('SELECT estimated_cost, item_type FROM mondai_bank WHERE hash=$1', [slot.mondai_hash]);
+      const res = await db.query('SELECT estimated_cost, item_type FROM mondai_bank WHERE hash=$1', [slot.mondai_hash]);
       const cost = res.rows[0]?.estimated_cost || (60 + slot.question_count * 45); // fallback
       return { ...slot, cost, item_type: res.rows[0]?.item_type || slot.type };
     }));
@@ -832,7 +832,7 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
 
 async function sampleMondaiFromBucket(snapshotId, bucketKey, rng, usedHashes) {
   // Query available items
-  const res = await db.pool.query(`
+  const res = await db.query(`
     SELECT mondai_hash FROM pool_snapshot_items 
     WHERE snapshot_id=$1 AND bucket_key=$2
   `, [snapshotId, bucketKey]);
@@ -1530,7 +1530,7 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
 
     // Save to Exam Results Table (Robust storage)
     try {
-      await db.pool.query(
+      await db.query(
         'INSERT INTO exam_results (user_id, exam_id, score, summary, data) VALUES ($1, $2, $3, $4, $5)',
         [req.user.userId, test.meta.exam_id, result.score_summary.total_score, JSON.stringify(result), JSON.stringify({ test, answers })]
       );
@@ -2451,7 +2451,7 @@ function buildTtsTextPrompt(text, language) {
  */
 async function deliverNextChunk(instanceKey, want) {
   // Load instance + blueprint
-  const inst = await db.pool.query(
+  const inst = await db.query(
     'SELECT blueprint, delivery_state FROM exam_instances_cache WHERE instance_key=$1',
     [instanceKey]
   );
@@ -2479,7 +2479,7 @@ async function deliverNextChunk(instanceKey, want) {
     const slot = group.mondai_slots[cursor];
 
     // Load mondai content
-    const mRes = await db.pool.query(
+    const mRes = await db.query(
       'SELECT content FROM mondai_bank WHERE hash=$1',
       [slot.mondai_hash]
     );
@@ -2502,7 +2502,7 @@ async function deliverNextChunk(instanceKey, want) {
   if (!deliveryState.cursors) deliveryState.cursors = {};
   deliveryState.cursors[want.group_id] = cursor;
 
-  await db.pool.query(
+  await db.query(
     'UPDATE exam_instances_cache SET delivery_state=$1 WHERE instance_key=$2',
     [JSON.stringify(deliveryState), instanceKey]
   );
@@ -2552,7 +2552,7 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
     // Better: quickgrade looks up hashes from blueprint.
 
     const instanceKey = crypto.randomUUID();
-    await db.pool.query(`
+    await db.query(`
       INSERT INTO exam_instances_cache 
       (instance_key, user_id, exam_id, level, mode, plan, seed, set_no, blueprint, delivery_state, answer_keys)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -2563,7 +2563,7 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
       JSON.stringify(answerKeys)
     ]);
 
-    await db.pool.query(`
+    await db.query(`
       INSERT INTO attempts (instance_key, user_id, status)
       VALUES ($1, $2, 'active')
     `, [instanceKey, userId]);
@@ -2622,7 +2622,7 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
     const { instanceKey, answers } = req.body;
     if (!IS_DB_AVAILABLE) return res.status(503).json({ error: 'DB unavailable' });
 
-    const inst = await db.pool.query(
+    const inst = await db.query(
       'SELECT blueprint, user_id FROM exam_instances_cache WHERE instance_key=$1',
       [instanceKey]
     );
@@ -2657,7 +2657,7 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
 
     // Query DB for all contents (might be heavy for full exam, but efficient with hash IN (...))
     // Limit to 100 items?
-    const contentRes = await db.pool.query(
+    const contentRes = await db.query(
       'SELECT content FROM mondai_bank WHERE hash = ANY($1)',
       [allHashes]
     );
@@ -2689,7 +2689,7 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
     }
 
     // Update attempts
-    await db.pool.query(
+    await db.query(
       "UPDATE attempts SET status='submitted', submitted_at=NOW(), summary=$1 WHERE instance_key=$2",
       [JSON.stringify({ correct: correctCount, total: totalCount }), instanceKey]
     );
@@ -2750,7 +2750,7 @@ app.post('/api/exam/prefetch-tts', authMiddleware, async (req, res) => {
           setTTSCache(task.hash, audio);
 
           // Log metric
-          await db.pool.query(
+          await db.query(
             `INSERT INTO tts_metrics (provider, voice, language, text_len, latency_ms) VALUES ($1, $2, $3, $4, 0)`,
             ['deepgram-prefetch', task.voice, task.lang, task.text.length]
           ).catch(e => console.error('Metric log error:', e.message));
