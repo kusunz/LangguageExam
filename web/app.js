@@ -620,7 +620,8 @@
                 try {
                     await this.privy.auth.logout();
                 } catch (e) {
-                    console.warn('Privy logout error:', e);
+                    // Expected if session already expired or user logged out elsewhere
+                    console.log('Privy session cleanup:', e.message || 'already logged out');
                 }
             }
             localStorage.removeItem('user');
