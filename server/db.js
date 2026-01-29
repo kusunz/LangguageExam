@@ -41,9 +41,16 @@ try {
 
 async function query(text, params = []) {
   if (sql) {
-    // Neon serverless driver - use .query() for parameterized queries
-    const result = await sql.query(text, params);
-    // Normalize: Neon returns array directly, we need { rows }
+    // Neon serverless driver: handle both callable `sql(text, params)` and `sql.query(text, params)`
+    // Some versions/configurations differ.
+    let result;
+    if (typeof sql === 'function') {
+      result = await sql(text, params); // Tagged template literal style or function call
+    } else {
+      result = await sql.query(text, params);
+    }
+
+    // Normalize: Neon usually returns just the array of rows
     return { rows: Array.isArray(result) ? result : (result?.rows || []) };
   }
   if (pool) {
@@ -69,13 +76,12 @@ async function initDb() {
       await query('SELECT 1 AS test');
       console.log('[DB] Connection OK');
 
-      // Only run migrations if explicitly requested or in local dev
-      const runMigrations =
-        process.env.DB_RUN_MIGRATIONS === '1' ||
-        (!IS_VERCEL && process.env.NODE_ENV !== 'production');
+      // Only run migrations if explicitly requested via env var
+      // Default: DO NOT run migrations (assume manual SQL or production setup)
+      const runMigrations = process.env.DB_RUN_MIGRATIONS === '1';
 
       if (!runMigrations) {
-        console.log('[DB] Skipping migrations (set DB_RUN_MIGRATIONS=1 to run)');
+        console.log('[DB] Skipping migrations (DB_RUN_MIGRATIONS != 1)');
         return true;
       }
 

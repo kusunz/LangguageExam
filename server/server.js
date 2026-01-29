@@ -12,7 +12,13 @@ const path = require('path');
 const crypto = require('crypto');
 const { createRemoteJWKSet, jwtVerify } = require('jose');
 const db = require('./db');
-const { IS_NEON_MODE, DB_MODE } = db;
+// DB connection is managed via db.js exports.
+// We strictly use:
+// DB_MODE='neon' -> fail fast, no fallback
+// DB_MODE='auto' -> attempt connect, fallback allowed
+const { isDbReady, DB_MODE, IS_NEON_MODE, IS_VERCEL, driverType } = db;
+// Note: We no longer use a global IS_DB_AVAILABLE flag.
+// Instead we check await db.initDb() at points of use.
 const {
   JLPT_READING_TYPES,
   READING_TIME_BUDGET,
@@ -199,7 +205,8 @@ async function loadUserData(userId, email) {
     }
 
     const { data, nickname } = res.rows[0];
-    return { ...data, nickname };
+    const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+    return { ...parsedData, nickname };
   } catch (err) {
     console.error('DB load error:', err);
     throw err;
@@ -274,18 +281,28 @@ app.post('/api/user-data', authMiddleware, async (req, res) => {
   try {
     const { sessionId } = req.body; // Frontend sends current session ID if exists
 
+    // Check DB status
+    const dbOk = await db.initDb();
+
     // Manage Session (only if DB available and not demo user)
     let activeSessionId = null;
-    if (IS_DB_AVAILABLE && req.user.userId !== 'demo-user') {
-      activeSessionId = await manageSession(req.user.userId, sessionId);
+    if (dbOk && req.user.userId !== 'demo-user') {
+      try {
+        activeSessionId = await manageSession(req.user.userId, sessionId);
+      } catch (e) {
+        console.error('Session management failed:', e);
+        // Continue without session if DB fails momentarily
+      }
     }
 
     // Load Data
     const data = await loadUserData(req.user.userId, req.user.email);
 
     // Update last login (only if DB available and not demo)
-    if (IS_DB_AVAILABLE && req.user.userId !== 'demo-user') {
-      await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [req.user.userId]);
+    if (dbOk && req.user.userId !== 'demo-user') {
+      try {
+        await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [req.user.userId]);
+      } catch (e) { console.error('Update last_login failed:', e); }
     }
 
     res.json({ ...data, sessionId: activeSessionId });
