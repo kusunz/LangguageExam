@@ -254,7 +254,13 @@ async function initDb() {
     return true;
   } catch (e) {
     if (client) await client.query('ROLLBACK');
-    console.warn('Failed to initialize database (running in filesystem fallback mode):', e.message);
+    console.error('DB Init Error:', {
+      message: e.message,
+      code: e.code,
+      routine: e.routine,
+      detail: e.detail,
+      stack: e.stack?.substring(0, 500)
+    });
     // Do not throw, return false to indicate DB is not available
     return false;
   } finally {
