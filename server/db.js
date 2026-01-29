@@ -1,23 +1,40 @@
 // Use Neon serverless driver on Vercel for better cold start handling
 const IS_VERCEL = process.env.VERCEL === '1' || process.env.VERCEL_ENV;
-const { Pool } = IS_VERCEL
-  ? require('@neondatabase/serverless')
-  : require('pg');
 
 // Log which driver is being used
-console.log(`[DB] Using ${IS_VERCEL ? '@neondatabase/serverless' : 'pg'} driver`);
+console.log(`[DB] Environment: ${IS_VERCEL ? 'Vercel' : 'Local'}`);
 console.log(`[DB] DATABASE_URL set: ${!!process.env.DATABASE_URL}`);
+if (process.env.DATABASE_URL) {
+  // Log masked URL for debugging (show host only)
+  const url = new URL(process.env.DATABASE_URL);
+  console.log(`[DB] Database host: ${url.hostname}`);
+}
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DB_SSL === 'false' ? undefined : {
-    rejectUnauthorized: false // Required for Neon
-  },
-  // Neon serverless handles timeouts internally, but keep for pg fallback
-  connectionTimeoutMillis: 30000,
-  idleTimeoutMillis: 30000,
-  max: 10
-});
+let pool;
+if (IS_VERCEL) {
+  // Neon serverless uses regular Pool but with WebSocket under the hood
+  const { Pool: NeonPool, neonConfig } = require('@neondatabase/serverless');
+  const ws = require('ws');
+  neonConfig.webSocketConstructor = ws;
+
+  pool = new NeonPool({
+    connectionString: process.env.DATABASE_URL,
+  });
+  console.log('[DB] Using @neondatabase/serverless driver');
+} else {
+  // Local development uses standard pg
+  const { Pool } = require('pg');
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.DB_SSL === 'false' ? undefined : {
+      rejectUnauthorized: false
+    },
+    connectionTimeoutMillis: 30000,
+    idleTimeoutMillis: 30000,
+    max: 10
+  });
+  console.log('[DB] Using pg driver');
+}
 
 async function initDb() {
   let client;
