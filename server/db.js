@@ -47,9 +47,17 @@ try {
 }
 
 async function initDb() {
+  // Check if pool was created successfully
+  if (!pool) {
+    console.error('[DB] Pool is null, cannot initialize database');
+    return false;
+  }
+
   let client;
   try {
+    console.log('[DB] Attempting to connect...');
     client = await pool.connect();
+    console.log('[DB] Connected, running migrations...');
     await client.query('BEGIN');
 
     // Users table
