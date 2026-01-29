@@ -4,7 +4,11 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DB_SSL === 'false' ? undefined : {
     rejectUnauthorized: false // Required for Neon
-  }
+  },
+  // Neon serverless config - longer timeouts for cold starts
+  connectionTimeoutMillis: 30000, // 30s for cold start
+  idleTimeoutMillis: 30000,       // 30s idle before disconnect
+  max: 10                         // Max pool size
 });
 
 async function initDb() {
