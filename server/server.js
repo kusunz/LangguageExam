@@ -60,15 +60,10 @@ const verifyAnswerLimiter = rateLimit({
   keyGenerator: (req) => req.user?.userId || req.ip
 });
 
-// Data directory
-// Data directory (Legacy/Local usage only - skipped for cloud)
-// On Vercel, filesystem is read-only except /tmp
-// On Vercel, filesystem is read-only except /tmp
-// IS_VERCEL is imported from db.js
+// Data directory: (Removed for strict DB mode)
+// We rely entirely on the database.
 const DATA_DIR = IS_VERCEL ? '/tmp/data' : path.join(__dirname, 'data');
-if (!IS_VERCEL) {
-  fs.mkdir(DATA_DIR, { recursive: true }).catch(() => { });
-}
+// NOTE: We do NOT use fs.mkdir or local files in this refined architecture.
 
 // Privy JWKS for token verification
 const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
@@ -169,16 +164,9 @@ async function loadUserData(userId, email) {
     throw new Error('DB required in Neon mode but unavailable');
   }
 
-  // Fallback for auto mode when DB not available
+  // In Strict Mode (Neon/Production), we require DB.
   if (!dbOk) {
-    console.log(`[WARN] DB unavailable (mode=${DB_MODE}), returning ephemeral data for user ${userId}`);
-    return {
-      history: [],
-      mistakeBook: [],
-      weakTags: [],
-      nickname: userId === 'demo-user' ? 'Demo User' : null,
-      settings: {}
-    };
+    throw new Error('Database unavailable. Please check connection.');
   }
 
   // Standard Demo Mode (when DB is available but user is demo)
@@ -570,7 +558,53 @@ async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
     RETURNING id
   `, [examSpec.exam_id, level, mode, dateYmd]);
 
-  return snapshotRes.rows[0]?.id;
+  const snapshotId = snapshotRes.rows[0]?.id;
+  const MIN_READY_PER_BUCKET = 2; // Minimal buffer for fast start
+
+  // 2. Minimal Buffer Check (Non-blocking usually, but ensures at least SOMETHING exists)
+  // We check only the first few buckets required for start?
+  // Actually, let's just do a quick scan. If ANY bucket is totally empty, we might want 1-2 items.
+  // BUT: user requirement says "Do not fill TARGET_PER_BUCKET synchronously".
+  // It says "Only generate enough to reach MIN_READY_PER_BUCKET".
+
+  // Optimization: Only check buckets relevant to the FIRST chunk if possible?
+  // For simplicity and safety: Check all, but threshold is very low (2).
+
+  // NOTE: To make this TRULY fast, we launch this asynchronously or make it extremely targeted.
+  // If we check *every* bucket sequentially, it might still take time if many are empty.
+  // Compromise: We let the Blueprint Builder trigger on-demand generation.
+  // HOWEVER, the user specifically requested: "Implement minimal 'ready threshold' ... in ensurePoolSnapshot".
+  // So we will do it here, but efficiently.
+
+  const promises = [];
+
+  for (const group of examSpec.groups) {
+    for (const mondaiDef of group.mondai) {
+      if (!mondaiDef.types?.[0]) continue;
+
+      promises.push((async () => {
+        const primaryType = mondaiDef.types[0];
+        const bucketKey = getBucketKey(group.group_id, mondaiDef.mondai_id, primaryType);
+
+        const countRes = await db.query(`SELECT COUNT(*) FROM pool_snapshot_items WHERE snapshot_id=$1 AND bucket_key=$2`, [snapshotId, bucketKey]);
+        const current = parseInt(countRes.rows[0]?.count || 0);
+
+        if (current < MIN_READY_PER_BUCKET) {
+          console.log(`[Pool] Preroll buffer for ${bucketKey}: ${current} -> ${MIN_READY_PER_BUCKET}`);
+          await generateMondaiForBucket({
+            examSpec, level, mode, group, mondaiDef, bucketKey, snapshotId,
+            count: MIN_READY_PER_BUCKET - current,
+            plan
+          });
+        }
+      })());
+    }
+  }
+
+  // We await all essentially in parallel to speed up "warmup"
+  await Promise.all(promises);
+
+  return snapshotId;
 }
 
 /**

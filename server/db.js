@@ -305,7 +305,32 @@ async function initDb() {
           mondai_hashes JSONB NOT NULL,
           meta JSONB
         )`,
-        `CREATE INDEX IF NOT EXISTS idx_published_parts_exam ON published_exam_parts(published_exam_id)`
+        `CREATE INDEX IF NOT EXISTS idx_published_parts_exam ON published_exam_parts(published_exam_id)`,
+
+        /* ================= SELF-HEALING MIGRATIONS (Safe ALTERs) ================= */
+        /* Ensures existing tables (from prior deployments) get new columns */
+
+        `DO $$ BEGIN
+          -- pool_snapshots: ensure date_ymd exists (TEXT)
+          BEGIN
+            ALTER TABLE pool_snapshots ADD COLUMN IF NOT EXISTS date_ymd TEXT;
+          EXCEPTION WHEN others THEN NULL; END;
+          
+           -- mondai_bank: ensure estimated_cost and other new cols
+          BEGIN
+            ALTER TABLE mondai_bank ADD COLUMN IF NOT EXISTS estimated_cost INTEGER;
+            ALTER TABLE mondai_bank ADD COLUMN IF NOT EXISTS embedding VECTOR(768);
+            ALTER TABLE mondai_bank ADD COLUMN IF NOT EXISTS primary_type TEXT;
+            ALTER TABLE mondai_bank ADD COLUMN IF NOT EXISTS item_type TEXT;
+            ALTER TABLE mondai_bank ADD COLUMN IF NOT EXISTS base_type TEXT;
+          EXCEPTION WHEN others THEN NULL; END;
+
+          -- exam_instances_cache: ensure answer_keys
+          BEGIN
+            ALTER TABLE exam_instances_cache ADD COLUMN IF NOT EXISTS answer_keys JSONB;
+          EXCEPTION WHEN others THEN NULL; END;
+          
+        END $$;`
       ];
 
       const combined = migrations.join(';\n');
