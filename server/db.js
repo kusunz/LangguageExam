@@ -28,10 +28,15 @@ try {
 
 async function query(text, params = []) {
   if (sql) {
-    const rows = Array.isArray(params) && params.length > 0 ? await sql(text, params) : await sql(text);
-    return { rows: Array.isArray(rows) ? rows : rows?.rows || [] };
+    // Neon serverless driver - use .query() for parameterized queries
+    const result = await sql.query(text, params);
+    // Normalize: Neon returns array directly, we need { rows }
+    return { rows: Array.isArray(result) ? result : (result?.rows || []) };
   }
-  if (pool) return pool.query(text, params);
+  if (pool) {
+    // pg Pool already returns { rows, fields, etc }
+    return pool.query(text, params);
+  }
   throw new Error('No database connection available');
 }
 
@@ -47,10 +52,8 @@ async function initDb() {
     }
 
     try {
-      // Fast connectivity check
-      if (sql) await sql('SELECT 1 AS test');
-      else await pool.query('SELECT 1 AS test');
-
+      // Fast connectivity check using wrapper
+      await query('SELECT 1 AS test');
       console.log('[DB] Connection OK');
 
       // Only run migrations if explicitly requested or in local dev
@@ -286,9 +289,7 @@ async function initDb() {
       ];
 
       const combined = migrations.join(';\n');
-
-      if (sql) await sql(combined);
-      else await pool.query(combined);
+      await query(combined);
 
       console.log('[DB] Migrations complete');
       return true;

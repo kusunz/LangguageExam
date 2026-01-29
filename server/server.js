@@ -601,13 +601,27 @@ async function generateMondaiForBucket(params) {
 
         const hash = generateMondaiHash(m);
 
-        // Save to Bank
+        // Extract item_type and estimated cost
+        const itemType = m.mondai_type || mondaiDef.mondai_type || 'unknown';
+        const estimatedCost = mondaiDef.estimated_seconds || 60;
+
+        // Save to Bank with all required columns
         await db.query(`
-            INSERT INTO mondai_bank (hash, exam_id, level, group_id, mondai_id, primary_type, content, meta)
-            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)
+            INSERT INTO mondai_bank (
+              hash, exam_id, level, group_id, mondai_id, 
+              primary_type, item_type, estimated_cost, content, meta
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
             ON CONFLICT (hash) DO NOTHING
           `, [
-          hash, examSpec.exam_id, level, group.group_id, mondaiDef.mondai_id, mondaiDef.types[0],
+          hash,
+          examSpec.exam_id,
+          level,
+          group.group_id,
+          mondaiDef.mondai_id,
+          mondaiDef.types[0],
+          itemType,
+          estimatedCost,
           JSON.stringify(m),
           JSON.stringify({ mode, generated_at: new Date().toISOString() })
         ]);
@@ -1532,9 +1546,22 @@ app.post('/api/prepare-tts-text', authMiddleware, async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('TTS text prep error:', err);
-    res.status(500).json({ error: 'Failed to prepare TTS text: ' + err.message });
+    res.status(500).json({ error: 'Failed to prepare TTS text: ' + err.message }).catch(console.error);
   }
 });
+
+// Helper: Parse JSONB safely (Neon may return as string)
+function parseJsonb(value, fallback = {}) {
+  if (!value) return fallback;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+// ============ User Management ============
 
 // ============ TTS Endpoints ============
 
@@ -2407,8 +2434,8 @@ async function deliverNextChunk(instanceKey, want) {
 
   if (inst.rows.length === 0) throw new Error('Instance not found');
 
-  const blueprint = inst.rows[0].blueprint; // jsonb is auto-parsed by pg? Yes usually.
-  const deliveryState = inst.rows[0].delivery_state;
+  const blueprint = parseJsonb(inst.rows[0].blueprint);
+  const deliveryState = parseJsonb(inst.rows[0].delivery_state, {});
 
   // Find requested group
   const groupIdx = blueprint.groups.findIndex(g => g.group_id === want.group_id);
@@ -2434,7 +2461,7 @@ async function deliverNextChunk(instanceKey, want) {
     );
 
     if (mRes.rows.length > 0) {
-      const content = mRes.rows[0].content; // JSONB
+      const content = parseJsonb(mRes.rows[0].content);
       mondaiToDeliver.push(content);
     }
 
@@ -2590,7 +2617,7 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
     if (inst.rows.length === 0) return res.status(404).json({ error: 'Instance not found' });
     if (inst.rows[0].user_id !== req.user.userId) return res.status(403).json({ error: 'Unauthorized' });
 
-    const blueprint = inst.rows[0].blueprint;
+    const blueprint = parseJsonb(inst.rows[0].blueprint);
 
     // Grade by checking each answer against mondai_bank content
     // This assumes we didn't store answer_keys in cache yet.
@@ -2625,7 +2652,7 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
     // Build efficient map: QuestionID -> CorrectAnswer
     const answerMap = {};
     contentRes.rows.forEach(row => {
-      const m = row.content;
+      const m = parseJsonb(row.content);
       if (m.items) {
         m.items.forEach(item => {
           if (item.id && item.answer_index !== undefined) {
