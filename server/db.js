@@ -1,39 +1,49 @@
 // Use Neon serverless driver on Vercel for better cold start handling
 const IS_VERCEL = process.env.VERCEL === '1' || process.env.VERCEL_ENV;
 
-// Log which driver is being used
+// Log environment
 console.log(`[DB] Environment: ${IS_VERCEL ? 'Vercel' : 'Local'}`);
 console.log(`[DB] DATABASE_URL set: ${!!process.env.DATABASE_URL}`);
-if (process.env.DATABASE_URL) {
-  // Log masked URL for debugging (show host only)
-  const url = new URL(process.env.DATABASE_URL);
-  console.log(`[DB] Database host: ${url.hostname}`);
-}
 
 let pool;
-if (IS_VERCEL) {
-  // Neon serverless uses regular Pool but with WebSocket under the hood
-  const { Pool: NeonPool, neonConfig } = require('@neondatabase/serverless');
-  const ws = require('ws');
-  neonConfig.webSocketConstructor = ws;
+try {
+  if (process.env.DATABASE_URL) {
+    // Log masked URL for debugging (show host only)
+    try {
+      const url = new URL(process.env.DATABASE_URL);
+      console.log(`[DB] Database host: ${url.hostname}`);
+    } catch (e) {
+      console.log('[DB] Could not parse DATABASE_URL');
+    }
+  }
 
-  pool = new NeonPool({
-    connectionString: process.env.DATABASE_URL,
-  });
-  console.log('[DB] Using @neondatabase/serverless driver');
-} else {
-  // Local development uses standard pg
-  const { Pool } = require('pg');
-  pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.DB_SSL === 'false' ? undefined : {
-      rejectUnauthorized: false
-    },
-    connectionTimeoutMillis: 30000,
-    idleTimeoutMillis: 30000,
-    max: 10
-  });
-  console.log('[DB] Using pg driver');
+  if (IS_VERCEL && process.env.DATABASE_URL) {
+    // Neon serverless - Vercel has native WebSocket support, no ws needed
+    const { Pool: NeonPool } = require('@neondatabase/serverless');
+    pool = new NeonPool({
+      connectionString: process.env.DATABASE_URL,
+    });
+    console.log('[DB] Using @neondatabase/serverless driver');
+  } else if (process.env.DATABASE_URL) {
+    // Local development uses standard pg
+    const { Pool } = require('pg');
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DB_SSL === 'false' ? undefined : {
+        rejectUnauthorized: false
+      },
+      connectionTimeoutMillis: 30000,
+      idleTimeoutMillis: 30000,
+      max: 10
+    });
+    console.log('[DB] Using pg driver');
+  } else {
+    console.log('[DB] No DATABASE_URL set, DB features disabled');
+    pool = null;
+  }
+} catch (e) {
+  console.error('[DB] Pool creation error:', e.message);
+  pool = null;
 }
 
 async function initDb() {
