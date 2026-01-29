@@ -2045,3 +2045,36 @@ body::before {
     opacity: 0.5;
   }
 }
+
+/* ============================================
+   Fullscreen Loading Overlay
+   ============================================ */
+.fullscreen-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fullscreen-loader.hidden {
+  display: none;
+}
+
+.fullscreen-loader-content {
+  text-align: center;
+  color: white;
+}
+
+.fullscreen-loader-content .loader-spinner {
+  margin-bottom: var(--space-lg);
+  color: var(--accent-primary);
+}
+
+.fullscreen-loader-content p {
+  font-size: var(--text-lg);
+  font-weight: 500;
+}

@@ -543,23 +543,29 @@
         },
 
         async handleAuthSuccess(user, isRestore = false) {
-            // Show loading state during session restore
-            if (isRestore) {
-                showScreen('loading-screen');
-                $('#loading-text').textContent = 'Đang đăng nhập...';
-                $('#loading-hint').textContent = 'Chờ xíu';
+            // Show fullscreen loading overlay to block all interaction
+            const loader = $('#fullscreen-loader');
+            const loaderText = $('#fullscreen-loader-text');
+            if (loader) {
+                loader.classList.remove('hidden');
+                loaderText.textContent = isRestore ? 'Đang khôi phục phiên...' : 'Đang đăng nhập...';
             }
 
-            State.user = {
-                email: user.email || 'demo@example.com',
-                token: user.token || 'demo-token'
-            };
+            try {
+                State.user = {
+                    email: user.email || 'demo@example.com',
+                    token: user.token || 'demo-token'
+                };
 
-            localStorage.setItem('user', JSON.stringify(State.user));
+                localStorage.setItem('user', JSON.stringify(State.user));
 
-            await this.loadUserData();
-            this.updateUI();
-            showScreen('home-screen');
+                await this.loadUserData();
+                this.updateUI();
+                showScreen('home-screen');
+            } finally {
+                // Always hide the loader
+                if (loader) loader.classList.add('hidden');
+            }
         },
 
         async loadUserData() {
@@ -1509,6 +1515,7 @@
         pendingGroups: [], // Track groups being loaded in background
         loadingGroupIndex: 0, // Current group being loaded
         isSubmitting: false, // Prevent duplicate submissions
+        isStartingTest: false, // Prevent duplicate test starts
 
         simulateProgress(bar, text) {
             if (!bar) bar = $('#loading-progress');
@@ -1542,6 +1549,13 @@
 
 
         async startTest() {
+            // Prevent duplicate test starts
+            if (this.isStartingTest) {
+                console.log('startTest already in progress, skipping');
+                return;
+            }
+            this.isStartingTest = true;
+
             const llmProvider = $('#llm-provider').value;
             const targetModel = null;
 
@@ -1644,6 +1658,7 @@
                 if (progressText) progressText.textContent = '100%';
 
                 this.stopProgress();
+                this.isStartingTest = false; // Reset after successful start
                 showScreen('test-screen');
                 this.initializeTest();
                 console.log('Test Initialized (V2).');
@@ -1653,6 +1668,7 @@
 
             } catch (err) {
                 this.stopProgress();
+                this.isStartingTest = false; // Reset on error
                 console.error('Start Test V2 Error:', err);
                 showToast('Lỗi khởi tạo bài thi: ' + err.message, 'error');
                 showScreen('home-screen');
@@ -2706,6 +2722,11 @@
             if (confirmed) {
                 Timer.stopAll();
                 TTSManager.stop();
+
+                // Reset all flags
+                this.isStartingTest = false;
+                this.isSubmitting = false;
+
                 State.test = null;
                 State.answers = {};
                 State.currentMondaiIndex = 0;
