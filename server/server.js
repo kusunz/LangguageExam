@@ -516,6 +516,12 @@ function generateMondaiHash(mondai) {
   return crypto.createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
 }
 
+// ============ V2 Pool Architecture ============
+
+// Column name for snapshot date - backward compatible with existing DB schema
+// Production DB uses 'date_ymd', change to 'snapshot_date' after running migrations
+const SNAPSHOT_DATE_COL = 'date_ymd';
+
 /**
  * Ensure pool snapshot exists and has sufficient items
  * Lazy generation if missing or insufficient
@@ -529,14 +535,14 @@ async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
 
   // 1. UPSERT Snapshot (race-safe)
   const snapshotRes = await db.query(`
-    INSERT INTO pool_snapshots (exam_id, level, mode, snapshot_date)
-    VALUES ($1, $2, $3, $4::date)
-    ON CONFLICT (exam_id, level, mode, snapshot_date)
+    INSERT INTO pool_snapshots (exam_id, level, mode, ${SNAPSHOT_DATE_COL})
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (exam_id, level, mode, ${SNAPSHOT_DATE_COL})
     DO UPDATE SET exam_id = EXCLUDED.exam_id
     RETURNING id
   `, [examSpec.exam_id, level, mode, dateYmd]);
 
-  const snapshotId = snapshotRes.rows[0].id;
+  const snapshotId = snapshotRes.rows[0]?.id;
 
   // 2. Check Buckets and Fill
   for (const group of examSpec.groups) {
