@@ -63,7 +63,8 @@ const verifyAnswerLimiter = rateLimit({
 // Data directory
 // Data directory (Legacy/Local usage only - skipped for cloud)
 // On Vercel, filesystem is read-only except /tmp
-const IS_VERCEL = process.env.VERCEL === '1' || process.env.VERCEL_ENV;
+// On Vercel, filesystem is read-only except /tmp
+// IS_VERCEL is imported from db.js
 const DATA_DIR = IS_VERCEL ? '/tmp/data' : path.join(__dirname, 'data');
 if (!IS_VERCEL) {
   fs.mkdir(DATA_DIR, { recursive: true }).catch(() => { });
