@@ -615,13 +615,11 @@ async function generateMondaiForBucket(params) {
 
         remaining--;
       }
-    }
     } catch (e) {
-    console.error('Pool generation error:', e);
-    // Skip to next to avoid infinite loop
-    remaining--;
+      console.error('Pool generation error:', e?.message || e);
+      remaining -= 1;
+    }
   }
-}
 }
 
 /**
