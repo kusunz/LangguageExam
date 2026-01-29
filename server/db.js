@@ -5,7 +5,9 @@ const IS_VERCEL = process.env.VERCEL === '1' || process.env.VERCEL_ENV;
 console.log(`[DB] Environment: ${IS_VERCEL ? 'Vercel' : 'Local'}`);
 console.log(`[DB] DATABASE_URL set: ${!!process.env.DATABASE_URL}`);
 
-let pool;
+let pool = null;
+let sql = null; // Neon SQL function for serverless
+
 try {
   if (process.env.DATABASE_URL) {
     // Log masked URL for debugging (show host only)
@@ -18,14 +20,12 @@ try {
   }
 
   if (IS_VERCEL && process.env.DATABASE_URL) {
-    // Neon serverless - Vercel has native WebSocket support, no ws needed
-    const { Pool: NeonPool } = require('@neondatabase/serverless');
-    pool = new NeonPool({
-      connectionString: process.env.DATABASE_URL,
-    });
-    console.log('[DB] Using @neondatabase/serverless driver');
+    // Neon serverless - use neon() SQL function (recommended for serverless)
+    const { neon } = require('@neondatabase/serverless');
+    sql = neon(process.env.DATABASE_URL);
+    console.log('[DB] Using @neondatabase/serverless neon() function');
   } else if (process.env.DATABASE_URL) {
-    // Local development uses standard pg
+    // Local development uses standard pg Pool
     const { Pool } = require('pg');
     pool = new Pool({
       connectionString: process.env.DATABASE_URL,
@@ -39,181 +39,166 @@ try {
     console.log('[DB] Using pg driver');
   } else {
     console.log('[DB] No DATABASE_URL set, DB features disabled');
-    pool = null;
   }
 } catch (e) {
-  console.error('[DB] Pool creation error:', e.message);
-  pool = null;
+  console.error('[DB] Driver creation error:', e.message);
+}
+
+// Wrapper to execute queries - works with both pool and sql function
+async function query(text, params) {
+  if (sql) {
+    // Neon serverless - use tagged template or raw query
+    if (params && params.length > 0) {
+      // For parameterized queries, we need to use the sql function differently
+      return sql(text, params);
+    }
+    return sql(text);
+  } else if (pool) {
+    return pool.query(text, params);
+  } else {
+    throw new Error('No database connection available');
+  }
 }
 
 async function initDb() {
-  // Check if pool was created successfully
-  if (!pool) {
-    console.error('[DB] Pool is null, cannot initialize database');
+  // Check if any connection method is available
+  if (!pool && !sql) {
+    console.error('[DB] No database connection configured');
     return false;
   }
 
-  let client;
   try {
-    console.log('[DB] Attempting to connect...');
+    console.log('[DB] Attempting to connect and initialize...');
 
-    // Add explicit timeout for connect (Vercel has 10s function timeout by default)
-    const connectWithTimeout = Promise.race([
-      pool.connect(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Connection timeout after 8s')), 8000)
-      )
-    ]);
+    // Test connection with simple query
+    if (sql) {
+      await sql`SELECT 1 as test`;
+    } else {
+      await pool.query('SELECT 1 as test');
+    }
+    console.log('[DB] Connection successful!');
 
-    client = await connectWithTimeout;
-    console.log('[DB] Connected, running migrations...');
-    await client.query('BEGIN');
-
-    // Users table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS users (
+    // Run migrations using raw SQL (works with both)
+    const migrations = [
+      // Users table
+      `CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         email TEXT NOT NULL,
         nickname TEXT,
         data JSONB DEFAULT '{}',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         last_login_at TIMESTAMP WITH TIME ZONE
-      );
-    `);
+      )`,
 
-    // Sessions table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS sessions (
+      // Sessions table
+      `CREATE TABLE IF NOT EXISTS sessions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id TEXT REFERENCES users(id),
+        user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
         token TEXT NOT NULL,
-        expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)`,
 
-    // Exam Results table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS exam_results (
+      // Exam results table
+      `CREATE TABLE IF NOT EXISTS exam_results (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id TEXT REFERENCES users(id),
-        exam_id TEXT NOT NULL,
-        score INTEGER,
-        summary JSONB,
-        data JSONB,
+        user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+        exam_type TEXT NOT NULL,
+        level TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        section TEXT,
+        score INTEGER NOT NULL,
+        total INTEGER NOT NULL,
+        duration INTEGER,
+        details JSONB,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_results_user ON exam_results(user_id)`,
 
-    // Questions Bank table (Deduplicated)
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS questions (
-        hash TEXT PRIMARY KEY,
+      // Questions table (for storing generated questions)
+      `CREATE TABLE IF NOT EXISTS questions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        exam_type TEXT NOT NULL,
+        level TEXT NOT NULL,
+        group_type TEXT NOT NULL,
         content JSONB NOT NULL,
-        keywords JSONB,
+        hash TEXT UNIQUE,
+        usage_count INTEGER DEFAULT 0,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_questions_exam ON questions(exam_type, level, group_type)`,
 
-    // User Notebook table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS user_notebook (
+      // User notebook table
+      `CREATE TABLE IF NOT EXISTS user_notebook (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id TEXT REFERENCES users(id),
-        question_hash TEXT REFERENCES questions(hash),
-        note TEXT,
-        tags JSONB DEFAULT '[]',
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(user_id, question_hash)
-      );
-    `);
+        user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+        question_id UUID REFERENCES questions(id),
+        item_type TEXT NOT NULL,
+        content JSONB NOT NULL,
+        tags TEXT[],
+        mastery_level INTEGER DEFAULT 0,
+        last_reviewed_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_notebook_user ON user_notebook(user_id)`,
 
-    // Exam Sessions table (for secure answer storage)
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS exam_sessions (
+      // Exam sessions table
+      `CREATE TABLE IF NOT EXISTS exam_sessions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id TEXT REFERENCES users(id),
-        exam_id TEXT NOT NULL,
-        answers JSONB NOT NULL,
-        is_practice_mode BOOLEAN DEFAULT false,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        expires_at TIMESTAMP WITH TIME ZONE DEFAULT (CURRENT_TIMESTAMP + INTERVAL '4 hours')
-      );
-    `);
+        user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+        exam_type TEXT NOT NULL,
+        level TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        state JSONB,
+        started_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMP WITH TIME ZONE
+      )`,
 
-    // Create index for faster lookups
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_exam_sessions_expires 
-      ON exam_sessions(expires_at);
-    `);
-
-    // ==========================================
-    // Pool Snapshot Architecture Tables (v2)
-    // ==========================================
-
-    // A) Mondai Bank (Server-only question store)
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS mondai_bank (
+      // Mondai bank table
+      `CREATE TABLE IF NOT EXISTS mondai_bank (
         hash TEXT PRIMARY KEY,
         exam_id TEXT NOT NULL,
+        level TEXT NOT NULL,
         group_id TEXT NOT NULL,
-        mondai_id TEXT NOT NULL,
-        item_type TEXT,
-        primary_type TEXT NOT NULL,
+        mondai_idx INTEGER NOT NULL,
+        base_type TEXT,
         content JSONB NOT NULL,
-        meta JSONB,
-        estimated_cost INTEGER DEFAULT 60,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+        embedding VECTOR(768),
+        usage_count INTEGER DEFAULT 0,
+        avg_score REAL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_mondai_lookup ON mondai_bank(exam_id, level, group_id)`,
 
-    // Migration for existing tables
-    await client.query('ALTER TABLE mondai_bank ADD COLUMN IF NOT EXISTS item_type TEXT;');
-    await client.query('ALTER TABLE mondai_bank ADD COLUMN IF NOT EXISTS estimated_cost INTEGER DEFAULT 60;');
-
-    await client.query('CREATE INDEX IF NOT EXISTS idx_mondai_bank_exam ON mondai_bank(exam_id, group_id, mondai_id);');
-    await client.query('CREATE INDEX IF NOT EXISTS idx_mondai_bank_type ON mondai_bank(primary_type);');
-    await client.query('CREATE INDEX IF NOT EXISTS idx_mondai_bank_item_type ON mondai_bank(item_type);');
-
-    // B) Pool Snapshots (Daily sets catalog)
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS pool_snapshots (
+      // Pool snapshots table
+      `CREATE TABLE IF NOT EXISTS pool_snapshots (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         exam_id TEXT NOT NULL,
         level TEXT NOT NULL,
-        date_ymd TEXT NOT NULL,
-        mode TEXT,
-        bucket_spec JSONB,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(exam_id, level, date_ymd, mode)
-      );
-    `);
-    await client.query('CREATE INDEX IF NOT EXISTS idx_pool_snapshots_lookup ON pool_snapshots(exam_id, level, date_ymd);');
+        snapshot_date DATE NOT NULL,
+        UNIQUE(exam_id, level, snapshot_date)
+      )`,
 
-    // C) Pool Snapshot Items (Bucket contents)
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS pool_snapshot_items (
+      // Pool snapshot items table
+      `CREATE TABLE IF NOT EXISTS pool_snapshot_items (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         snapshot_id UUID REFERENCES pool_snapshots(id) ON DELETE CASCADE,
-        bucket_key TEXT NOT NULL,
-        mondai_hash TEXT REFERENCES mondai_bank(hash),
-        weight INTEGER DEFAULT 1,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    await client.query('CREATE INDEX IF NOT EXISTS idx_pool_items_snapshot ON pool_snapshot_items(snapshot_id, bucket_key);');
-    await client.query('CREATE INDEX IF NOT EXISTS idx_pool_items_hash ON pool_snapshot_items(mondai_hash);');
+        mondai_hash TEXT REFERENCES mondai_bank(hash) ON DELETE CASCADE,
+        group_id TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_snapshot_items_snapshot ON pool_snapshot_items(snapshot_id)`,
 
-    // D) Exam Instances Cache (Assembled exam blueprints)
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS exam_instances_cache (
-        instance_key TEXT PRIMARY KEY,
-        user_id TEXT REFERENCES users(id),
+      // Exam instances cache table
+      `CREATE TABLE IF NOT EXISTS exam_instances_cache (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        instance_key TEXT UNIQUE NOT NULL,
+        user_id TEXT NOT NULL,
         exam_id TEXT NOT NULL,
         level TEXT NOT NULL,
         mode TEXT NOT NULL,
-        plan TEXT NOT NULL,
-        seed TEXT NOT NULL,
         set_no INTEGER NOT NULL,
         blueprint JSONB NOT NULL,
         delivery_state JSONB,
@@ -221,91 +206,94 @@ async function initDb() {
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         expires_at TIMESTAMP WITH TIME ZONE DEFAULT (CURRENT_TIMESTAMP + INTERVAL '3 days'),
         UNIQUE(user_id, exam_id, level, mode, set_no)
-      );
-    `);
-    await client.query('CREATE INDEX IF NOT EXISTS idx_instances_user ON exam_instances_cache(user_id);');
-    await client.query('CREATE INDEX IF NOT EXISTS idx_instances_expires ON exam_instances_cache(expires_at);');
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_instances_user ON exam_instances_cache(user_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_instances_expires ON exam_instances_cache(expires_at)`,
 
-    // E) Attempts (Exam attempt tracking)
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS attempts (
+      // Attempts table
+      `CREATE TABLE IF NOT EXISTS attempts (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        instance_key TEXT REFERENCES exam_instances_cache(instance_key),
-        user_id TEXT REFERENCES users(id),
-        status TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        instance_key TEXT REFERENCES exam_instances_cache(instance_key) ON DELETE CASCADE,
         started_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         submitted_at TIMESTAMP WITH TIME ZONE,
-        summary JSONB
-      );
-    `);
-    await client.query('CREATE INDEX IF NOT EXISTS idx_attempts_instance ON attempts(instance_key);');
-    await client.query('CREATE INDEX IF NOT EXISTS idx_attempts_user ON attempts(user_id, status);');
+        answers JSONB,
+        score INTEGER,
+        total INTEGER,
+        time_spent INTEGER
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_attempts_user ON attempts(user_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_attempts_instance ON attempts(instance_key)`,
 
-    // F) Coupons & Redemptions
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS coupons (
-        code TEXT PRIMARY KEY,
-        meta JSONB NOT NULL,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS coupon_redemptions (
+      // Coupons table
+      `CREATE TABLE IF NOT EXISTS coupons (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        code TEXT REFERENCES coupons(code),
+        code TEXT UNIQUE NOT NULL,
+        type TEXT NOT NULL,
+        value JSONB NOT NULL,
+        max_uses INTEGER,
+        current_uses INTEGER DEFAULT 0,
+        expires_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_coupons_code ON coupons(code)`,
+
+      // Coupon redemptions table
+      `CREATE TABLE IF NOT EXISTS coupon_redemptions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        coupon_id UUID REFERENCES coupons(id),
         user_id TEXT REFERENCES users(id),
         redeemed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        meta JSONB,
-        UNIQUE(code, user_id)
-      );
-    `);
-    await client.query('CREATE INDEX IF NOT EXISTS idx_redemptions_user ON coupon_redemptions(user_id);');
+        UNIQUE(coupon_id, user_id)
+      )`,
 
-    // G) TTS Metrics
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS tts_metrics (
+      // TTS metrics table
+      `CREATE TABLE IF NOT EXISTS tts_metrics (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         provider TEXT NOT NULL,
-        voice TEXT,
-        language TEXT,
-        text_len INTEGER,
-        latency_ms INTEGER,
+        text_length INTEGER NOT NULL,
+        latency_ms INTEGER NOT NULL,
+        success BOOLEAN NOT NULL,
+        error TEXT,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    await client.query('CREATE INDEX IF NOT EXISTS idx_tts_metrics_provider ON tts_metrics(provider, created_at);');
+      )`,
 
-    // H) Published Exams (Paid-only)
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS published_exams (
+      // Published exams table
+      `CREATE TABLE IF NOT EXISTS published_exams (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        exam_code TEXT UNIQUE NOT NULL,
-        year INTEGER,
-        level TEXT,
-        language TEXT,
-        meta JSONB,
-        is_paid_only BOOLEAN DEFAULT true,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+        exam_id TEXT NOT NULL,
+        level TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(exam_id, level, title)
+      )`,
 
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS published_exam_parts (
+      // Published exam parts table
+      `CREATE TABLE IF NOT EXISTS published_exam_parts (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         published_exam_id UUID REFERENCES published_exams(id) ON DELETE CASCADE,
         group_id TEXT NOT NULL,
         mondai_hashes JSONB NOT NULL,
         meta JSONB
-      );
-    `);
-    await client.query('CREATE INDEX IF NOT EXISTS idx_published_parts_exam ON published_exam_parts(published_exam_id);');
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_published_parts_exam ON published_exam_parts(published_exam_id)`
+    ];
 
-    await client.query('COMMIT');
+    console.log(`[DB] Running ${migrations.length} migrations...`);
+
+    for (const migration of migrations) {
+      if (sql) {
+        await sql(migration);
+      } else {
+        await pool.query(migration);
+      }
+    }
+
     console.log('Database initialized successfully');
     return true;
   } catch (e) {
-    if (client) await client.query('ROLLBACK');
     console.error('DB Init Error:', {
       message: e.message,
       code: e.code,
@@ -313,11 +301,8 @@ async function initDb() {
       detail: e.detail,
       stack: e.stack?.substring(0, 500)
     });
-    // Do not throw, return false to indicate DB is not available
     return false;
-  } finally {
-    if (client) client.release();
   }
 }
 
-module.exports = { pool, initDb };
+module.exports = { pool, sql, query, initDb };
