@@ -1647,11 +1647,7 @@
 
                 // Process First Chunk
                 if (res.mondai && res.mondai.length > 0) {
-                    // First chunk usually belongs to first group?
-                    // Need to map mondai to groups.
-                    // Helper to distribute items? or we know where they go?
-                    // The startExamV2 usually returns chunk for first group.
-                    State.test.groups[0].mondai.push(...res.mondai);
+                    this.processChunk(res.mondai);
                 }
 
                 if (progressBar) progressBar.style.width = '100%';
@@ -1675,55 +1671,71 @@
             }
         },
 
+        // Helper to distribute mondai to correct groups based on capacity
+        processChunk(mondaiList) {
+            const manifest = State.test.meta.manifest;
+            if (!manifest) return;
+
+            mondaiList.forEach(m => {
+                // Find first group that isn't full
+                // We match based on manifest expected counts
+                for (let i = 0; i < State.test.groups.length; i++) {
+                    const group = State.test.groups[i];
+                    const manifestGroup = manifest.groups.find(mg => mg.group_id === group.group_id);
+                    const expected = manifestGroup?.expected_mondai_count || 999;
+
+                    if (group.mondai.length < expected) {
+                        group.mondai.push(m);
+                        return;
+                    }
+                }
+                // Fallback: push to last group
+                if (State.test.groups.length > 0) {
+                    State.test.groups[State.test.groups.length - 1].mondai.push(m);
+                }
+            });
+        },
+
         async loadRemainingChunksV2() {
             if (!State.currentInstanceKey) return;
-
-            // Iterate all groups and fetch remaining content
-            // We do this sequentially or parallel? 
-            // Sequential is safer for order, parallel for speed.
-            // Sliding window of 2 requests?
 
             const instanceKey = State.currentInstanceKey;
 
             for (let gIdx = 0; gIdx < State.test.groups.length; gIdx++) {
                 const group = State.test.groups[gIdx];
-                const expectedMondai = State.test.meta.time_limits?.groups?.[gIdx]?.mondai_count
-                    || 999; // We don't know exact count from Manifest unless provided.
-                // V2 manifest provided expected_mondai_count?
-                // Yes, res.manifest.groups[i].expected_mondai_count.
-                // But State.test.groups doesn't have it unless we stored it.
-                // Let's assume we fetch until "done" flag.
-
-                let done = false;
-                // Check if we already have items (from first chunk)
-                // If group 0, we might have some.
-
                 const group_id = group.group_id;
 
+                // Check if already full from initial chunk
+                const manifestGroup = State.test.meta.manifest.groups.find(mg => mg.group_id === group_id);
+                const expected = manifestGroup?.expected_mondai_count || 0;
+
+                if (group.mondai.length >= expected) {
+                    console.log(`Group ${group_id} already has ${group.mondai.length}/${expected} items.`);
+                    continue;
+                }
+
+                let done = false;
                 while (!done) {
-                    // Check if we have enough?
-                    // We just fetch next chunk.
                     try {
-                        // Request next 3 items
                         const res = await Api.fetchExamChunk(instanceKey, group_id, 3);
 
                         if (res.chunk && res.chunk.length > 0) {
                             group.mondai.push(...res.chunk);
                             this.updateNavigationButtons();
+
+                            // Update UI if current group
+                            if (State.currentGroupIndex === gIdx) {
+                                // Maybe trigger render if we were waiting?
+                            }
                         }
 
                         done = res.done;
                         if (done) console.log(`Group ${group_id} fully loaded.`);
-
-                        // Small delay to be nice to server/rate limits
                         await new Promise(r => setTimeout(r, 500));
 
                     } catch (e) {
                         console.error(`Error loading chunk for ${group_id}:`, e);
-                        // Retry once then skip? Or abort?
-                        // Simple retry logic
-                        await new Promise(r => setTimeout(r, 2000));
-                        // If it fails again, we might stop this group loop or continue
+                        done = true; // Stop loop on error to avoid infinite retry
                     }
                 }
             }
@@ -2318,6 +2330,11 @@
         },
 
         getTotalMondaiCount() {
+            // V2: Use manifest for total count (as mondai are loaded lazily)
+            if (State.test.meta?.manifest) {
+                return State.test.meta.manifest.groups.reduce((sum, g) => sum + (g.expected_mondai_count || 0), 0);
+            }
+            // V1 / Fallback
             return State.test.groups.reduce((sum, g) => sum + g.mondai.length, 0);
         },
 
@@ -2593,6 +2610,30 @@
 
                     const feedback = await Api.quickGradeV2(State.currentInstanceKey, State.answers);
                     feedback.grading_mode = 'quick';
+
+                    // Transform by_question (Object) to Array for ReviewUI
+                    // And merge with local content (which has prompts/choices but maybe not answers)
+                    const questionsWithAnswers = [];
+                    State.test.groups.forEach(group => {
+                        group.mondai.forEach(mondai => {
+                            mondai.items.forEach(item => {
+                                const result = feedback.by_question[item.id];
+                                if (result) {
+                                    questionsWithAnswers.push({
+                                        id: item.id,
+                                        is_correct: result.correct,
+                                        user_answer_index: State.answers[item.id],
+                                        // correct_index: item.answer_index, // Likely unavailable in V2 (Sanitized)
+                                        prompt: item.prompt,
+                                        choices: item.choices,
+                                        key_point_vi: item.explain_brief || '',
+                                        tags: item.tags
+                                    });
+                                }
+                            });
+                        });
+                    });
+                    feedback.by_question = questionsWithAnswers;
 
                     State.feedback = feedback;
                     await this.saveToHistory(feedback);
