@@ -281,14 +281,18 @@ async function initDb() {
       `CREATE INDEX IF NOT EXISTS idx_published_parts_exam ON published_exam_parts(published_exam_id)`
     ];
 
-    console.log(`[DB] Running ${migrations.length} migrations...`);
+    console.log(`[DB] Running migrations (combined)...`);
 
-    for (const migration of migrations) {
-      if (sql) {
-        await sql(migration);
-      } else {
-        await pool.query(migration);
-      }
+    // Combine all migrations into one single SQL string
+    // This significantly reduces cold start time on Vercel by making only 1 HTTP request instead of 30+
+    const combinedMigration = migrations.join(';\n');
+
+    if (sql) {
+      // Use neon() transaction capability if available, or just single combined query
+      // neon() supports multi-statement queries
+      await sql(combinedMigration);
+    } else {
+      await pool.query(combinedMigration);
     }
 
     console.log('Database initialized successfully');
