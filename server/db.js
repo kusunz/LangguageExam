@@ -1,14 +1,23 @@
-// Use Neon serverless driver on Vercel for better cold start handling
+// Database module with Neon DB mode support
+// DB_MODE: 'neon' = strict DB-required mode, 'auto' = fallback allowed
+
+const DB_MODE = process.env.DB_MODE || 'auto';
+const IS_NEON_MODE = DB_MODE === 'neon';
 const IS_VERCEL = process.env.VERCEL === '1' || !!process.env.VERCEL_ENV;
 
 let pool = null;
 let sql = null;
+let driverType = 'none';
+
+console.log(`[DB] Mode: ${DB_MODE}, Neon strict: ${IS_NEON_MODE}`);
 
 try {
-  if (IS_VERCEL && process.env.DATABASE_URL) {
+  // In Neon mode or on Vercel, prefer serverless driver
+  if ((IS_NEON_MODE || IS_VERCEL) && process.env.DATABASE_URL) {
     const neonModule = require('@neondatabase/serverless');
     sql = neonModule.neon(process.env.DATABASE_URL);
-    console.log('[DB] Using @neondatabase/serverless driver');
+    driverType = 'neon-serverless';
+    console.log('[DB] Driver: @neondatabase/serverless');
   } else if (process.env.DATABASE_URL) {
     const pg = require('pg');
     pool = new pg.Pool({
@@ -18,9 +27,13 @@ try {
       idleTimeoutMillis: 30000,
       max: 10
     });
-    console.log('[DB] Using pg driver');
+    driverType = 'pg';
+    console.log('[DB] Driver: pg Pool');
   } else {
-    console.log('[DB] No DATABASE_URL set');
+    console.log('[DB] No DATABASE_URL configured');
+    if (IS_NEON_MODE) {
+      console.error('[DB] FATAL: Neon mode requires DATABASE_URL');
+    }
   }
 } catch (e) {
   console.error('[DB] Driver creation error:', e?.message || e);
@@ -148,22 +161,23 @@ async function initDb() {
           completed_at TIMESTAMPTZ
         )`,
 
-        // Pool snapshots table (V2)
+        // Pool snapshots table (V2) - uses date_ymd TEXT for consistency
         `CREATE TABLE IF NOT EXISTS pool_snapshots (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           exam_id TEXT NOT NULL,
           level TEXT NOT NULL,
           mode TEXT NOT NULL,
-          snapshot_date DATE NOT NULL,
+          date_ymd TEXT NOT NULL,
           status TEXT NOT NULL DEFAULT 'ready',
           seed BIGINT,
           prompt_hash TEXT,
           model TEXT,
           params JSONB,
-          UNIQUE(exam_id, level, mode, snapshot_date)
+          UNIQUE(exam_id, level, mode, date_ymd)
         )`,
         `CREATE INDEX IF NOT EXISTS idx_pool_snapshots_lookup
-          ON pool_snapshots(exam_id, level, mode, snapshot_date)`,
+          ON pool_snapshots(exam_id, level, mode, date_ymd)`,
+
 
         // Mondai bank table (V2)
         `CREATE TABLE IF NOT EXISTS mondai_bank (
@@ -306,4 +320,22 @@ async function initDb() {
   return initPromise;
 }
 
-module.exports = { pool, sql, query, initDb };
+/**
+ * Check if DB is configured and init has been attempted
+ */
+function isDbReady() {
+  return !!(pool || sql);
+}
+
+module.exports = {
+  pool,
+  sql,
+  query,
+  initDb,
+  isDbReady,
+  DB_MODE,
+  IS_NEON_MODE,
+  IS_VERCEL,
+  driverType
+};
+

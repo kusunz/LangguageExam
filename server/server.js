@@ -12,6 +12,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { createRemoteJWKSet, jwtVerify } = require('jose');
 const db = require('./db');
+const { IS_NEON_MODE, DB_MODE } = db;
 const {
   JLPT_READING_TYPES,
   READING_TIME_BUDGET,
@@ -21,12 +22,8 @@ const {
 const { createClient } = require('@deepgram/sdk');
 const DEFAULT_GEMINI_MODEL = process.env.DEFAULT_GEMINI_MODEL || 'gemini-3-pro-preview';
 
-// Initialize Database
-let IS_DB_AVAILABLE = false;
-db.initDb().then(success => {
-  IS_DB_AVAILABLE = success;
-  if (!success) console.log('⚠️ Running with File System storage fallback');
-}).catch(console.error);
+// DB availability is now checked via db.initDb() at usage points
+// In Neon mode, server fails fast at boot (see bottom of file)
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -157,10 +154,17 @@ app.post('/api/me', authMiddleware, (req, res) => {
 // ============ DB Helper Functions ============
 
 async function loadUserData(userId, email) {
-  // If DB is NOT available, return default data (no persistent storage)
-  if (!IS_DB_AVAILABLE) {
-    console.log(`[WARN] DB unavailable, returning ephemeral data for user ${userId}`);
-    // On Vercel/cloud, just return default without file ops
+  // Check DB availability via init
+  const dbOk = await db.initDb();
+
+  // In Neon mode, DB must be available
+  if (IS_NEON_MODE && !dbOk) {
+    throw new Error('DB required in Neon mode but unavailable');
+  }
+
+  // Fallback for auto mode when DB not available
+  if (!dbOk) {
+    console.log(`[WARN] DB unavailable (mode=${DB_MODE}), returning ephemeral data for user ${userId}`);
     return {
       history: [],
       mistakeBook: [],
@@ -203,10 +207,18 @@ async function loadUserData(userId, email) {
 }
 
 async function saveUserData(userId, data) {
-  // If DB unavailable, skip save entirely (ephemeral mode)
-  if (!IS_DB_AVAILABLE) {
+  // Check DB availability via init
+  const dbOk = await db.initDb();
+
+  // In Neon mode, DB must be available
+  if (IS_NEON_MODE && !dbOk) {
+    throw new Error('DB required in Neon mode but unavailable');
+  }
+
+  // Skip save if DB unavailable (ephemeral mode)
+  if (!dbOk) {
     console.log(`[WARN] DB unavailable, skipping save for user ${userId}`);
-    return; // No-op, data is ephemeral
+    return;
   }
 
   if (IS_DEMO_MODE || userId === 'demo-user') return;
@@ -518,10 +530,6 @@ function generateMondaiHash(mondai) {
 
 // ============ V2 Pool Architecture ============
 
-// Column name for snapshot date - backward compatible with existing DB schema
-// Production DB uses 'date_ymd', change to 'snapshot_date' after running migrations
-const SNAPSHOT_DATE_COL = 'date_ymd';
-
 /**
  * Ensure pool snapshot exists and has sufficient items
  * Lazy generation if missing or insufficient
@@ -534,10 +542,11 @@ async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
   const TARGET_PER_BUCKET = 50; // Start small for cost control (Plan said 100)
 
   // 1. UPSERT Snapshot (race-safe)
+  // Uses date_ymd column (consistent with db.js)
   const snapshotRes = await db.query(`
-    INSERT INTO pool_snapshots (exam_id, level, mode, ${SNAPSHOT_DATE_COL})
+    INSERT INTO pool_snapshots (exam_id, level, mode, date_ymd)
     VALUES ($1, $2, $3, $4)
-    ON CONFLICT (exam_id, level, mode, ${SNAPSHOT_DATE_COL})
+    ON CONFLICT (exam_id, level, mode, date_ymd)
     DO UPDATE SET exam_id = EXCLUDED.exam_id
     RETURNING id
   `, [examSpec.exam_id, level, mode, dateYmd]);
@@ -2702,6 +2711,15 @@ app.post('/api/exam/prefetch-tts', authMiddleware, async (req, res) => {
     const { items } = req.body;
     if (!Array.isArray(items)) return res.status(400).json({ error: 'Items array required' });
 
+    // Wait for DB initialization (required for metrics logging)
+    if (!(await db.initDb())) {
+      // In auto mode, we might proceed without metrics? 
+      // But prefetch is a "premium" feature likely requiring DB. 
+      // Let's enforce it or log warning.
+      // Given plan says V2 endpoints must check DB.
+      return res.status(503).json({ error: 'DB unavailable' });
+    }
+
     let cachedCount = 0;
     const scheduled = [];
 
@@ -2779,10 +2797,23 @@ app.get('*', (req, res) => {
 
 // Start server
 if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`Language Exam Server running on http://localhost:${PORT}`);
-    console.log(`Auth Mode: ${IS_DEMO_MODE ? 'DEMO MODE (no auth required)' : 'Privy (' + PRIVY_APP_ID + ')'}`);
-  });
+  (async () => {
+    // Fail-fast DB check for Neon mode
+    if (IS_NEON_MODE) {
+      console.log('[Boot] Neon mode active. Checking DB connection...');
+      const ok = await db.initDb();
+      if (!ok) {
+        console.error('[FATAL] Neon mode requires DB connection. Exiting.');
+        process.exit(1);
+      }
+    }
+
+    app.listen(PORT, () => {
+      console.log(`Language Exam Server running on http://localhost:${PORT}`);
+      console.log(`DB Mode: ${DB_MODE} (Strict: ${IS_NEON_MODE})`);
+      console.log(`Auth Mode: ${IS_DEMO_MODE ? 'DEMO MODE (no auth required)' : 'Privy (' + PRIVY_APP_ID + ')'}`);
+    });
+  })();
 }
 
 module.exports = app;
