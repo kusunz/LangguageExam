@@ -40,6 +40,14 @@ app.set('trust proxy', 1);
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+// JSON Parse Error Handler
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    console.error(`[JSON Error] ${req.path}: ${err.message}`);
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
+  next();
+});
 app.use(express.static(path.join(__dirname, '../web')));
 
 // Rate limiting
@@ -137,6 +145,12 @@ async function authMiddleware(req, res, next) {
     return res.status(401).json({ error: 'Invalid token' });
   }
 }
+
+const DEFAULT_MODES = {
+  basic: { question_scale: 0.5, time_scale: 0.5 },
+  standard: { question_scale: 1.0, time_scale: 1.0 },
+  official: { question_scale: 1.0, time_scale: 1.0 }
+};
 
 // ============ Auth Endpoints ============
 
@@ -701,8 +715,10 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
     }
   };
 
-  const modeConfig = examSpec.modes[mode];
-  const qScale = modeConfig.question_scale;
+
+
+  const modeConfig = examSpec.modes?.[mode] || DEFAULT_MODES[mode] || DEFAULT_MODES.official || { question_scale: 1.0, time_scale: 1.0 };
+  const qScale = modeConfig.question_scale || 1.0;
 
   // Track used hashes to avoid duplicates across exam
   const usedHashes = new Set();
@@ -2586,7 +2602,7 @@ async function deliverNextChunk(instanceKey, want) {
 // POST /api/exam/start
 app.post('/api/exam/start', authMiddleware, async (req, res) => {
   try {
-    const { examSpec, mode, setNo } = req.body;
+    const { examSpec, mode, setNo, force_new } = req.body;
     const userId = req.user.userId;
 
     // Wait for DB initialization
@@ -2598,47 +2614,106 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
     const plan = user.plan || 'free';
     const level = examSpec.level || examSpec.default_level;
 
+    // Normalize Exam Spec (prevent crashes)
+    if (!examSpec.modes) examSpec.modes = DEFAULT_MODES;
+
     // Deterministic Set No logic
     const today = new Date().toISOString().split('T')[0];
     let finalSetNo = setNo;
-    if (finalSetNo === undefined) {
+
+    // If force_new requested, rotate set_no to ensure uniqueness
+    if (force_new) {
+      // Using monotonic timestamp % 100000 to keep it as integer but unique enough per user session
+      finalSetNo = Math.floor(Date.now() / 1000) % 100000;
+    } else if (finalSetNo === undefined) {
       const hash = crypto.createHash('sha256')
         .update(`${userId}-${level}-${mode}-${today}`)
         .digest('hex');
       finalSetNo = parseInt(hash.substring(0, 8), 16) % 100;
     }
 
-    // Ensure Pool
-    const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
+    // 1. Check if instance already exists (Idempotency)
+    // Optimization: Avoid expensive blueprint build if we can reuse.
+    let instanceKey, blueprint;
 
-    // Build Blueprint
-    const seed = crypto.randomUUID();
-    const blueprint = await buildExamBlueprint(examSpec, level, mode, seed, finalSetNo, plan, snapshotId);
+    // Helper to fetch existing
+    const fetchExisting = async () => {
+      const res = await db.query(
+        'SELECT instance_key, blueprint FROM exam_instances_cache WHERE user_id=$1 AND exam_id=$2 AND level=$3 AND mode=$4 AND set_no=$5',
+        [userId, examSpec.exam_id, level, mode, finalSetNo]
+      );
+      return res.rows[0];
+    };
 
-    // Extract Answer Keys for secure grading
-    const answerKeys = {};
-    // Note: We need to iterate blueprint and load hashes? 
-    // Optimization: We can load them lazily during grading or store now.
-    // Storing now requires querying all hashes. 
-    // Let's store EMPTY now and load on demand or just graded from hashes in quickgrade.
-    // Better: quickgrade looks up hashes from blueprint.
+    const existingRow = await fetchExisting();
 
-    const instanceKey = crypto.randomUUID();
-    await db.query(`
-      INSERT INTO exam_instances_cache 
-      (instance_key, user_id, exam_id, level, mode, plan, seed, set_no, blueprint, delivery_state, answer_keys)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-    `, [
-      instanceKey, userId, examSpec.exam_id, level, mode, plan, seed, finalSetNo,
-      JSON.stringify(blueprint),
-      JSON.stringify({ cursors: {} }),
-      JSON.stringify(answerKeys)
-    ]);
+    if (existingRow) {
+      // REUSE EXISTING
+      console.log(`[Exam] Reusing existing instance for user ${userId}, set ${finalSetNo}`);
+      instanceKey = existingRow.instance_key;
+      blueprint = parseJsonb(existingRow.blueprint);
 
-    await db.query(`
-      INSERT INTO attempts (instance_key, user_id, status)
-      VALUES ($1, $2, 'active')
-    `, [instanceKey, userId]);
+      // Extend expiry AND RESET delivery state (as requested)
+      await db.query(`
+            UPDATE exam_instances_cache 
+            SET expires_at = (CURRENT_TIMESTAMP + INTERVAL '3 days'),
+                delivery_state = $2
+            WHERE instance_key = $1
+        `, [instanceKey, JSON.stringify({ cursors: {} })]);
+
+    } else {
+      // CREATE NEW
+
+      // Ensure Pool (fast/lazy)
+      const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
+
+      // Build Blueprint
+      const seed = crypto.randomUUID();
+      const newBlueprint = await buildExamBlueprint(examSpec, level, mode, seed, finalSetNo, plan, snapshotId);
+      const newInstanceKey = crypto.randomUUID();
+      const answerKeys = {}; // Loaded lazily
+
+      try {
+        // Insert with ON CONFLICT DO NOTHING (Race condition handling)
+        // If conflict occurs (someone else created it while we were building), we catch 23505 or handle via row count.
+        await db.query(`
+              INSERT INTO exam_instances_cache 
+              (instance_key, user_id, exam_id, level, mode, plan, seed, set_no, blueprint, delivery_state, answer_keys)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            `, [
+          newInstanceKey, userId, examSpec.exam_id, level, mode, plan, seed, finalSetNo,
+          JSON.stringify(newBlueprint),
+          JSON.stringify({ cursors: {} }),
+          JSON.stringify(answerKeys)
+        ]);
+
+        instanceKey = newInstanceKey;
+        blueprint = newBlueprint;
+      } catch (e) {
+        // Race condition: Conflict on unique key?
+        if (e.code === '23505') {
+          console.log('[Exam] Race condition on insert, reusing winner.');
+          const winnerRow = await fetchExisting();
+          if (winnerRow) {
+            instanceKey = winnerRow.instance_key;
+            blueprint = parseJsonb(winnerRow.blueprint);
+            // Reset state for the winner too? user implies "start fresh"
+            await db.query(`UPDATE exam_instances_cache SET delivery_state = $2 WHERE instance_key = $1`, [instanceKey, JSON.stringify({ cursors: {} })]);
+          } else {
+            throw e; // Should not happen
+          }
+        } else {
+          throw e;
+        }
+      }
+
+      // Ensure attempt record exists
+      await db.query(`
+          INSERT INTO attempts (instance_key, user_id, status)
+          VALUES ($1, $2, 'active')
+          ON CONFLICT DO NOTHING
+        `, [instanceKey, userId]);
+    }
 
     // First chunk (first 2 items of first group)
     const firstGroup = blueprint.groups[0];
