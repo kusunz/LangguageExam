@@ -556,14 +556,14 @@ const WARM_TARGET_PER_BUCKET = 50;
 
 /**
  * Ensure pool snapshot exists (Meta only)
- * Does NOT actively fill pool (Lazy generation is handled by blueprint builder)
+ * Does NOT actively fill pool - on-demand generation in buildExamBlueprint handles this
  */
 async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
   // Wait for DB initialization instead of checking boolean
   const ok = await db.initDb();
   if (!ok) return null;
 
-  // 1. UPSERT Snapshot (race-safe)
+  // UPSERT Snapshot (race-safe)
   const snapshotRes = await db.query(`
     INSERT INTO pool_snapshots (exam_id, level, mode, date_ymd)
     VALUES ($1, $2, $3, $4)
@@ -573,50 +573,9 @@ async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
   `, [examSpec.exam_id, level, mode, dateYmd]);
 
   const snapshotId = snapshotRes.rows[0]?.id;
-  const MIN_READY_PER_BUCKET = 2; // Minimal buffer for fast start
 
-  // 2. Minimal Buffer Check (Non-blocking usually, but ensures at least SOMETHING exists)
-  // We check only the first few buckets required for start?
-  // Actually, let's just do a quick scan. If ANY bucket is totally empty, we might want 1-2 items.
-  // BUT: user requirement says "Do not fill TARGET_PER_BUCKET synchronously".
-  // It says "Only generate enough to reach MIN_READY_PER_BUCKET".
-
-  // Optimization: Only check buckets relevant to the FIRST chunk if possible?
-  // For simplicity and safety: Check all, but threshold is very low (2).
-
-  // NOTE: To make this TRULY fast, we launch this asynchronously or make it extremely targeted.
-  // If we check *every* bucket sequentially, it might still take time if many are empty.
-  // Compromise: We let the Blueprint Builder trigger on-demand generation.
-  // HOWEVER, the user specifically requested: "Implement minimal 'ready threshold' ... in ensurePoolSnapshot".
-  // So we will do it here, but efficiently.
-
-  const promises = [];
-
-  for (const group of examSpec.groups) {
-    for (const mondaiDef of group.mondai) {
-      if (!mondaiDef.types?.[0]) continue;
-
-      promises.push((async () => {
-        const primaryType = mondaiDef.types[0];
-        const bucketKey = getBucketKey(group.group_id, mondaiDef.mondai_id, primaryType);
-
-        const countRes = await db.query(`SELECT COUNT(*) FROM pool_snapshot_items WHERE snapshot_id=$1 AND bucket_key=$2`, [snapshotId, bucketKey]);
-        const current = parseInt(countRes.rows[0]?.count || 0);
-
-        if (current < MIN_READY_PER_BUCKET) {
-          console.log(`[Pool] Preroll buffer for ${bucketKey}: ${current} -> ${MIN_READY_PER_BUCKET}`);
-          await generateMondaiForBucket({
-            examSpec, level, mode, group, mondaiDef, bucketKey, snapshotId,
-            count: MIN_READY_PER_BUCKET - current,
-            plan
-          });
-        }
-      })());
-    }
-  }
-
-  // We await all essentially in parallel to speed up "warmup"
-  await Promise.all(promises);
+  // NOTE: No preroll here - on-demand generation in buildExamBlueprint handles missing items
+  // This ensures /api/exam/start returns quickly without blocking Gemini calls
 
   return snapshotId;
 }
@@ -689,6 +648,93 @@ async function generateMondaiForBucket(params) {
       remaining -= 1;
     }
   }
+}
+
+/**
+ * Warm pool buckets with bounded limits (safe for serverless)
+ * @param {string} snapshotId - Pool snapshot ID
+ * @param {object} examSpec - Exam specification
+ * @param {string} level - JLPT level
+ * @param {string} mode - Exam mode
+ * @param {string} dateYmd - Date string YYYY-MM-DD
+ * @param {object} opts - Options: targetPerBucket, maxBuckets, maxGenerateTotal
+ * @returns {object} Stats: { bucketsProcessed, generated, skipped }
+ */
+async function warmPool(snapshotId, examSpec, level, mode, dateYmd, opts = {}) {
+  const {
+    targetPerBucket = WARM_TARGET_PER_BUCKET,
+    maxBuckets = 10,
+    maxGenerateTotal = 20
+  } = opts;
+
+  let bucketsProcessed = 0;
+  let generated = 0;
+  let skipped = 0;
+
+  // Gather all buckets from examSpec
+  const buckets = [];
+  for (const group of examSpec.groups) {
+    for (const mondaiDef of group.mondai) {
+      if (!mondaiDef.types?.[0]) continue;
+      const primaryType = mondaiDef.types[0];
+      const bucketKey = getBucketKey(group.group_id, mondaiDef.mondai_id, primaryType);
+      buckets.push({ group, mondaiDef, bucketKey });
+    }
+  }
+
+  // Process up to maxBuckets
+  for (const bucket of buckets) {
+    if (bucketsProcessed >= maxBuckets) break;
+    if (generated >= maxGenerateTotal) break;
+
+    const { group, mondaiDef, bucketKey } = bucket;
+
+    // Check current count in bucket
+    const countRes = await db.query(
+      `SELECT COUNT(*) FROM pool_snapshot_items WHERE snapshot_id=$1 AND bucket_key=$2`,
+      [snapshotId, bucketKey]
+    );
+    const current = parseInt(countRes.rows[0]?.count || 0);
+
+    if (current >= targetPerBucket) {
+      skipped++;
+      continue;
+    }
+
+    // Calculate how many to generate (bounded by remaining quota)
+    const needed = Math.min(targetPerBucket - current, maxGenerateTotal - generated);
+    if (needed <= 0) {
+      skipped++;
+      continue;
+    }
+
+    console.log(`[Warmup] Filling ${bucketKey}: ${current} -> ${current + needed} (target: ${targetPerBucket})`);
+
+    // Generate in small batches
+    const batchSize = Math.min(needed, 5);
+    let batchGenerated = 0;
+
+    for (let i = 0; i < needed && generated < maxGenerateTotal; i += batchSize) {
+      const count = Math.min(batchSize, needed - i, maxGenerateTotal - generated);
+
+      try {
+        await generateMondaiForBucket({
+          examSpec, level, mode, group, mondaiDef, bucketKey, snapshotId,
+          count,
+          plan: 'warmup'
+        });
+        batchGenerated += count;
+        generated += count;
+      } catch (e) {
+        console.error(`[Warmup] Error generating for ${bucketKey}:`, e?.message || e);
+        break;
+      }
+    }
+
+    bucketsProcessed++;
+  }
+
+  return { bucketsProcessed, generated, skipped };
 }
 
 /**
@@ -2490,6 +2536,99 @@ function buildTtsTextPrompt(text, language) {
 }
 
 // ============ V2 Endpoints (Pool Architectre) ============
+
+// ============ Admin Warmup Endpoint ============
+
+/**
+ * GET /api/admin/warmup - Pre-fill pool buckets (for cron/admin use)
+ * Authentication: x-warmup-secret header OR ?secret= query param
+ * Params: exam_id, level, mode, date_ymd, target, max_buckets, max_gen
+ */
+app.get('/api/admin/warmup', async (req, res) => {
+  const startTime = Date.now();
+
+  // Authenticate via secret
+  const secret = req.headers['x-warmup-secret'] || req.query.secret;
+  const expectedSecret = process.env.WARMUP_SECRET;
+
+  if (!expectedSecret || secret !== expectedSecret) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    // Wait for DB
+    if (!(await db.initDb())) {
+      return res.status(503).json({ error: 'DB unavailable' });
+    }
+
+    // Parse params with defaults
+    const examId = req.query.exam_id || 'jlpt_base_N2';
+    const level = req.query.level || 'N2';
+    const mode = req.query.mode || 'standard';
+    const dateYmd = req.query.date_ymd || new Date().toISOString().split('T')[0];
+    const targetPerBucket = parseInt(req.query.target) || 50;
+    const maxBuckets = parseInt(req.query.max_buckets) || 10;
+    const maxGenerateTotal = parseInt(req.query.max_gen) || 20;
+
+    // Load exam spec (simplified - uses default N2 structure)
+    // In production, this should load from a config or DB
+    const examSpec = {
+      exam_id: examId,
+      level: level,
+      language: 'ja-JP',
+      display_name_vi: `JLPT ${level}`,
+      modes: DEFAULT_MODES,
+      groups: [
+        {
+          group_id: 'vocab',
+          title_vi: 'Từ vựng - Ngữ pháp',
+          mondai: [
+            { mondai_id: 'M1', title_vi: 'Đọc Hán tự', count_official: 5, types: ['kanji_reading'] },
+            { mondai_id: 'M2', title_vi: 'Viết Hán tự', count_official: 5, types: ['kanji_writing'] },
+            { mondai_id: 'M3', title_vi: 'Ghép từ', count_official: 5, types: ['word_formation'] },
+            { mondai_id: 'M4', title_vi: 'Nghĩa từ vựng', count_official: 7, types: ['context_vocab'] },
+            { mondai_id: 'M5', title_vi: 'Cách dùng', count_official: 5, types: ['usage'] },
+            { mondai_id: 'M6', title_vi: 'Chọn ngữ pháp', count_official: 5, types: ['grammar_select'] },
+            { mondai_id: 'M7', title_vi: 'Sắp xếp câu', count_official: 5, types: ['sentence_order'] },
+            { mondai_id: 'M8', title_vi: 'Điền ngữ pháp', count_official: 5, types: ['grammar_cloze'] }
+          ]
+        }
+      ]
+    };
+
+    console.log(`[Warmup] Starting for ${examId} ${level} ${mode} on ${dateYmd}`);
+
+    // Ensure snapshot exists
+    const snapshotId = await ensurePoolSnapshot(examSpec, level, dateYmd, 'warmup', mode);
+    if (!snapshotId) {
+      return res.status(500).json({ error: 'Failed to create snapshot' });
+    }
+
+    // Run warmPool with bounded limits
+    const stats = await warmPool(snapshotId, examSpec, level, mode, dateYmd, {
+      targetPerBucket,
+      maxBuckets,
+      maxGenerateTotal
+    });
+
+    const durationMs = Date.now() - startTime;
+
+    console.log(`[Warmup] Complete: ${stats.bucketsProcessed} buckets, ${stats.generated} generated in ${durationMs}ms`);
+
+    res.json({
+      snapshotId,
+      date_ymd: dateYmd,
+      bucketsProcessed: stats.bucketsProcessed,
+      generated: stats.generated,
+      skipped: stats.skipped,
+      durationMs
+    });
+
+  } catch (err) {
+    console.error('[Warmup] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 /**
  * Helper: Deliver next chunk for an instance

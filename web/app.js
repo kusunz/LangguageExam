@@ -1630,7 +1630,8 @@
                         mode: State.currentMode,
                         start_time: new Date().toISOString(),
                         time_limits: State.examSpec.scaled_time_limits || State.examSpec.official_time_limits_sec,
-                        language: 'vi-VN'
+                        language: 'vi-VN',
+                        manifest: res.manifest  // Store manifest for processChunk/loadRemainingChunksV2
                     },
                     groups: res.manifest.groups.map(g => ({
                         group_id: g.group_id,
