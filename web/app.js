@@ -183,6 +183,18 @@
     }
 
     // ============================================
+    // TTS Language Detection
+    // ============================================
+    function getExamLanguage(examId) {
+        if (!examId) return 'ja-JP'; // default
+        const id = examId.toLowerCase();
+        if (id.includes('jlpt') || id.includes('nat')) return 'ja-JP';
+        if (id.includes('hsk') || id.includes('yct')) return 'zh-CN';
+        if (id.includes('ielts') || id.includes('toeic') || id.includes('toefl')) return 'en-US';
+        return 'ja-JP'; // fallback
+    }
+
+    // ============================================
     // API Client
     // ============================================
     const Api = {
@@ -1717,7 +1729,7 @@
                         mode: State.currentMode,
                         start_time: new Date().toISOString(),
                         time_limits: State.examSpec.scaled_time_limits || State.examSpec.official_time_limits_sec,
-                        language: 'vi-VN',
+                        language: getExamLanguage(State.examSpec.exam_id),
                         manifest: res.manifest  // Store manifest for processChunk/loadRemainingChunksV2
                     },
                     groups: res.manifest.groups.map(g => ({
@@ -2342,7 +2354,7 @@
             if (scriptText) {
                 console.log('TPS: Starting new TTS stream');
                 this.updateAudioButton('loading');
-                const lang = State.test.meta.language || 'ja-JP';
+                const lang = State.test.meta.language || getExamLanguage(State.test.meta.exam_id);
 
                 // Generate deterministic audioKey for this mondai
                 const groupId = State.test.groups?.[State.currentGroupIndex]?.group_id || 'unknown-group';
