@@ -651,6 +651,7 @@
             State.isTestPaused = false;
             State.feedback = null;
             State.ttsAudio = null;
+            State.demoBtn.disabled = false;
 
             // Reset login button states
             const demoBtn = $('#btn-demo-login');
@@ -957,6 +958,16 @@
     // ============================================
     // TTS Manager
     // ============================================
+    // FNV-1a 32-bit hash for deterministic audio keys
+    function fnv1a32(str) {
+        let h = 0x811c9dc5;
+        for (let i = 0; i < str.length; i++) {
+            h ^= str.charCodeAt(i);
+            h = Math.imul(h, 0x01000193);
+        }
+        return (h >>> 0).toString(16).padStart(8, '0');
+    }
+
     const TTSManager = {
         audioQueue: [],      // Queue of audio blobs to play
         isPlaying: false,    // Currently playing audio
@@ -965,6 +976,8 @@
         totalSegments: 0,    // Total segments expected
         combinedBlob: null,  // Combined audio for seek/timer (hybrid mode)
         clientCache: new Map(), // Client-side TTS cache
+        currentAudioKey: null,  // Key for current mondai audio session
+        abortController: null,  // AbortController for fetch requests
 
         // Simple hash for client cache
         hashText(text) {
@@ -984,9 +997,24 @@
             return matches && matches.length >= 2;
         },
 
-        async playAudio(text, language) {
+        async playAudio(text, language, audioKey = null) {
             const ttsMode = $('#tts-mode').value;
             const statusEl = $('#audio-status');
+
+            // Create deterministic audioKey if not provided
+            const newAudioKey = audioKey || `${language}|${fnv1a32(text)}`;
+
+            // If key changed, stop old session and start new one
+            if (this.currentAudioKey && this.currentAudioKey !== newAudioKey) {
+                console.log('TTS: Audio key changed, stopping old session', {
+                    old: this.currentAudioKey,
+                    new: newAudioKey
+                });
+                this.stop();
+            }
+
+            // Set current key
+            this.currentAudioKey = newAudioKey;
 
             try {
                 statusEl.textContent = 'Đang tải...';
@@ -1455,6 +1483,13 @@
         },
 
         stop() {
+            // Abort any ongoing fetch requests
+            if (this.abortController) {
+                try {
+                    this.abortController.abort();
+                } catch (_) { }
+                this.abortController = null;
+            }
             if (State.ttsAudio) {
                 State.ttsAudio.pause();
                 if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
@@ -1469,6 +1504,7 @@
             this.isPaused = false;
             this.currentIndex = 0;
             this.combinedBlob = null;
+            this.currentAudioKey = null;
         },
 
         // Helper to resume streaming safely
@@ -2256,7 +2292,13 @@
                 console.log('TPS: Starting new TTS stream');
                 this.updateAudioButton('loading');
                 const lang = State.test.meta.language || 'ja-JP';
-                TTSManager.playAudio(scriptText, lang);
+
+                // Generate deterministic audioKey for this mondai
+                const groupId = State.test.groups?.[State.currentGroupIndex]?.group_id || 'unknown-group';
+                const mondaiId = mondaiData?.mondai?.mondai_id || String(State.currentMondaiIndex);
+                const audioKey = `${lang}|${groupId}|${mondaiId}|${fnv1a32(scriptText)}`;
+
+                TTSManager.playAudio(scriptText, lang, audioKey);
             } else {
                 showToast('Không có dữ liệu âm thanh cho bài này', 'info');
             }
@@ -2447,6 +2489,10 @@
             if (direction > 0 && !this.isMondaiLoaded(newIndex)) {
                 return;
             }
+
+            // Stop current audio session before navigating
+            TTSManager.stop();
+            this.updateAudioButton('idle');
 
             if (newIndex >= 0 && newIndex < total) {
                 // Check if crossing group boundary
