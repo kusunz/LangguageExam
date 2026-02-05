@@ -250,33 +250,51 @@ async function saveUserData(userId, data) {
 }
 
 // Helper: Manage Sessions (Max 1 session per user - new login forces logout of previous)
-async function manageSession(userId, existingSessionId) {
-  // 1. Clean up expired sessions
-  await db.query('DELETE FROM sessions WHERE expires_at < NOW()');
+async function manageSession(userId, existingSessionId, email = '') {
+  try {
+    // Use transaction to ensure atomicity
+    await db.query('BEGIN');
 
-  // 2. Check if existing session is valid (must be a valid UUID)
-  const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(existingSessionId);
+    // 0. Ensure user exists (UPSERT) - prevents FK violation on sessions insert
+    await db.query(`
+      INSERT INTO users (id, email, data)
+      VALUES ($1, $2, '{}')
+      ON CONFLICT (id) DO UPDATE SET last_login_at = NOW()
+    `, [userId, email || '']);
 
-  if (existingSessionId && isUUID) {
-    const res = await db.query('SELECT id FROM sessions WHERE id = $1 AND user_id = $2', [existingSessionId, userId]);
-    if (res.rows.length > 0) {
-      // Refresh expiry (extend by 7 days)
-      await db.query("UPDATE sessions SET expires_at = NOW() + INTERVAL '7 days' WHERE id = $1", [existingSessionId]);
-      return existingSessionId;
+    // 1. Clean up expired sessions
+    await db.query('DELETE FROM sessions WHERE expires_at < NOW()');
+
+    // 2. Check if existing session is valid (must be a valid UUID)
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(existingSessionId);
+
+    if (existingSessionId && isUUID) {
+      const res = await db.query('SELECT id FROM sessions WHERE id = $1 AND user_id = $2', [existingSessionId, userId]);
+      if (res.rows.length > 0) {
+        // Refresh expiry (extend by 7 days)
+        await db.query("UPDATE sessions SET expires_at = NOW() + INTERVAL '7 days' WHERE id = $1", [existingSessionId]);
+        await db.query('COMMIT');
+        return existingSessionId;
+      }
     }
+
+    // 3. Delete ALL existing sessions for this user (enforce 1 session limit)
+    await db.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
+
+    // 4. Create new session
+    const newSessionRes = await db.query(`
+      INSERT INTO sessions (user_id, token, expires_at)
+      VALUES ($1, 'valid', NOW() + INTERVAL '7 days')
+      RETURNING id
+    `, [userId]);
+
+    await db.query('COMMIT');
+    return newSessionRes.rows[0].id;
+  } catch (err) {
+    await db.query('ROLLBACK').catch(() => { });
+    console.error('manageSession error:', err.code || 'UNKNOWN', err.message);
+    throw err;
   }
-
-  // 3. Delete ALL existing sessions for this user (enforce 1 session limit)
-  await db.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
-
-  // 4. Create new session
-  const newSessionRes = await db.query(`
-    INSERT INTO sessions (user_id, token, expires_at)
-    VALUES ($1, 'valid', NOW() + INTERVAL '7 days')
-    RETURNING id
-  `, [userId]);
-
-  return newSessionRes.rows[0].id;
 }
 
 // Get user data (Acts as Login/Session Init)
@@ -291,7 +309,7 @@ app.post('/api/user-data', authMiddleware, async (req, res) => {
     let activeSessionId = null;
     if (dbOk && req.user.userId !== 'demo-user') {
       try {
-        activeSessionId = await manageSession(req.user.userId, sessionId);
+        activeSessionId = await manageSession(req.user.userId, sessionId, req.user.email);
       } catch (e) {
         console.error('Session management failed:', e.message, e.code || '', e.detail || '');
         // Continue without session if DB fails momentarily
