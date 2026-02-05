@@ -293,7 +293,7 @@ app.post('/api/user-data', authMiddleware, async (req, res) => {
       try {
         activeSessionId = await manageSession(req.user.userId, sessionId);
       } catch (e) {
-        console.error('Session management failed:', e);
+        console.error('Session management failed:', e.message, e.code || '', e.detail || '');
         // Continue without session if DB fails momentarily
       }
     }
@@ -305,13 +305,24 @@ app.post('/api/user-data', authMiddleware, async (req, res) => {
     if (dbOk && req.user.userId !== 'demo-user') {
       try {
         await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [req.user.userId]);
-      } catch (e) { console.error('Update last_login failed:', e); }
+      } catch (e) {
+        console.error('Update last_login failed:', e.message, e.code || '');
+      }
     }
 
     res.json({ ...data, sessionId: activeSessionId });
   } catch (err) {
-    console.error('Load user data error:', err);
-    res.status(500).json({ error: 'Failed to load user data' });
+    console.error('Load user data error:', {
+      message: err.message,
+      code: err.code || 'UNKNOWN',
+      detail: err.detail || null,
+      stack: err.stack
+    });
+    res.status(500).json({
+      error: 'Failed to load user data',
+      code: err.code || 'UNKNOWN',
+      message: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 });
 
