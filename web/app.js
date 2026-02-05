@@ -2094,15 +2094,25 @@
 
             // Render audio player for listening
             const audioPlayer = $('#audio-player');
-            const hasAudio = mondai.items.some(item => item.media?.script_text);
+            // Listening Mode B: audio script is at mondai.media.script_text
+            const hasAudio = !!(mondai.media?.script_text ||
+                mondai.items.some(item => item.media?.script_text)); // Legacy fallback
             const audioScript = $('#audio-script');
             const btnShowScript = $('#btn-show-script');
 
             if (hasAudio) {
                 audioPlayer.classList.remove('hidden');
 
-                // Setup script
-                const scriptText = mondai.items.find(item => item.media?.script_text)?.media?.script_text;
+                // Setup script - prefer mondai.media.script_text (Mode B)
+                let scriptText = mondai.media?.script_text;
+                if (!scriptText) {
+                    // Legacy fallback: check items (log warning for dev)
+                    const legacyItem = mondai.items.find(item => item.media?.script_text);
+                    if (legacyItem?.media?.script_text) {
+                        scriptText = legacyItem.media.script_text;
+                        console.warn('[DEV] Audio script found at item level, should be at mondai.media.script_text');
+                    }
+                }
                 if (scriptText) {
                     btnShowScript.classList.remove('hidden');
                     audioScript.innerHTML = this.escapeHtml(scriptText).replace(/\n/g, '<br>');
@@ -2235,12 +2245,18 @@
 
             // 3. Initial Start (No audio yet)
             const mondaiData = this.getCurrentMondaiData();
-            const scriptItem = mondaiData?.mondai?.items?.find(item => item.media?.script_text);
-            if (scriptItem?.media?.script_text) {
+            // Listening Mode B: prefer mondai.media.script_text
+            let scriptText = mondaiData?.mondai?.media?.script_text;
+            if (!scriptText) {
+                // Legacy fallback
+                const legacyItem = mondaiData?.mondai?.items?.find(item => item.media?.script_text);
+                scriptText = legacyItem?.media?.script_text;
+            }
+            if (scriptText) {
                 console.log('TPS: Starting new TTS stream');
                 this.updateAudioButton('loading');
                 const lang = State.test.meta.language || 'ja-JP';
-                TTSManager.playAudio(scriptItem.media.script_text, lang);
+                TTSManager.playAudio(scriptText, lang);
             } else {
                 showToast('Không có dữ liệu âm thanh cho bài này', 'info');
             }
@@ -2477,9 +2493,59 @@
             return idx;
         },
 
+        // Count unanswered questions in current scope
+        countUnansweredInCurrentScope(scope = 'group') {
+            let items = [];
+
+            if (scope === 'group') {
+                // Count in current group only
+                const currentGroup = State.test.groups[State.currentGroupIndex];
+                if (currentGroup) {
+                    currentGroup.mondai.forEach(m => {
+                        if (m.items) items.push(...m.items);
+                    });
+                }
+            } else {
+                // Count all loaded items
+                State.test.groups.forEach(g => {
+                    if (g && g.mondai) {
+                        g.mondai.forEach(m => {
+                            if (m.items) items.push(...m.items);
+                        });
+                    }
+                });
+            }
+
+            return items.filter(item =>
+                State.answers[item.id] === undefined ||
+                State.answers[item.id] === null
+            ).length;
+        },
+
+        // Show confirmation for unanswered questions
+        async confirmUnansweredSubmit(count, isWholeTest = false) {
+            return new Promise((resolve) => {
+                const msg = isWholeTest
+                    ? `Bạn còn ${count} câu chưa trả lời. Bạn vẫn muốn nộp bài thi?`
+                    : `Bạn còn ${count} câu chưa trả lời. Bạn vẫn muốn nộp phần này?`;
+
+                // Use browser confirm for simplicity
+                resolve(confirm(msg));
+            });
+        },
+
         async moveToNextGroup() {
             // Prevent duplicate submissions
             if (this.isSubmitting) return;
+
+            // Check for unanswered questions before proceeding
+            const isLastGroup = State.currentGroupIndex === State.examSpec.groups.length - 1;
+            const unansweredCount = this.countUnansweredInCurrentScope(isLastGroup ? 'all' : 'group');
+
+            if (unansweredCount > 0) {
+                const confirmed = await this.confirmUnansweredSubmit(unansweredCount, isLastGroup);
+                if (!confirmed) return; // User cancelled, stay in test
+            }
 
             const submitBtn = $('#btn-submit-group');
             const originalText = submitBtn.textContent;

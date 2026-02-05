@@ -1,7 +1,7 @@
 # Dependencies
 node_modules/
 .agent/
-
+*.zip
 # Environment files
 .env
 .env.local

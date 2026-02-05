@@ -1103,6 +1103,9 @@ function validateGroupResult(group) {
   if (!Array.isArray(group.mondai) || group.mondai.length === 0) errors.push('missing_mondai');
   if (!Array.isArray(group.mondai)) return errors;
 
+  // Listening types for validation
+  const listeningTypes = ['listening_dialogue', 'listening_mono', 'listen_respond', 'listen_integration', 'listen_task'];
+
   for (let mi = 0; mi < group.mondai.length; mi++) {
     const m = group.mondai[mi];
     if (!m || typeof m !== 'object') {
@@ -1115,6 +1118,10 @@ function validateGroupResult(group) {
     if (!Array.isArray(m.items) || m.items.length === 0) errors.push(`mondai_${mi}_missing_items`);
 
     if (!Array.isArray(m.items)) continue;
+
+    // Check if this is a listening mondai
+    const isListeningMondai = m.items.some(item => item && listeningTypes.includes(item.type));
+
     for (let ii = 0; ii < m.items.length; ii++) {
       const item = m.items[ii];
       const itemErrors = validateQuestionItem(item);
@@ -1123,9 +1130,25 @@ function validateGroupResult(group) {
         if (ids.has(item.id)) errors.push(`duplicate_id:${item.id}`);
         ids.add(item.id);
       }
-      const needsScript = item && item.media && Object.prototype.hasOwnProperty.call(item.media, 'script_text');
-      if (needsScript && item.media.script_text !== null && typeof item.media.script_text !== 'string') {
-        errors.push(`mondai_${mi}_item_${ii}:script_text_invalid`);
+
+      // Listening Mode B: item-level script_text is NOT allowed for listening mondai
+      if (isListeningMondai && item && item.media?.script_text) {
+        errors.push(`mondai_${mi}_item_${ii}:script_text_should_be_at_mondai_level`);
+      }
+
+      // Legacy: non-listening items with media.script_text (keep existing validation)
+      if (!isListeningMondai) {
+        const needsScript = item && item.media && Object.prototype.hasOwnProperty.call(item.media, 'script_text');
+        if (needsScript && item.media.script_text !== null && typeof item.media.script_text !== 'string') {
+          errors.push(`mondai_${mi}_item_${ii}:script_text_invalid`);
+        }
+      }
+    }
+
+    // Listening Mode B: mondai-level script_text is REQUIRED for listening mondai
+    if (isListeningMondai) {
+      if (!m.media?.script_text || typeof m.media.script_text !== 'string' || m.media.script_text.trim() === '') {
+        errors.push(`mondai_${mi}_missing_mondai_script_text`);
       }
     }
   }
@@ -2249,7 +2272,11 @@ function buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGener
 
     if (isListening) {
       return `  ${mondaiNum}. ${m.mondai_id} (${m.title_vi}): ${totalQuestions} questions, types: ${m.types.join(', ')}
-    *** Include script_text with natural dialogue/monologue for TTS ***`;
+    ★★★ LISTENING AUDIO RULES ★★★
+    - Put script_text at MONDAI level: mondai.media.script_text (NOT in items)
+    - Use dialogue format: "A: こんにちは\nB: はい、こんにちは" (preferred for multi-voice TTS)
+    - If monologue, still place at mondai.media.script_text
+    - items[].media MUST be null or omitted`;
     }
 
     return `  ${mondaiNum}. ${m.mondai_id} (${m.title_vi}): ${totalQuestions} questions, types: ${m.types.join(', ')}`;
@@ -2427,6 +2454,7 @@ Return RAW JSON ONLY.
       "title_vi": "<string>",
       "instructions_vi": "<Vietnamese instructions>",
       "passage": { "title": "<optional>", "text": "<for reading>" },
+      "media": { "script_text": "<for listening mondai ONLY - dialogue format A: ... B: ... preferred>" },
       "items": [
         {
           "id": "<unique_id>",
@@ -2435,8 +2463,7 @@ Return RAW JSON ONLY.
           "choices": ["<A text>", "<B text>", "<C text>", "<D text>"],
           "answer_index": 0,
           "explain_brief": "<brief explanation>",
-          "tags": ["<tag1>", "<tag2>"],
-          "media": { "script_text": "<for listening, null otherwise>" }
+          "tags": ["<tag1>", "<tag2>"]
         }
       ]
     }
