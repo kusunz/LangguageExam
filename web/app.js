@@ -80,6 +80,79 @@
     };
 
     // ============================================
+    // Centralized App State Reset
+    // ============================================
+    function resetAppState(reason = 'unknown') {
+        console.log('resetAppState called:', reason);
+
+        // 1. Stop audio/TTS (safe if not defined yet)
+        if (typeof TTSManager !== 'undefined' && TTSManager.stop) {
+            try { TTSManager.stop(); } catch (_) { }
+        }
+        if ('speechSynthesis' in window) {
+            try { speechSynthesis.cancel(); } catch (_) { }
+        }
+
+        // 2. Stop all timers
+        if (typeof Timer !== 'undefined' && Timer.stopAll) {
+            try { Timer.stopAll(); } catch (_) { }
+        }
+
+        // 3. Reset TestUI flags (safe if not defined yet)
+        if (typeof TestUI !== 'undefined') {
+            TestUI.isSubmitting = false;
+            TestUI.isStartingTest = false;
+            TestUI.pendingGroups = [];
+            TestUI.loadingGroupIndex = 0;
+            if (TestUI.progressInterval) {
+                clearInterval(TestUI.progressInterval);
+                TestUI.progressInterval = null;
+            }
+        }
+
+        // 4. Reset State to initial values (safe null checks)
+        State.user = null;
+        State.userData = null;
+        State.examSpec = null;
+        State.test = null;
+        State.answers = {};
+        State.currentGroupIndex = 0;
+        State.currentMondaiIndex = 0;
+        State.currentInstanceKey = null;
+        State.timers = { overall: 0, group: 0 };
+        State.timerIntervals = { overall: null, group: null };
+        State.isTestPaused = false;
+        State.feedback = null;
+        State.ttsAudio = null;
+
+        // 5. Clear runtime localStorage (NOT settings/preferences)
+        const sessionKeys = ['user', 'app_session_id', 'demo_userData'];
+        sessionKeys.forEach(key => {
+            try { localStorage.removeItem(key); } catch (_) { }
+        });
+
+        // 6. Reset UI to login screen
+        showScreen('login-screen');
+
+        // 7. Re-enable login buttons
+        const demoBtn = document.querySelector('#btn-demo-login');
+        if (demoBtn) {
+            demoBtn.disabled = false;
+            demoBtn.innerHTML = '<i class="fa-solid fa-play"></i> Vào Demo';
+        }
+        const emailBtn = document.querySelector('#btn-email-login');
+        if (emailBtn) {
+            emailBtn.disabled = false;
+        }
+
+        // 8. Hide any loading overlays
+        const loader = document.querySelector('#fullscreen-loader');
+        if (loader) {
+            loader.classList.add('hidden');
+        }
+    }
+
+    // ============================================
     // DOM References
     // ============================================
     const $ = (sel) => document.querySelector(sel);
@@ -125,6 +198,13 @@
                     headers: { ...headers, ...options.headers },
                     body: options.body ? JSON.stringify(options.body) : undefined
                 });
+
+                // Handle auth errors - reset app state and redirect to login
+                if (response.status === 401 || response.status === 403) {
+                    console.warn('Auth error:', response.status, 'resetting app state');
+                    resetAppState('auth-failed');
+                    throw new Error('Session expired. Please login again.');
+                }
 
                 if (!response.ok) {
                     const error = await response.json().catch(() => ({ error: response.statusText }));
@@ -622,9 +702,7 @@
         },
 
         async logout() {
-            // Stop any running timers
-            Timer.stopAll();
-            TTSManager.stop();
+            resetAppState('logout');
 
             if (this.privy) {
                 try {
@@ -634,33 +712,6 @@
                     console.log('Privy session cleanup:', e.message || 'already logged out');
                 }
             }
-
-            // Clear localStorage
-            localStorage.removeItem('user');
-
-            // Reset ALL state to initial values
-            State.user = null;
-            State.userData = null;
-            State.examSpec = null;
-            State.test = null;
-            State.answers = {};
-            State.currentGroupIndex = 0;
-            State.currentMondaiIndex = 0;
-            State.currentInstanceKey = null;
-            State.timers = { overall: 0, group: 0 };
-            State.isTestPaused = false;
-            State.feedback = null;
-            State.ttsAudio = null;
-            State.demoBtn.disabled = false;
-
-            // Reset login button states
-            const demoBtn = $('#btn-demo-login');
-            if (demoBtn) {
-                demoBtn.disabled = false;
-                demoBtn.innerHTML = '<i class="fa-solid fa-play"></i> Vào Demo';
-            }
-
-            showScreen('login-screen');
         },
 
         updateUI() {
