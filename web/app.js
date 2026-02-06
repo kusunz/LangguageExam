@@ -1038,9 +1038,114 @@
         currentIndex: 0,     // Current segment index
         totalSegments: 0,    // Total segments expected
         combinedBlob: null,  // Combined audio for seek/timer (hybrid mode)
-        clientCache: new Map(), // Client-side TTS cache
-        currentAudioKey: null,  // Key for current mondai audio session
-        abortController: null,  // AbortController for fetch requests
+        clientCache: new Map(), // Client-side TTS cache (non-dialogue)
+        currentAudioKey: null,  // Key for current mondai audio session (legacy)
+        abortController: null,  // AbortController for fetch requests (legacy)
+
+        // NEW: Session-level audio cache for mondai switching
+        activeKey: null,           // Current active mondai audio key
+        audioCache: new Map(),     // Map<audioKey, { blob, url, duration, lastTime, completed }>
+        streamAbortController: null, // AbortController for streaming TTS
+
+        // Get deterministic audio key for a mondai
+        getAudioKey(scriptText, lang, mondaiId = null) {
+            if (mondaiId) {
+                return `${lang}|${mondaiId}|${fnv1a32(scriptText)}`;
+            }
+            return `${lang}|${fnv1a32(scriptText)}`;
+        },
+
+        // Persist current playback progress to cache before switching mondai
+        persistProgress() {
+            if (this.activeKey && State.ttsAudio && this.audioCache.has(this.activeKey)) {
+                const entry = this.audioCache.get(this.activeKey);
+                entry.lastTime = State.ttsAudio.currentTime || 0;
+                entry.completed = State.ttsAudio.ended || false;
+                console.log('TTS: Persisted progress for', this.activeKey, 'at', entry.lastTime);
+            }
+        },
+
+        // Load audio from cache if available, returns true if loaded
+        loadFromCacheIfAny(audioKey) {
+            if (!this.audioCache.has(audioKey)) {
+                console.log('TTS: Cache miss for', audioKey);
+                return false;
+            }
+
+            const entry = this.audioCache.get(audioKey);
+            console.log('TTS: Cache hit for', audioKey, 'duration:', entry.duration);
+
+            // Create new Audio from cached blob URL
+            if (State.ttsAudio) {
+                State.ttsAudio.pause();
+                // Don't revoke cached URLs
+            }
+
+            State.ttsAudio = new Audio(entry.url);
+            this.combinedBlob = entry.blob;
+            this.activeKey = audioKey;
+
+            // Setup combined audio UI (timer/seek)
+            this.setupCombinedAudio();
+
+            // Reset progress to 0 (or resume from lastTime if desired)
+            State.ttsAudio.currentTime = 0; // Always reset for clean UX
+            return true;
+        },
+
+        // Set active key and reset UI if key changed
+        setActiveKey(audioKey) {
+            if (this.activeKey !== audioKey) {
+                // Persist old progress before switching
+                this.persistProgress();
+                this.activeKey = audioKey;
+                console.log('TTS: Active key set to', audioKey);
+            }
+        },
+
+        // Stop runtime playback but preserve cache
+        stopRuntimeOnly() {
+            // Abort any ongoing stream
+            if (this.streamAbortController) {
+                try { this.streamAbortController.abort(); } catch (_) { }
+                this.streamAbortController = null;
+            }
+            if (this.abortController) {
+                try { this.abortController.abort(); } catch (_) { }
+                this.abortController = null;
+            }
+
+            // Stop audio but preserve cache
+            this.persistProgress();
+            if (State.ttsAudio) {
+                State.ttsAudio.pause();
+                // Don't revoke cached URLs, don't null out
+            }
+            State.ttsAudio = null;
+
+            if ('speechSynthesis' in window) {
+                speechSynthesis.cancel();
+            }
+
+            // Clear streaming state
+            this.audioQueue = [];
+            this.isPlaying = false;
+            this.isPaused = false;
+            this.currentIndex = 0;
+            this.combinedBlob = null;
+            // Keep activeKey and audioCache intact
+        },
+
+        // Reset audio player UI to idle state
+        resetPlayerUI() {
+            const timeEl = $('#audio-time');
+            if (timeEl) timeEl.textContent = '--:-- / --:--';
+            const seek = $('#audio-seek');
+            if (seek) {
+                seek.value = 0;
+                seek.disabled = true;
+            }
+        },
 
         // Simple hash for client cache
         hashText(text) {
@@ -1132,6 +1237,9 @@
 
         // Streaming TTS using SSE - plays audio as segments arrive
         async playStreamingTTS(text, language, provider) {
+            // Capture the active key at start to guard against late events
+            const streamKey = this.activeKey;
+
             return new Promise((resolve, reject) => {
                 this.audioQueue = [];
                 this.currentIndex = 0;
@@ -1140,14 +1248,19 @@
 
                 const statusEl = $('#audio-status');
 
-                // Create EventSource-like connection using fetch
+                // Create abort controller for this stream
+                this.streamAbortController = new AbortController();
+                const signal = this.streamAbortController.signal;
+
+                // Create EventSource-like connection using fetch with abort signal
                 fetch(`${CONFIG.apiBase}/tts/stream`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         ...(State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
                     },
-                    body: JSON.stringify({ text, language, provider })
+                    body: JSON.stringify({ text, language, provider }),
+                    signal
                 }).then(response => {
                     if (!response.ok) {
                         throw new Error('Streaming TTS request failed');
@@ -1163,6 +1276,12 @@
                                 const { done, value } = await reader.read();
                                 if (done) break;
 
+                                // Late event guard: if key changed, abort silently
+                                if (this.activeKey !== streamKey) {
+                                    console.log('TTS: Stream key mismatch, ignoring late events');
+                                    return resolve();
+                                }
+
                                 buffer += decoder.decode(value, { stream: true });
                                 const lines = buffer.split('\n\n');
                                 buffer = lines.pop() || '';
@@ -1170,21 +1289,37 @@
                                 for (const line of lines) {
                                     if (line.startsWith('data: ')) {
                                         const data = JSON.parse(line.slice(6));
-                                        await this.handleStreamEvent(data, statusEl, resolve, reject);
+                                        await this.handleStreamEvent(data, statusEl, resolve, reject, streamKey);
                                     }
                                 }
                             }
                         } catch (err) {
+                            if (err.name === 'AbortError') {
+                                console.log('TTS: Stream aborted');
+                                return resolve();
+                            }
                             reject(err);
                         }
                     };
 
                     processStream();
-                }).catch(reject);
+                }).catch(err => {
+                    if (err.name === 'AbortError') {
+                        console.log('TTS: Fetch aborted');
+                        return resolve();
+                    }
+                    reject(err);
+                });
             });
         },
 
-        async handleStreamEvent(data, statusEl, resolve, reject) {
+        async handleStreamEvent(data, statusEl, resolve, reject, streamKey) {
+            // Late event guard
+            if (streamKey && this.activeKey !== streamKey) {
+                console.log('TTS: Ignoring late stream event for', streamKey);
+                return;
+            }
+
             switch (data.type) {
                 case 'info':
                     this.totalSegments = data.total;
@@ -1210,7 +1345,7 @@
                     if (!this.isPlaying && this.audioQueue.length === 1) {
                         this.isPlaying = true;
                         statusEl.textContent = 'Đang phát...';
-                        this.playNextInQueue(resolve, reject);
+                        this.playNextInQueue(resolve, reject, streamKey);
                     }
                     break;
 
@@ -1219,6 +1354,28 @@
                     if (this.audioQueue.length > 0) {
                         this.combinedBlob = new Blob(this.audioQueue, { type: 'audio/mpeg' });
                         console.log('TTS: Combined blob created for seek/timer');
+
+                        // Cache the combined audio for this mondai
+                        if (this.activeKey) {
+                            const url = URL.createObjectURL(this.combinedBlob);
+                            this.audioCache.set(this.activeKey, {
+                                blob: this.combinedBlob,
+                                url,
+                                duration: 0, // Will be set when metadata loads
+                                lastTime: 0,
+                                completed: false
+                            });
+                            console.log('TTS: Cached combined audio for', this.activeKey);
+
+                            // LRU eviction if cache too large
+                            if (this.audioCache.size > 10) {
+                                const oldestKey = this.audioCache.keys().next().value;
+                                const oldEntry = this.audioCache.get(oldestKey);
+                                if (oldEntry?.url) URL.revokeObjectURL(oldEntry.url);
+                                this.audioCache.delete(oldestKey);
+                                console.log('TTS: Evicted oldest cache entry', oldestKey);
+                            }
+                        }
                     }
                     if (this.audioQueue.length === 0) {
                         resolve(); // No audio was generated
@@ -1237,7 +1394,13 @@
             }
         },
 
-        async playNextInQueue(resolve, reject) {
+        async playNextInQueue(resolve, reject, streamKey = null) {
+            // Late event guard
+            if (streamKey && this.activeKey !== streamKey) {
+                console.log('TTS: playNextInQueue - key mismatch, stopping');
+                return resolve();
+            }
+
             if (this.currentIndex >= this.audioQueue.length) {
                 // Check if more segments are coming
                 if (this.currentIndex >= this.totalSegments) {
@@ -1249,12 +1412,18 @@
                     if (this.combinedBlob) {
                         console.log('TTS: Switching to combined audio for seek/timer');
                         this.setupCombinedAudio();
+
+                        // Update duration in cache
+                        if (this.activeKey && this.audioCache.has(this.activeKey) && State.ttsAudio) {
+                            const entry = this.audioCache.get(this.activeKey);
+                            entry.duration = State.ttsAudio.duration || 0;
+                        }
                     }
 
                     resolve();
                 } else {
                     // Wait for more segments
-                    setTimeout(() => this.playNextInQueue(resolve, reject), 100);
+                    setTimeout(() => this.playNextInQueue(resolve, reject, streamKey), 100);
                 }
                 return;
             }
@@ -2129,48 +2298,30 @@
             // Update navigation buttons (prev/next state based on loaded mondai)
             this.updateNavigationButtons();
 
-            // Update header
-            // Update header
-            // mondai_id might be "M1", "L1", "N2-L1-01" (if from chunk)
-            // We want purely "Mondai {Number}: {Title}"
-            // If title_vi already contains "Mondai", strip it to avoid duplication?
-            // Screenshot showed "Mondai N2-L1-01: Mondai 1: ..."
-            // This suggests mondai.mondai_id IS "N2-L1-01" (generated ID) and title_vi IS "Mondai 1: ..."
+            // Update header - prioritize meta.display_title, then title_vi, then fallback
+            // Detect if listening type for proper prefix
+            const isListening = mondai.items?.some(item =>
+                item.type?.includes('listen') || item.type?.includes('dialogue') || item.type?.includes('mono')
+            ) || !!mondai.media?.script_text;
 
-            // Heuristic: Extract the primary identifier (1, 2, 3...)
-            // 1. If title_vi starts with "Mondai X:", just use title_vi.
-            // 2. If valid simple ID (M1, L1), construct "Mondai 1: ..."
-
-            let displayTitle = mondai.title_vi;
-            // Remove "(Task-based...)" English text if present/requested?
-            // User said "phần mở ngoặc là tiếng nhật" (brackets are Japanese). 
-            // Current title_vi: "Hiểu vấn đề (Task-Based Comprehension)" -> keep or replace English?
-            // "tiếp tục thống nhất tiêu đề ( phần mở ngoặc là tiếng nhật)" -> The content inside brackets IS/SHOULD BE Japanese?
-            // Or user means "Keep the Japanese in brackets"? 
-            // Assuming user wants cleaner title.
-
-            // Clean ID logic:
+            // Extract mondai number from mondai_id (M1->1, L2->2, etc.)
             const rawId = mondai.mondai_id || '';
-            let simpleId = '';
+            const mondaiNum = rawId.match(/[ML](\d+)/)?.[1] || String(State.currentMondaiIndex + 1);
+            const prefix = isListening ? 'Listen' : 'Mondai';
 
-            // Try to parse '1' from 'M1', 'L1', 'N2-L1'
-            // If rawId is complex like 'N2-L1-01', it corresponds to 'L1'.
-            if (rawId.match(/[ML](\d+)/)) {
-                simpleId = rawId.match(/[ML](\d+)/)[1];
-            }
-
-            // If title ALREADY has "Mondai X", use it.
-            if (displayTitle.match(/^Mondai \d+:/)) {
-                // It's already good: "Mondai 1: Hiểu vấn đề"
-            } else if (simpleId) {
-                // Prepend
-                displayTitle = `Mondai ${simpleId}: ${displayTitle}`;
+            let displayTitle;
+            if (mondai.meta?.display_title) {
+                // Use generated display_title directly
+                displayTitle = mondai.meta.display_title;
+            } else if (mondai.title_vi && !mondai.title_vi.match(/^(Mondai|Listen)\s+\d+/)) {
+                // Has title_vi but no prefix - add prefix
+                displayTitle = `${prefix} ${mondaiNum}: ${mondai.title_vi}`;
+            } else if (mondai.title_vi) {
+                // title_vi already has proper format
+                displayTitle = mondai.title_vi;
             } else {
-                // Fallback if no ID found (rare)
-                if (!displayTitle.startsWith('Mondai')) {
-                    // Maybe use index? But we don't have safe index here easily without context.
-                    // Leave as is if we can't detect.
-                }
+                // Fallback to simple prefix + number
+                displayTitle = `${prefix} ${mondaiNum}`;
             }
 
             $('#mondai-title').textContent = displayTitle;
@@ -2342,7 +2493,7 @@
                 return;
             }
 
-            // 3. Initial Start (No audio yet)
+            // 3. Initial Start (No audio yet) - check cache first
             const mondaiData = this.getCurrentMondaiData();
             // Listening Mode B: prefer mondai.media.script_text
             let scriptText = mondaiData?.mondai?.media?.script_text;
@@ -2352,8 +2503,6 @@
                 scriptText = legacyItem?.media?.script_text;
             }
             if (scriptText) {
-                console.log('TPS: Starting new TTS stream');
-                this.updateAudioButton('loading');
                 const lang = State.test.meta.language || getExamLanguage(State.test.meta.exam_id);
 
                 // Generate deterministic audioKey for this mondai
@@ -2361,6 +2510,24 @@
                 const mondaiId = mondaiData?.mondai?.mondai_id || String(State.currentMondaiIndex);
                 const audioKey = `${lang}|${groupId}|${mondaiId}|${fnv1a32(scriptText)}`;
 
+                // Set active key for this mondai
+                TTSManager.setActiveKey(audioKey);
+
+                // Check cache first - if hit, load and play from cache
+                if (TTSManager.loadFromCacheIfAny(audioKey)) {
+                    console.log('TTS: Playing from cache');
+                    this.updateAudioButton('playing');
+                    try {
+                        await State.ttsAudio.play();
+                    } catch (e) {
+                        console.warn('Cache play failed:', e);
+                    }
+                    return;
+                }
+
+                // Cache miss - start new TTS stream
+                console.log('TTS: Starting new TTS stream (cache miss)');
+                this.updateAudioButton('loading');
                 TTSManager.playAudio(scriptText, lang, audioKey);
             } else {
                 showToast('Không có dữ liệu âm thanh cho bài này', 'info');
@@ -2553,8 +2720,9 @@
                 return;
             }
 
-            // Stop current audio session before navigating
-            TTSManager.stop();
+            // Stop current audio session before navigating (preserves cache)
+            TTSManager.stopRuntimeOnly();
+            TTSManager.resetPlayerUI();
             this.updateAudioButton('idle');
 
             if (newIndex >= 0 && newIndex < total) {

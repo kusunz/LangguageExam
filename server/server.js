@@ -2476,12 +2476,25 @@ Return RAW JSON ONLY.
 - DO NOT end with explanations.
 - The output must start clearly with '{' and end with '}'.
 
+-------------------------
+TITLE RULES (meta.display_title)
+-------------------------
+For each mondai, optionally include "meta.display_title" with format:
+- Listening mondai: "Listen X" or "Listen X: {localizedTitle} ({日本語タイトル})"
+- Non-listening: "Mondai X" or "Mondai X: {localizedTitle} ({日本語タイトル})"
+Where X is the mondai number (1, 2, 3...).
+{localizedTitle} should be in Vietnamese (target user language).
+{日本語タイトル} is optional Japanese title in parentheses.
+If omitted, UI will fallback to "Mondai X" / "Listen X".
+DO NOT include titles/headers inside passage.text or script_text.
+
 {
   "mondai": [
     {
       "mondai_id": "<string>",
       "title_vi": "<string>",
       "instructions_vi": "<Vietnamese instructions>",
+      "meta": { "display_title": "<optional: Mondai X or Listen X: Localized Title (日本語)>" },
       "passage": { "title": "<optional>", "text": "<for reading>" },
       "media": { "script_text": "<for listening mondai ONLY - dialogue format A: ... B: ... preferred>" },
       "items": [
