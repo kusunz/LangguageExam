@@ -2953,7 +2953,7 @@
             if (State.currentInstanceKey) {
                 try {
                     showScreen('loading-screen');
-                    $('#loading-text').textContent = 'Đang chấm điểm (Server)...';
+                    $('#loading-text').textContent = 'Đang chấm điểm';
                     $('#loading-hint').textContent = 'Đang kiểm tra kết quả từ hệ thống...';
 
                     const feedback = await Api.quickGradeV2(State.currentInstanceKey, State.answers);

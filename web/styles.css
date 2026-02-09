@@ -1002,12 +1002,20 @@ body::before {
   font-size: var(--text-sm);
 }
 
-/* Passage Container */
+/* Passage Container - sticky with internal scroll for reading sections */
 .passage-container {
   background: var(--bg-secondary);
   border-radius: var(--radius-md);
   padding: var(--space-md);
   margin-bottom: var(--space-lg);
+  /* Sticky behavior for reading passages */
+  position: sticky;
+  top: 120px;
+  /* Below header + actions bar */
+  z-index: 20;
+  max-height: 40vh;
+  overflow-y: auto;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
 .passage-container.hidden {
