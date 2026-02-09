@@ -333,10 +333,11 @@ async function initDb() {
             ALTER TABLE exam_instances_cache ADD COLUMN IF NOT EXISTS answer_keys JSONB;
           EXCEPTION WHEN others THEN NULL; END;
 
-          -- attempts: ensure status, summary columns for quickgrade (V2)
+          -- attempts: ensure status, summary, answers_hash columns for quickgrade (V2)
           BEGIN
             ALTER TABLE attempts ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'started';
             ALTER TABLE attempts ADD COLUMN IF NOT EXISTS summary JSONB;
+            ALTER TABLE attempts ADD COLUMN IF NOT EXISTS answers_hash TEXT;
           EXCEPTION WHEN others THEN NULL; END;
 
           -- attempts: add unique constraint if missing (for UPSERT)

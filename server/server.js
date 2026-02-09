@@ -2820,7 +2820,7 @@ async function deliverNextChunk(instanceKey, want) {
 // POST /api/exam/start
 app.post('/api/exam/start', authMiddleware, async (req, res) => {
   try {
-    const { examSpec, mode, setNo, force_new } = req.body;
+    const { examSpec, mode, setNo, force_new, resume, daily } = req.body;
     const userId = req.user.userId;
 
     // Wait for DB initialization
@@ -2835,19 +2835,41 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
     // Normalize Exam Spec (prevent crashes)
     if (!examSpec.modes) examSpec.modes = DEFAULT_MODES;
 
-    // Deterministic Set No logic
-    const today = new Date().toISOString().split('T')[0];
+    // Set No logic with backward-compatible options
     let finalSetNo = setNo;
 
-    // If force_new requested, rotate set_no to ensure uniqueness
-    if (force_new) {
-      // Using monotonic timestamp % 100000 to keep it as integer but unique enough per user session
-      finalSetNo = Math.floor(Date.now() / 1000) % 100000;
-    } else if (finalSetNo === undefined) {
+    if (resume) {
+      // RESUME: Find latest unexpired instance
+      const latestRes = await db.query(
+        `SELECT set_no FROM exam_instances_cache 
+         WHERE user_id=$1 AND exam_id=$2 AND level=$3 AND mode=$4 AND expires_at > NOW()
+         ORDER BY created_at DESC LIMIT 1`,
+        [userId, examSpec.exam_id, level, mode]
+      );
+      if (latestRes.rows.length > 0) {
+        finalSetNo = latestRes.rows[0].set_no;
+        console.log(`[Exam] Resume: using set_no ${finalSetNo}`);
+      }
+    }
+
+    if (finalSetNo === undefined && daily) {
+      // DAILY: Deterministic by date (old behavior)
+      const today = new Date().toISOString().split('T')[0];
       const hash = crypto.createHash('sha256')
         .update(`${userId}-${level}-${mode}-${today}`)
         .digest('hex');
       finalSetNo = parseInt(hash.substring(0, 8), 16) % 100;
+      console.log(`[Exam] Daily mode: set_no ${finalSetNo}`);
+    }
+
+    if (finalSetNo === undefined || force_new) {
+      // DEFAULT: Create NEW set_no = MAX(existing) + 1
+      const maxRes = await db.query(
+        'SELECT COALESCE(MAX(set_no), 0) + 1 AS next_set FROM exam_instances_cache WHERE user_id=$1 AND exam_id=$2 AND level=$3 AND mode=$4',
+        [userId, examSpec.exam_id, level, mode]
+      );
+      finalSetNo = maxRes.rows[0].next_set;
+      console.log(`[Exam] New set_no: ${finalSetNo}`);
     }
 
     // 1. Check if instance already exists (Idempotency)
@@ -3056,8 +3078,12 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
         const isCorrect = (userAns === correct);
         if (isCorrect) correctCount++;
         totalCount++;
-        byQuestion[qId] = { correct: isCorrect };
-        // DO NOT return correct answer
+        // Return full info for UI highlighting
+        byQuestion[qId] = {
+          is_correct: isCorrect,
+          user_index: userAns,
+          correct_index: correct
+        };
       }
     }
 

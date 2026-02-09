@@ -2266,6 +2266,11 @@
         },
 
         renderCurrentMondai() {
+            // Stop any playing audio before rendering new mondai
+            if (typeof TTSManager !== 'undefined' && TTSManager.stop) {
+                try { TTSManager.stop(); } catch (_) { }
+            }
+
             const test = State.test;
             const mondaiData = this.getCurrentMondaiData();
 
