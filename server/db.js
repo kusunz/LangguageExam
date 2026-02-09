@@ -237,17 +237,20 @@ async function initDb() {
         `CREATE INDEX IF NOT EXISTS idx_instances_user ON exam_instances_cache(user_id)`,
         `CREATE INDEX IF NOT EXISTS idx_instances_expires ON exam_instances_cache(expires_at)`,
 
-        // Attempts table
+        // Attempts table (V2: added status, summary for quickgrade)
         `CREATE TABLE IF NOT EXISTS attempts (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           user_id TEXT NOT NULL,
           instance_key TEXT REFERENCES exam_instances_cache(instance_key) ON DELETE CASCADE,
+          status TEXT DEFAULT 'started',
+          summary JSONB,
           started_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
           submitted_at TIMESTAMPTZ,
           answers JSONB,
           score INTEGER,
           total INTEGER,
-          time_spent INTEGER
+          time_spent INTEGER,
+          UNIQUE(user_id, instance_key)
         )`,
         `CREATE INDEX IF NOT EXISTS idx_attempts_user ON attempts(user_id)`,
         `CREATE INDEX IF NOT EXISTS idx_attempts_instance ON attempts(instance_key)`,
@@ -329,6 +332,17 @@ async function initDb() {
           BEGIN
             ALTER TABLE exam_instances_cache ADD COLUMN IF NOT EXISTS answer_keys JSONB;
           EXCEPTION WHEN others THEN NULL; END;
+
+          -- attempts: ensure status, summary columns for quickgrade (V2)
+          BEGIN
+            ALTER TABLE attempts ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'started';
+            ALTER TABLE attempts ADD COLUMN IF NOT EXISTS summary JSONB;
+          EXCEPTION WHEN others THEN NULL; END;
+
+          -- attempts: add unique constraint if missing (for UPSERT)
+          BEGIN
+            ALTER TABLE attempts ADD CONSTRAINT attempts_user_instance_unique UNIQUE (user_id, instance_key);
+          EXCEPTION WHEN duplicate_object THEN NULL; WHEN others THEN NULL; END;
           
         END $$;`
       ];

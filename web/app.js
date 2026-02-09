@@ -1970,7 +1970,8 @@
 
             const instanceKey = State.currentInstanceKey;
 
-            for (let gIdx = 0; gIdx < State.test.groups.length; gIdx++) {
+            // Load all groups concurrently with bounded concurrency
+            const loadGroup = async (gIdx) => {
                 const group = State.test.groups[gIdx];
                 const group_id = group.group_id;
 
@@ -1980,7 +1981,7 @@
 
                 if (group.mondai.length >= expected) {
                     console.log(`Group ${group_id} already has ${group.mondai.length}/${expected} items.`);
-                    continue;
+                    return;
                 }
 
                 let done = false;
@@ -1991,24 +1992,27 @@
                         if (res.chunk && res.chunk.length > 0) {
                             group.mondai.push(...res.chunk);
                             this.updateNavigationButtons();
-
-                            // Update UI if current group
-                            if (State.currentGroupIndex === gIdx) {
-                                // Maybe trigger render if we were waiting?
-                            }
                         }
 
                         done = res.done;
                         if (done) console.log(`Group ${group_id} fully loaded.`);
-                        await new Promise(r => setTimeout(r, 500));
+                        await new Promise(r => setTimeout(r, 300)); // Reduced delay for faster loading
 
                     } catch (e) {
                         console.error(`Error loading chunk for ${group_id}:`, e);
                         done = true; // Stop loop on error to avoid infinite retry
                     }
                 }
-            }
-            console.log('All chunks loaded (V2).');
+            };
+
+            // Schedule all groups concurrently (limit to 3 concurrent)
+            RequestQueue.setLimit(3);
+            const promises = State.test.groups.map((_, gIdx) =>
+                RequestQueue.schedule(() => loadGroup(gIdx))
+            );
+
+            await Promise.all(promises);
+            console.log('All chunks loaded (V2 concurrent).');
         },
 
         async loadRemainingChunksInBackground(groupResult, startChunkIndex, totalChunks, previousMondai, llmProvider, targetModel = null, concurrency = 3, pendingPromisesMap = {}, pendingGroupsMap = {}) {
@@ -3266,8 +3270,8 @@
 
         escapeHtml(text) {
             // Allow safe formatting tags for Japanese/Chinese text
-            // Allowed: u, b, i, em, strong, ruby, rt, rp, br, span
-            const allowedTags = ['u', 'b', 'i', 'em', 'strong', 'ruby', 'rt', 'rp', 'br', 'span'];
+            // Allowed: b, i, em, strong, ruby, rt, rp, br, span (NOT u - convert to .hl)
+            const allowedTags = ['b', 'i', 'em', 'strong', 'ruby', 'rt', 'rp', 'br', 'span'];
 
             if (!text) return '';
 
@@ -3297,6 +3301,20 @@
                     placeholders.push(`</${tag.toLowerCase()}>`);
                     return `\x00PH${idx}\x00`;
                 });
+            });
+
+            // Convert [[...]] emphasis markers BEFORE escaping (preserve them)
+            result = result.replace(/\[\[([^\]]+)\]\]/g, (match, content) => {
+                const idx = placeholders.length;
+                placeholders.push(`<strong class="hl">${content}</strong>`);
+                return `\x00PH${idx}\x00`;
+            });
+
+            // Convert legacy <u>...</u> tags to .hl class (before escaping)
+            result = result.replace(/<u>([^<]*)<\/u>/gi, (match, content) => {
+                const idx = placeholders.length;
+                placeholders.push(`<strong class="hl">${content}</strong>`);
+                return `\x00PH${idx}\x00`;
             });
 
             // Now escape everything else

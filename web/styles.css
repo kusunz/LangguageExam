@@ -922,14 +922,26 @@ body::before {
   }
 }
 
-/* Mondai Navigation */
+/* Test Actions Bar - sticky at top */
+.test-actions {
+  position: sticky;
+  top: 0;
+  z-index: 45;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--glass-border);
+  flex-shrink: 0;
+}
+
+/* Mondai Navigation (now in footer) */
 .mondai-nav {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: var(--space-md);
-  padding: var(--space-sm) var(--space-md);
-  border-radius: var(--radius-md);
+  padding: var(--space-sm) 0;
   flex-shrink: 0;
 }
 
@@ -1047,6 +1059,14 @@ body::before {
 
 .question-prompt.zh {
   font-family: var(--font-cn);
+}
+
+/* Emphasis highlight for kanji/vocab (converted from [[...]] or <u>) */
+.hl {
+  font-weight: 700;
+  background: linear-gradient(transparent 60%, rgba(99, 102, 241, 0.3) 40%);
+  padding: 0 2px;
+  border-radius: 2px;
 }
 
 .choices {

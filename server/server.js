@@ -2477,6 +2477,16 @@ Return RAW JSON ONLY.
 - The output must start clearly with '{' and end with '}'.
 
 -------------------------
+EMPHASIS MARKERS (CRITICAL)
+-------------------------
+When highlighting kanji/vocabulary in prompts:
+- Use [[word]] markers (double brackets) for emphasis
+- Example: "Choose the correct reading for [[漢字]] in the sentence."
+- DO NOT use HTML tags like <u> or <b>
+- DO NOT use markdown ** or __
+- ONLY use [[...]] for emphasized/target words
+
+-------------------------
 TITLE RULES (meta.display_title)
 -------------------------
 For each mondai, optionally include "meta.display_title" with format:
@@ -3051,11 +3061,13 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
       }
     }
 
-    // Update attempts
-    await db.query(
-      "UPDATE attempts SET status='submitted', submitted_at=NOW(), summary=$1 WHERE instance_key=$2",
-      [JSON.stringify({ correct: correctCount, total: totalCount }), instanceKey]
-    );
+    // Update attempts using UPSERT (creates record if missing)
+    await db.query(`
+      INSERT INTO attempts (user_id, instance_key, status, summary, submitted_at)
+      VALUES ($1, $2, 'submitted', $3, NOW())
+      ON CONFLICT (user_id, instance_key) 
+      DO UPDATE SET status='submitted', summary=$3, submitted_at=NOW()
+    `, [req.user.userId, instanceKey, JSON.stringify({ correct: correctCount, total: totalCount })]);
 
     res.json({
       score_summary: {
