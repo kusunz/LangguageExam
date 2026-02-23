@@ -139,7 +139,9 @@ async function initDb() {
           usage_count INTEGER DEFAULT 0,
           created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         )`,
-        `CREATE INDEX IF NOT EXISTS idx_questions_exam ON questions(exam_type, level, group_type)`,
+        `DO $$ BEGIN
+          CREATE INDEX IF NOT EXISTS idx_questions_exam ON questions(exam_type, level, group_type);
+         EXCEPTION WHEN others THEN NULL; END $$`,
 
         // User notebook table
         `CREATE TABLE IF NOT EXISTS user_notebook (

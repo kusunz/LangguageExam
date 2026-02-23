@@ -2905,6 +2905,7 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
       // CREATE NEW
 
       // Ensure Pool (fast/lazy)
+      const today = new Date().toISOString().split('T')[0];
       const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
 
       // Build Blueprint
@@ -3087,13 +3088,24 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
       }
     }
 
-    // Update attempts using UPSERT (creates record if missing)
-    await db.query(`
-      INSERT INTO attempts (user_id, instance_key, status, summary, submitted_at)
-      VALUES ($1, $2, 'submitted', $3, NOW())
-      ON CONFLICT (user_id, instance_key) 
-      DO UPDATE SET status='submitted', summary=$3, submitted_at=NOW()
-    `, [req.user.userId, instanceKey, JSON.stringify({ correct: correctCount, total: totalCount })]);
+    // Update attempts (fallback for missing UNIQUE constraint)
+    const summaryJson = JSON.stringify({ correct: correctCount, total: totalCount });
+    const updateRes = await db.query(`
+      UPDATE attempts 
+      SET status='submitted', summary=$3, submitted_at=NOW()
+      WHERE user_id=$1 AND instance_key=$2
+    `, [req.user.userId, instanceKey, summaryJson]);
+
+    if (updateRes.rowCount === 0) {
+      try {
+        await db.query(`
+          INSERT INTO attempts (user_id, instance_key, status, summary, submitted_at)
+          VALUES ($1, $2, 'submitted', $3, NOW())
+        `, [req.user.userId, instanceKey, summaryJson]);
+      } catch (insertErr) {
+        // Ignore duplicate key errors if a race condition happened
+      }
+    }
 
     res.json({
       score_summary: {
