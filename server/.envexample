@@ -21,3 +21,6 @@ DEFAULT_LLM_PROVIDER=gemini
 
 # Default TTS mode: auto | gemini | deepgram | browser
 DEFAULT_TTS_MODE=auto
+
+# Warmup endpoint secret (admin access for cron jobs)
+WARMUP_SECRET=your-secure-warmup-secret

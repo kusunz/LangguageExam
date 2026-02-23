@@ -80,6 +80,79 @@
     };
 
     // ============================================
+    // Centralized App State Reset
+    // ============================================
+    function resetAppState(reason = 'unknown') {
+        console.log('resetAppState called:', reason);
+
+        // 1. Stop audio/TTS (safe if not defined yet)
+        if (typeof TTSManager !== 'undefined' && TTSManager.stop) {
+            try { TTSManager.stop(); } catch (_) { }
+        }
+        if ('speechSynthesis' in window) {
+            try { speechSynthesis.cancel(); } catch (_) { }
+        }
+
+        // 2. Stop all timers
+        if (typeof Timer !== 'undefined' && Timer.stopAll) {
+            try { Timer.stopAll(); } catch (_) { }
+        }
+
+        // 3. Reset TestUI flags (safe if not defined yet)
+        if (typeof TestUI !== 'undefined') {
+            TestUI.isSubmitting = false;
+            TestUI.isStartingTest = false;
+            TestUI.pendingGroups = [];
+            TestUI.loadingGroupIndex = 0;
+            if (TestUI.progressInterval) {
+                clearInterval(TestUI.progressInterval);
+                TestUI.progressInterval = null;
+            }
+        }
+
+        // 4. Reset State to initial values (safe null checks)
+        State.user = null;
+        State.userData = null;
+        State.examSpec = null;
+        State.test = null;
+        State.answers = {};
+        State.currentGroupIndex = 0;
+        State.currentMondaiIndex = 0;
+        State.currentInstanceKey = null;
+        State.timers = { overall: 0, group: 0 };
+        State.timerIntervals = { overall: null, group: null };
+        State.isTestPaused = false;
+        State.feedback = null;
+        State.ttsAudio = null;
+
+        // 5. Clear runtime localStorage (NOT settings/preferences)
+        const sessionKeys = ['user', 'app_session_id', 'demo_userData'];
+        sessionKeys.forEach(key => {
+            try { localStorage.removeItem(key); } catch (_) { }
+        });
+
+        // 6. Reset UI to login screen
+        showScreen('login-screen');
+
+        // 7. Re-enable login buttons
+        const demoBtn = document.querySelector('#btn-demo-login');
+        if (demoBtn) {
+            demoBtn.disabled = false;
+            demoBtn.innerHTML = '<i class="fa-solid fa-play"></i> Vào Demo';
+        }
+        const emailBtn = document.querySelector('#btn-email-login');
+        if (emailBtn) {
+            emailBtn.disabled = false;
+        }
+
+        // 8. Hide any loading overlays
+        const loader = document.querySelector('#fullscreen-loader');
+        if (loader) {
+            loader.classList.add('hidden');
+        }
+    }
+
+    // ============================================
     // DOM References
     // ============================================
     const $ = (sel) => document.querySelector(sel);
@@ -110,6 +183,18 @@
     }
 
     // ============================================
+    // TTS Language Detection
+    // ============================================
+    function getExamLanguage(examId) {
+        if (!examId) return 'ja-JP'; // default
+        const id = examId.toLowerCase();
+        if (id.includes('jlpt') || id.includes('nat')) return 'ja-JP';
+        if (id.includes('hsk') || id.includes('yct')) return 'zh-CN';
+        if (id.includes('ielts') || id.includes('toeic') || id.includes('toefl')) return 'en-US';
+        return 'ja-JP'; // fallback
+    }
+
+    // ============================================
     // API Client
     // ============================================
     const Api = {
@@ -125,6 +210,13 @@
                     headers: { ...headers, ...options.headers },
                     body: options.body ? JSON.stringify(options.body) : undefined
                 });
+
+                // Handle auth errors - reset app state and redirect to login
+                if (response.status === 401 || response.status === 403) {
+                    console.warn('Auth error:', response.status, 'resetting app state');
+                    resetAppState('auth-failed');
+                    throw new Error('Session expired. Please login again.');
+                }
 
                 if (!response.ok) {
                     const error = await response.json().catch(() => ({ error: response.statusText }));
@@ -543,23 +635,29 @@
         },
 
         async handleAuthSuccess(user, isRestore = false) {
-            // Show loading state during session restore
-            if (isRestore) {
-                showScreen('loading-screen');
-                $('#loading-text').textContent = 'Đang đăng nhập...';
-                $('#loading-hint').textContent = 'Chờ xíu';
+            // Show fullscreen loading overlay to block all interaction
+            const loader = $('#fullscreen-loader');
+            const loaderText = $('#fullscreen-loader-text');
+            if (loader) {
+                loader.classList.remove('hidden');
+                loaderText.textContent = isRestore ? 'Đang khôi phục phiên...' : 'Đang đăng nhập...';
             }
 
-            State.user = {
-                email: user.email || 'demo@example.com',
-                token: user.token || 'demo-token'
-            };
+            try {
+                State.user = {
+                    email: user.email || 'demo@example.com',
+                    token: user.token || 'demo-token'
+                };
 
-            localStorage.setItem('user', JSON.stringify(State.user));
+                localStorage.setItem('user', JSON.stringify(State.user));
 
-            await this.loadUserData();
-            this.updateUI();
-            showScreen('home-screen');
+                await this.loadUserData();
+                this.updateUI();
+                showScreen('home-screen');
+            } finally {
+                // Always hide the loader
+                if (loader) loader.classList.add('hidden');
+            }
         },
 
         async loadUserData() {
@@ -616,17 +714,16 @@
         },
 
         async logout() {
+            resetAppState('logout');
+
             if (this.privy) {
                 try {
                     await this.privy.auth.logout();
                 } catch (e) {
-                    console.warn('Privy logout error:', e);
+                    // Expected if session already expired or user logged out elsewhere
+                    console.log('Privy session cleanup:', e.message || 'already logged out');
                 }
             }
-            localStorage.removeItem('user');
-            State.user = null;
-            State.userData = null;
-            showScreen('login-screen');
         },
 
         updateUI() {
@@ -924,6 +1021,16 @@
     // ============================================
     // TTS Manager
     // ============================================
+    // FNV-1a 32-bit hash for deterministic audio keys
+    function fnv1a32(str) {
+        let h = 0x811c9dc5;
+        for (let i = 0; i < str.length; i++) {
+            h ^= str.charCodeAt(i);
+            h = Math.imul(h, 0x01000193);
+        }
+        return (h >>> 0).toString(16).padStart(8, '0');
+    }
+
     const TTSManager = {
         audioQueue: [],      // Queue of audio blobs to play
         isPlaying: false,    // Currently playing audio
@@ -931,7 +1038,114 @@
         currentIndex: 0,     // Current segment index
         totalSegments: 0,    // Total segments expected
         combinedBlob: null,  // Combined audio for seek/timer (hybrid mode)
-        clientCache: new Map(), // Client-side TTS cache
+        clientCache: new Map(), // Client-side TTS cache (non-dialogue)
+        currentAudioKey: null,  // Key for current mondai audio session (legacy)
+        abortController: null,  // AbortController for fetch requests (legacy)
+
+        // NEW: Session-level audio cache for mondai switching
+        activeKey: null,           // Current active mondai audio key
+        audioCache: new Map(),     // Map<audioKey, { blob, url, duration, lastTime, completed }>
+        streamAbortController: null, // AbortController for streaming TTS
+
+        // Get deterministic audio key for a mondai
+        getAudioKey(scriptText, lang, mondaiId = null) {
+            if (mondaiId) {
+                return `${lang}|${mondaiId}|${fnv1a32(scriptText)}`;
+            }
+            return `${lang}|${fnv1a32(scriptText)}`;
+        },
+
+        // Persist current playback progress to cache before switching mondai
+        persistProgress() {
+            if (this.activeKey && State.ttsAudio && this.audioCache.has(this.activeKey)) {
+                const entry = this.audioCache.get(this.activeKey);
+                entry.lastTime = State.ttsAudio.currentTime || 0;
+                entry.completed = State.ttsAudio.ended || false;
+                console.log('TTS: Persisted progress for', this.activeKey, 'at', entry.lastTime);
+            }
+        },
+
+        // Load audio from cache if available, returns true if loaded
+        loadFromCacheIfAny(audioKey) {
+            if (!this.audioCache.has(audioKey)) {
+                console.log('TTS: Cache miss for', audioKey);
+                return false;
+            }
+
+            const entry = this.audioCache.get(audioKey);
+            console.log('TTS: Cache hit for', audioKey, 'duration:', entry.duration);
+
+            // Create new Audio from cached blob URL
+            if (State.ttsAudio) {
+                State.ttsAudio.pause();
+                // Don't revoke cached URLs
+            }
+
+            State.ttsAudio = new Audio(entry.url);
+            this.combinedBlob = entry.blob;
+            this.activeKey = audioKey;
+
+            // Setup combined audio UI (timer/seek)
+            this.setupCombinedAudio();
+
+            // Reset progress to 0 (or resume from lastTime if desired)
+            State.ttsAudio.currentTime = 0; // Always reset for clean UX
+            return true;
+        },
+
+        // Set active key and reset UI if key changed
+        setActiveKey(audioKey) {
+            if (this.activeKey !== audioKey) {
+                // Persist old progress before switching
+                this.persistProgress();
+                this.activeKey = audioKey;
+                console.log('TTS: Active key set to', audioKey);
+            }
+        },
+
+        // Stop runtime playback but preserve cache
+        stopRuntimeOnly() {
+            // Abort any ongoing stream
+            if (this.streamAbortController) {
+                try { this.streamAbortController.abort(); } catch (_) { }
+                this.streamAbortController = null;
+            }
+            if (this.abortController) {
+                try { this.abortController.abort(); } catch (_) { }
+                this.abortController = null;
+            }
+
+            // Stop audio but preserve cache
+            this.persistProgress();
+            if (State.ttsAudio) {
+                State.ttsAudio.pause();
+                // Don't revoke cached URLs, don't null out
+            }
+            State.ttsAudio = null;
+
+            if ('speechSynthesis' in window) {
+                speechSynthesis.cancel();
+            }
+
+            // Clear streaming state
+            this.audioQueue = [];
+            this.isPlaying = false;
+            this.isPaused = false;
+            this.currentIndex = 0;
+            this.combinedBlob = null;
+            // Keep activeKey and audioCache intact
+        },
+
+        // Reset audio player UI to idle state
+        resetPlayerUI() {
+            const timeEl = $('#audio-time');
+            if (timeEl) timeEl.textContent = '--:-- / --:--';
+            const seek = $('#audio-seek');
+            if (seek) {
+                seek.value = 0;
+                seek.disabled = true;
+            }
+        },
 
         // Simple hash for client cache
         hashText(text) {
@@ -951,9 +1165,24 @@
             return matches && matches.length >= 2;
         },
 
-        async playAudio(text, language) {
+        async playAudio(text, language, audioKey = null) {
             const ttsMode = $('#tts-mode').value;
             const statusEl = $('#audio-status');
+
+            // Create deterministic audioKey if not provided
+            const newAudioKey = audioKey || `${language}|${fnv1a32(text)}`;
+
+            // If key changed, stop old session and start new one
+            if (this.currentAudioKey && this.currentAudioKey !== newAudioKey) {
+                console.log('TTS: Audio key changed, stopping old session', {
+                    old: this.currentAudioKey,
+                    new: newAudioKey
+                });
+                this.stop();
+            }
+
+            // Set current key
+            this.currentAudioKey = newAudioKey;
 
             try {
                 statusEl.textContent = 'Đang tải...';
@@ -1008,6 +1237,9 @@
 
         // Streaming TTS using SSE - plays audio as segments arrive
         async playStreamingTTS(text, language, provider) {
+            // Capture the active key at start to guard against late events
+            const streamKey = this.activeKey;
+
             return new Promise((resolve, reject) => {
                 this.audioQueue = [];
                 this.currentIndex = 0;
@@ -1016,14 +1248,19 @@
 
                 const statusEl = $('#audio-status');
 
-                // Create EventSource-like connection using fetch
+                // Create abort controller for this stream
+                this.streamAbortController = new AbortController();
+                const signal = this.streamAbortController.signal;
+
+                // Create EventSource-like connection using fetch with abort signal
                 fetch(`${CONFIG.apiBase}/tts/stream`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         ...(State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
                     },
-                    body: JSON.stringify({ text, language, provider })
+                    body: JSON.stringify({ text, language, provider }),
+                    signal
                 }).then(response => {
                     if (!response.ok) {
                         throw new Error('Streaming TTS request failed');
@@ -1039,6 +1276,12 @@
                                 const { done, value } = await reader.read();
                                 if (done) break;
 
+                                // Late event guard: if key changed, abort silently
+                                if (this.activeKey !== streamKey) {
+                                    console.log('TTS: Stream key mismatch, ignoring late events');
+                                    return resolve();
+                                }
+
                                 buffer += decoder.decode(value, { stream: true });
                                 const lines = buffer.split('\n\n');
                                 buffer = lines.pop() || '';
@@ -1046,21 +1289,37 @@
                                 for (const line of lines) {
                                     if (line.startsWith('data: ')) {
                                         const data = JSON.parse(line.slice(6));
-                                        await this.handleStreamEvent(data, statusEl, resolve, reject);
+                                        await this.handleStreamEvent(data, statusEl, resolve, reject, streamKey);
                                     }
                                 }
                             }
                         } catch (err) {
+                            if (err.name === 'AbortError') {
+                                console.log('TTS: Stream aborted');
+                                return resolve();
+                            }
                             reject(err);
                         }
                     };
 
                     processStream();
-                }).catch(reject);
+                }).catch(err => {
+                    if (err.name === 'AbortError') {
+                        console.log('TTS: Fetch aborted');
+                        return resolve();
+                    }
+                    reject(err);
+                });
             });
         },
 
-        async handleStreamEvent(data, statusEl, resolve, reject) {
+        async handleStreamEvent(data, statusEl, resolve, reject, streamKey) {
+            // Late event guard
+            if (streamKey && this.activeKey !== streamKey) {
+                console.log('TTS: Ignoring late stream event for', streamKey);
+                return;
+            }
+
             switch (data.type) {
                 case 'info':
                     this.totalSegments = data.total;
@@ -1086,7 +1345,7 @@
                     if (!this.isPlaying && this.audioQueue.length === 1) {
                         this.isPlaying = true;
                         statusEl.textContent = 'Đang phát...';
-                        this.playNextInQueue(resolve, reject);
+                        this.playNextInQueue(resolve, reject, streamKey);
                     }
                     break;
 
@@ -1095,6 +1354,28 @@
                     if (this.audioQueue.length > 0) {
                         this.combinedBlob = new Blob(this.audioQueue, { type: 'audio/mpeg' });
                         console.log('TTS: Combined blob created for seek/timer');
+
+                        // Cache the combined audio for this mondai
+                        if (this.activeKey) {
+                            const url = URL.createObjectURL(this.combinedBlob);
+                            this.audioCache.set(this.activeKey, {
+                                blob: this.combinedBlob,
+                                url,
+                                duration: 0, // Will be set when metadata loads
+                                lastTime: 0,
+                                completed: false
+                            });
+                            console.log('TTS: Cached combined audio for', this.activeKey);
+
+                            // LRU eviction if cache too large
+                            if (this.audioCache.size > 10) {
+                                const oldestKey = this.audioCache.keys().next().value;
+                                const oldEntry = this.audioCache.get(oldestKey);
+                                if (oldEntry?.url) URL.revokeObjectURL(oldEntry.url);
+                                this.audioCache.delete(oldestKey);
+                                console.log('TTS: Evicted oldest cache entry', oldestKey);
+                            }
+                        }
                     }
                     if (this.audioQueue.length === 0) {
                         resolve(); // No audio was generated
@@ -1113,7 +1394,13 @@
             }
         },
 
-        async playNextInQueue(resolve, reject) {
+        async playNextInQueue(resolve, reject, streamKey = null) {
+            // Late event guard
+            if (streamKey && this.activeKey !== streamKey) {
+                console.log('TTS: playNextInQueue - key mismatch, stopping');
+                return resolve();
+            }
+
             if (this.currentIndex >= this.audioQueue.length) {
                 // Check if more segments are coming
                 if (this.currentIndex >= this.totalSegments) {
@@ -1125,12 +1412,18 @@
                     if (this.combinedBlob) {
                         console.log('TTS: Switching to combined audio for seek/timer');
                         this.setupCombinedAudio();
+
+                        // Update duration in cache
+                        if (this.activeKey && this.audioCache.has(this.activeKey) && State.ttsAudio) {
+                            const entry = this.audioCache.get(this.activeKey);
+                            entry.duration = State.ttsAudio.duration || 0;
+                        }
                     }
 
                     resolve();
                 } else {
                     // Wait for more segments
-                    setTimeout(() => this.playNextInQueue(resolve, reject), 100);
+                    setTimeout(() => this.playNextInQueue(resolve, reject, streamKey), 100);
                 }
                 return;
             }
@@ -1422,6 +1715,13 @@
         },
 
         stop() {
+            // Abort any ongoing fetch requests
+            if (this.abortController) {
+                try {
+                    this.abortController.abort();
+                } catch (_) { }
+                this.abortController = null;
+            }
             if (State.ttsAudio) {
                 State.ttsAudio.pause();
                 if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
@@ -1436,6 +1736,7 @@
             this.isPaused = false;
             this.currentIndex = 0;
             this.combinedBlob = null;
+            this.currentAudioKey = null;
         },
 
         // Helper to resume streaming safely
@@ -1482,6 +1783,7 @@
         pendingGroups: [], // Track groups being loaded in background
         loadingGroupIndex: 0, // Current group being loaded
         isSubmitting: false, // Prevent duplicate submissions
+        isStartingTest: false, // Prevent duplicate test starts
 
         simulateProgress(bar, text) {
             if (!bar) bar = $('#loading-progress');
@@ -1515,6 +1817,13 @@
 
 
         async startTest() {
+            // Prevent duplicate test starts
+            if (this.isStartingTest) {
+                console.log('startTest already in progress, skipping');
+                return;
+            }
+            this.isStartingTest = true;
+
             const llmProvider = $('#llm-provider').value;
             const targetModel = null;
 
@@ -1564,7 +1873,7 @@
 
             // Show loading screen
             showScreen('loading-screen');
-            $('#loading-text').textContent = 'Đang khởi tạo đề thi (Server V2)...';
+            $('#loading-text').textContent = 'Đang khởi tạo đề thi...';
             $('#loading-hint').textContent = 'Đang kết nối đến ngân hàng câu hỏi...';
 
             const progressBar = $('#loading-progress');
@@ -1589,7 +1898,8 @@
                         mode: State.currentMode,
                         start_time: new Date().toISOString(),
                         time_limits: State.examSpec.scaled_time_limits || State.examSpec.official_time_limits_sec,
-                        language: 'vi-VN'
+                        language: getExamLanguage(State.examSpec.exam_id),
+                        manifest: res.manifest  // Store manifest for processChunk/loadRemainingChunksV2
                     },
                     groups: res.manifest.groups.map(g => ({
                         group_id: g.group_id,
@@ -1606,17 +1916,14 @@
 
                 // Process First Chunk
                 if (res.mondai && res.mondai.length > 0) {
-                    // First chunk usually belongs to first group?
-                    // Need to map mondai to groups.
-                    // Helper to distribute items? or we know where they go?
-                    // The startExamV2 usually returns chunk for first group.
-                    State.test.groups[0].mondai.push(...res.mondai);
+                    this.processChunk(res.mondai);
                 }
 
                 if (progressBar) progressBar.style.width = '100%';
                 if (progressText) progressText.textContent = '100%';
 
                 this.stopProgress();
+                this.isStartingTest = false; // Reset after successful start
                 showScreen('test-screen');
                 this.initializeTest();
                 console.log('Test Initialized (V2).');
@@ -1626,42 +1933,60 @@
 
             } catch (err) {
                 this.stopProgress();
+                this.isStartingTest = false; // Reset on error
                 console.error('Start Test V2 Error:', err);
                 showToast('Lỗi khởi tạo bài thi: ' + err.message, 'error');
                 showScreen('home-screen');
             }
         },
 
+        // Helper to distribute mondai to correct groups based on capacity
+        processChunk(mondaiList) {
+            const manifest = State.test.meta.manifest;
+            if (!manifest) return;
+
+            mondaiList.forEach(m => {
+                // Find first group that isn't full
+                // We match based on manifest expected counts
+                for (let i = 0; i < State.test.groups.length; i++) {
+                    const group = State.test.groups[i];
+                    const manifestGroup = manifest.groups.find(mg => mg.group_id === group.group_id);
+                    const expected = manifestGroup?.expected_mondai_count || 999;
+
+                    if (group.mondai.length < expected) {
+                        group.mondai.push(m);
+                        return;
+                    }
+                }
+                // Fallback: push to last group
+                if (State.test.groups.length > 0) {
+                    State.test.groups[State.test.groups.length - 1].mondai.push(m);
+                }
+            });
+        },
+
         async loadRemainingChunksV2() {
             if (!State.currentInstanceKey) return;
 
-            // Iterate all groups and fetch remaining content
-            // We do this sequentially or parallel? 
-            // Sequential is safer for order, parallel for speed.
-            // Sliding window of 2 requests?
-
             const instanceKey = State.currentInstanceKey;
 
-            for (let gIdx = 0; gIdx < State.test.groups.length; gIdx++) {
+            // Load all groups concurrently with bounded concurrency
+            const loadGroup = async (gIdx) => {
                 const group = State.test.groups[gIdx];
-                const expectedMondai = State.test.meta.time_limits?.groups?.[gIdx]?.mondai_count
-                    || 999; // We don't know exact count from Manifest unless provided.
-                // V2 manifest provided expected_mondai_count?
-                // Yes, res.manifest.groups[i].expected_mondai_count.
-                // But State.test.groups doesn't have it unless we stored it.
-                // Let's assume we fetch until "done" flag.
-
-                let done = false;
-                // Check if we already have items (from first chunk)
-                // If group 0, we might have some.
-
                 const group_id = group.group_id;
 
+                // Check if already full from initial chunk
+                const manifestGroup = State.test.meta.manifest.groups.find(mg => mg.group_id === group_id);
+                const expected = manifestGroup?.expected_mondai_count || 0;
+
+                if (group.mondai.length >= expected) {
+                    console.log(`Group ${group_id} already has ${group.mondai.length}/${expected} items.`);
+                    return;
+                }
+
+                let done = false;
                 while (!done) {
-                    // Check if we have enough?
-                    // We just fetch next chunk.
                     try {
-                        // Request next 3 items
                         const res = await Api.fetchExamChunk(instanceKey, group_id, 3);
 
                         if (res.chunk && res.chunk.length > 0) {
@@ -1671,20 +1996,23 @@
 
                         done = res.done;
                         if (done) console.log(`Group ${group_id} fully loaded.`);
-
-                        // Small delay to be nice to server/rate limits
-                        await new Promise(r => setTimeout(r, 500));
+                        await new Promise(r => setTimeout(r, 300)); // Reduced delay for faster loading
 
                     } catch (e) {
                         console.error(`Error loading chunk for ${group_id}:`, e);
-                        // Retry once then skip? Or abort?
-                        // Simple retry logic
-                        await new Promise(r => setTimeout(r, 2000));
-                        // If it fails again, we might stop this group loop or continue
+                        done = true; // Stop loop on error to avoid infinite retry
                     }
                 }
-            }
-            console.log('All chunks loaded (V2).');
+            };
+
+            // Schedule all groups concurrently (limit to 3 concurrent)
+            RequestQueue.setLimit(3);
+            const promises = State.test.groups.map((_, gIdx) =>
+                RequestQueue.schedule(() => loadGroup(gIdx))
+            );
+
+            await Promise.all(promises);
+            console.log('All chunks loaded (V2 concurrent).');
         },
 
         async loadRemainingChunksInBackground(groupResult, startChunkIndex, totalChunks, previousMondai, llmProvider, targetModel = null, concurrency = 3, pendingPromisesMap = {}, pendingGroupsMap = {}) {
@@ -1938,6 +2266,11 @@
         },
 
         renderCurrentMondai() {
+            // Stop any playing audio before rendering new mondai
+            if (typeof TTSManager !== 'undefined' && TTSManager.stop) {
+                try { TTSManager.stop(); } catch (_) { }
+            }
+
             const test = State.test;
             const mondaiData = this.getCurrentMondaiData();
 
@@ -1974,48 +2307,30 @@
             // Update navigation buttons (prev/next state based on loaded mondai)
             this.updateNavigationButtons();
 
-            // Update header
-            // Update header
-            // mondai_id might be "M1", "L1", "N2-L1-01" (if from chunk)
-            // We want purely "Mondai {Number}: {Title}"
-            // If title_vi already contains "Mondai", strip it to avoid duplication?
-            // Screenshot showed "Mondai N2-L1-01: Mondai 1: ..."
-            // This suggests mondai.mondai_id IS "N2-L1-01" (generated ID) and title_vi IS "Mondai 1: ..."
+            // Update header - prioritize meta.display_title, then title_vi, then fallback
+            // Detect if listening type for proper prefix
+            const isListening = mondai.items?.some(item =>
+                item.type?.includes('listen') || item.type?.includes('dialogue') || item.type?.includes('mono')
+            ) || !!mondai.media?.script_text;
 
-            // Heuristic: Extract the primary identifier (1, 2, 3...)
-            // 1. If title_vi starts with "Mondai X:", just use title_vi.
-            // 2. If valid simple ID (M1, L1), construct "Mondai 1: ..."
-
-            let displayTitle = mondai.title_vi;
-            // Remove "(Task-based...)" English text if present/requested?
-            // User said "phần mở ngoặc là tiếng nhật" (brackets are Japanese). 
-            // Current title_vi: "Hiểu vấn đề (Task-Based Comprehension)" -> keep or replace English?
-            // "tiếp tục thống nhất tiêu đề ( phần mở ngoặc là tiếng nhật)" -> The content inside brackets IS/SHOULD BE Japanese?
-            // Or user means "Keep the Japanese in brackets"? 
-            // Assuming user wants cleaner title.
-
-            // Clean ID logic:
+            // Extract mondai number from mondai_id (M1->1, L2->2, etc.)
             const rawId = mondai.mondai_id || '';
-            let simpleId = '';
+            const mondaiNum = rawId.match(/[ML](\d+)/)?.[1] || String(State.currentMondaiIndex + 1);
+            const prefix = isListening ? 'Listen' : 'Mondai';
 
-            // Try to parse '1' from 'M1', 'L1', 'N2-L1'
-            // If rawId is complex like 'N2-L1-01', it corresponds to 'L1'.
-            if (rawId.match(/[ML](\d+)/)) {
-                simpleId = rawId.match(/[ML](\d+)/)[1];
-            }
-
-            // If title ALREADY has "Mondai X", use it.
-            if (displayTitle.match(/^Mondai \d+:/)) {
-                // It's already good: "Mondai 1: Hiểu vấn đề"
-            } else if (simpleId) {
-                // Prepend
-                displayTitle = `Mondai ${simpleId}: ${displayTitle}`;
+            let displayTitle;
+            if (mondai.meta?.display_title) {
+                // Use generated display_title directly
+                displayTitle = mondai.meta.display_title;
+            } else if (mondai.title_vi && !mondai.title_vi.match(/^(Mondai|Listen)\s+\d+/)) {
+                // Has title_vi but no prefix - add prefix
+                displayTitle = `${prefix} ${mondaiNum}: ${mondai.title_vi}`;
+            } else if (mondai.title_vi) {
+                // title_vi already has proper format
+                displayTitle = mondai.title_vi;
             } else {
-                // Fallback if no ID found (rare)
-                if (!displayTitle.startsWith('Mondai')) {
-                    // Maybe use index? But we don't have safe index here easily without context.
-                    // Leave as is if we can't detect.
-                }
+                // Fallback to simple prefix + number
+                displayTitle = `${prefix} ${mondaiNum}`;
             }
 
             $('#mondai-title').textContent = displayTitle;
@@ -2038,15 +2353,25 @@
 
             // Render audio player for listening
             const audioPlayer = $('#audio-player');
-            const hasAudio = mondai.items.some(item => item.media?.script_text);
+            // Listening Mode B: audio script is at mondai.media.script_text
+            const hasAudio = !!(mondai.media?.script_text ||
+                mondai.items.some(item => item.media?.script_text)); // Legacy fallback
             const audioScript = $('#audio-script');
             const btnShowScript = $('#btn-show-script');
 
             if (hasAudio) {
                 audioPlayer.classList.remove('hidden');
 
-                // Setup script
-                const scriptText = mondai.items.find(item => item.media?.script_text)?.media?.script_text;
+                // Setup script - prefer mondai.media.script_text (Mode B)
+                let scriptText = mondai.media?.script_text;
+                if (!scriptText) {
+                    // Legacy fallback: check items (log warning for dev)
+                    const legacyItem = mondai.items.find(item => item.media?.script_text);
+                    if (legacyItem?.media?.script_text) {
+                        scriptText = legacyItem.media.script_text;
+                        console.warn('[DEV] Audio script found at item level, should be at mondai.media.script_text');
+                    }
+                }
                 if (scriptText) {
                     btnShowScript.classList.remove('hidden');
                     audioScript.innerHTML = this.escapeHtml(scriptText).replace(/\n/g, '<br>');
@@ -2177,14 +2502,42 @@
                 return;
             }
 
-            // 3. Initial Start (No audio yet)
+            // 3. Initial Start (No audio yet) - check cache first
             const mondaiData = this.getCurrentMondaiData();
-            const scriptItem = mondaiData?.mondai?.items?.find(item => item.media?.script_text);
-            if (scriptItem?.media?.script_text) {
-                console.log('TPS: Starting new TTS stream');
+            // Listening Mode B: prefer mondai.media.script_text
+            let scriptText = mondaiData?.mondai?.media?.script_text;
+            if (!scriptText) {
+                // Legacy fallback
+                const legacyItem = mondaiData?.mondai?.items?.find(item => item.media?.script_text);
+                scriptText = legacyItem?.media?.script_text;
+            }
+            if (scriptText) {
+                const lang = State.test.meta.language || getExamLanguage(State.test.meta.exam_id);
+
+                // Generate deterministic audioKey for this mondai
+                const groupId = State.test.groups?.[State.currentGroupIndex]?.group_id || 'unknown-group';
+                const mondaiId = mondaiData?.mondai?.mondai_id || String(State.currentMondaiIndex);
+                const audioKey = `${lang}|${groupId}|${mondaiId}|${fnv1a32(scriptText)}`;
+
+                // Set active key for this mondai
+                TTSManager.setActiveKey(audioKey);
+
+                // Check cache first - if hit, load and play from cache
+                if (TTSManager.loadFromCacheIfAny(audioKey)) {
+                    console.log('TTS: Playing from cache');
+                    this.updateAudioButton('playing');
+                    try {
+                        await State.ttsAudio.play();
+                    } catch (e) {
+                        console.warn('Cache play failed:', e);
+                    }
+                    return;
+                }
+
+                // Cache miss - start new TTS stream
+                console.log('TTS: Starting new TTS stream (cache miss)');
                 this.updateAudioButton('loading');
-                const lang = State.test.meta.language || 'ja-JP';
-                TTSManager.playAudio(scriptItem.media.script_text, lang);
+                TTSManager.playAudio(scriptText, lang, audioKey);
             } else {
                 showToast('Không có dữ liệu âm thanh cho bài này', 'info');
             }
@@ -2275,6 +2628,11 @@
         },
 
         getTotalMondaiCount() {
+            // V2: Use manifest for total count (as mondai are loaded lazily)
+            if (State.test.meta?.manifest) {
+                return State.test.meta.manifest.groups.reduce((sum, g) => sum + (g.expected_mondai_count || 0), 0);
+            }
+            // V1 / Fallback
             return State.test.groups.reduce((sum, g) => sum + g.mondai.length, 0);
         },
 
@@ -2371,6 +2729,11 @@
                 return;
             }
 
+            // Stop current audio session before navigating (preserves cache)
+            TTSManager.stopRuntimeOnly();
+            TTSManager.resetPlayerUI();
+            this.updateAudioButton('idle');
+
             if (newIndex >= 0 && newIndex < total) {
                 // Check if crossing group boundary
                 const oldGroupIndex = this.getGroupIndexForMondai(State.currentMondaiIndex);
@@ -2416,9 +2779,59 @@
             return idx;
         },
 
+        // Count unanswered questions in current scope
+        countUnansweredInCurrentScope(scope = 'group') {
+            let items = [];
+
+            if (scope === 'group') {
+                // Count in current group only
+                const currentGroup = State.test.groups[State.currentGroupIndex];
+                if (currentGroup) {
+                    currentGroup.mondai.forEach(m => {
+                        if (m.items) items.push(...m.items);
+                    });
+                }
+            } else {
+                // Count all loaded items
+                State.test.groups.forEach(g => {
+                    if (g && g.mondai) {
+                        g.mondai.forEach(m => {
+                            if (m.items) items.push(...m.items);
+                        });
+                    }
+                });
+            }
+
+            return items.filter(item =>
+                State.answers[item.id] === undefined ||
+                State.answers[item.id] === null
+            ).length;
+        },
+
+        // Show confirmation for unanswered questions
+        async confirmUnansweredSubmit(count, isWholeTest = false) {
+            return new Promise((resolve) => {
+                const msg = isWholeTest
+                    ? `Bạn còn ${count} câu chưa trả lời. Bạn vẫn muốn nộp bài thi?`
+                    : `Bạn còn ${count} câu chưa trả lời. Bạn vẫn muốn nộp phần này?`;
+
+                // Use browser confirm for simplicity
+                resolve(confirm(msg));
+            });
+        },
+
         async moveToNextGroup() {
             // Prevent duplicate submissions
             if (this.isSubmitting) return;
+
+            // Check for unanswered questions before proceeding
+            const isLastGroup = State.currentGroupIndex === State.examSpec.groups.length - 1;
+            const unansweredCount = this.countUnansweredInCurrentScope(isLastGroup ? 'all' : 'group');
+
+            if (unansweredCount > 0) {
+                const confirmed = await this.confirmUnansweredSubmit(unansweredCount, isLastGroup);
+                if (!confirmed) return; // User cancelled, stay in test
+            }
 
             const submitBtn = $('#btn-submit-group');
             const originalText = submitBtn.textContent;
@@ -2545,11 +2958,35 @@
             if (State.currentInstanceKey) {
                 try {
                     showScreen('loading-screen');
-                    $('#loading-text').textContent = 'Đang chấm điểm (Server)...';
+                    $('#loading-text').textContent = 'Đang chấm điểm';
                     $('#loading-hint').textContent = 'Đang kiểm tra kết quả từ hệ thống...';
 
                     const feedback = await Api.quickGradeV2(State.currentInstanceKey, State.answers);
                     feedback.grading_mode = 'quick';
+
+                    // Transform by_question (Object) to Array for ReviewUI
+                    // And merge with local content (which has prompts/choices but maybe not answers)
+                    const questionsWithAnswers = [];
+                    State.test.groups.forEach(group => {
+                        group.mondai.forEach(mondai => {
+                            mondai.items.forEach(item => {
+                                const result = feedback.by_question[item.id];
+                                if (result) {
+                                    questionsWithAnswers.push({
+                                        id: item.id,
+                                        is_correct: result.is_correct,
+                                        user_answer_index: State.answers[item.id],
+                                        correct_index: result.correct_index,
+                                        prompt: item.prompt,
+                                        choices: item.choices,
+                                        key_point_vi: item.explain_brief || '',
+                                        tags: item.tags
+                                    });
+                                }
+                            });
+                        });
+                    });
+                    feedback.by_question = questionsWithAnswers;
 
                     State.feedback = feedback;
                     await this.saveToHistory(feedback);
@@ -2679,6 +3116,11 @@
             if (confirmed) {
                 Timer.stopAll();
                 TTSManager.stop();
+
+                // Reset all flags
+                this.isStartingTest = false;
+                this.isSubmitting = false;
+
                 State.test = null;
                 State.answers = {};
                 State.currentMondaiIndex = 0;
@@ -2833,8 +3275,8 @@
 
         escapeHtml(text) {
             // Allow safe formatting tags for Japanese/Chinese text
-            // Allowed: u, b, i, em, strong, ruby, rt, rp, br, span
-            const allowedTags = ['u', 'b', 'i', 'em', 'strong', 'ruby', 'rt', 'rp', 'br', 'span'];
+            // Allowed: b, i, em, strong, ruby, rt, rp, br, span (NOT u - convert to .hl)
+            const allowedTags = ['b', 'i', 'em', 'strong', 'ruby', 'rt', 'rp', 'br', 'span'];
 
             if (!text) return '';
 
@@ -2864,6 +3306,20 @@
                     placeholders.push(`</${tag.toLowerCase()}>`);
                     return `\x00PH${idx}\x00`;
                 });
+            });
+
+            // Convert [[...]] emphasis markers BEFORE escaping (preserve them)
+            result = result.replace(/\[\[([^\]]+)\]\]/g, (match, content) => {
+                const idx = placeholders.length;
+                placeholders.push(`<strong class="hl">${content}</strong>`);
+                return `\x00PH${idx}\x00`;
+            });
+
+            // Convert legacy <u>...</u> tags to .hl class (before escaping)
+            result = result.replace(/<u>([^<]*)<\/u>/gi, (match, content) => {
+                const idx = placeholders.length;
+                placeholders.push(`<strong class="hl">${content}</strong>`);
+                return `\x00PH${idx}\x00`;
             });
 
             // Now escape everything else
@@ -2964,7 +3420,7 @@
                 if (!questionData) return '';
 
                 const userAnswer = State.answers[item.id];
-                const correctAnswer = questionData.answer_index;
+                const correctAnswer = item.correct_index !== undefined ? item.correct_index : questionData.answer_index;
 
                 return `
           <div class="review-item ${item.is_correct ? '' : 'incorrect'}">

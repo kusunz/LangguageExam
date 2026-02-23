@@ -1,7 +1,7 @@
 # Dependencies
 node_modules/
 .agent/
-
+*.zip
 # Environment files
 .env
 .env.local
@@ -36,3 +36,6 @@ server/server.log
 
 # Private project notes
 .project-notes.md
+test-v2.js
+test-api.js
+check.ps1

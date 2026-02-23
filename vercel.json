@@ -1,5 +1,19 @@
 {
     "version": 2,
+    "crons": [
+        {
+            "path": "/api/admin/warmup?level=N2&mode=basic",
+            "schedule": "10 0 * * *"
+        },
+        {
+            "path": "/api/admin/warmup?level=N2&mode=standard",
+            "schedule": "15 0 * * *"
+        },
+        {
+            "path": "/api/admin/warmup?level=N2&mode=official",
+            "schedule": "20 0 * * *"
+        }
+    ],
     "rewrites": [
         {
             "source": "/api/(.*)",

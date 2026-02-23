@@ -12,6 +12,13 @@ const path = require('path');
 const crypto = require('crypto');
 const { createRemoteJWKSet, jwtVerify } = require('jose');
 const db = require('./db');
+// DB connection is managed via db.js exports.
+// We strictly use:
+// DB_MODE='neon' -> fail fast, no fallback
+// DB_MODE='auto' -> attempt connect, fallback allowed
+const { isDbReady, DB_MODE, IS_NEON_MODE, IS_VERCEL, driverType } = db;
+// Note: We no longer use a global IS_DB_AVAILABLE flag.
+// Instead we check await db.initDb() at points of use.
 const {
   JLPT_READING_TYPES,
   READING_TIME_BUDGET,
@@ -21,12 +28,8 @@ const {
 const { createClient } = require('@deepgram/sdk');
 const DEFAULT_GEMINI_MODEL = process.env.DEFAULT_GEMINI_MODEL || 'gemini-3-pro-preview';
 
-// Initialize Database
-let IS_DB_AVAILABLE = false;
-db.initDb().then(success => {
-  IS_DB_AVAILABLE = success;
-  if (!success) console.log('⚠️ Running with File System storage fallback');
-}).catch(console.error);
+// DB availability is now checked via db.initDb() at usage points
+// In Neon mode, server fails fast at boot (see bottom of file)
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -37,6 +40,14 @@ app.set('trust proxy', 1);
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+// JSON Parse Error Handler
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    console.error(`[JSON Error] ${req.path}: ${err.message}`);
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
+  next();
+});
 app.use(express.static(path.join(__dirname, '../web')));
 
 // Rate limiting
@@ -57,10 +68,10 @@ const verifyAnswerLimiter = rateLimit({
   keyGenerator: (req) => req.user?.userId || req.ip
 });
 
-// Data directory
-// Data directory (Legacy/Local usage only - skipped for cloud)
-const DATA_DIR = path.join(__dirname, 'data');
-fs.mkdir(DATA_DIR, { recursive: true }).catch(() => { });
+// Data directory: (Removed for strict DB mode)
+// We rely entirely on the database.
+const DATA_DIR = IS_VERCEL ? '/tmp/data' : path.join(__dirname, 'data');
+// NOTE: We do NOT use fs.mkdir or local files in this refined architecture.
 
 // Privy JWKS for token verification
 const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
@@ -135,6 +146,12 @@ async function authMiddleware(req, res, next) {
   }
 }
 
+const DEFAULT_MODES = {
+  basic: { question_scale: 0.5, time_scale: 0.5 },
+  standard: { question_scale: 1.0, time_scale: 1.0 },
+  official: { question_scale: 1.0, time_scale: 1.0 }
+};
+
 // ============ Auth Endpoints ============
 
 // Get public config (no auth required)
@@ -153,22 +170,17 @@ app.post('/api/me', authMiddleware, (req, res) => {
 // ============ DB Helper Functions ============
 
 async function loadUserData(userId, email) {
-  // If DB is NOT available, use File System (even for demo user to support testing)
-  if (!IS_DB_AVAILABLE) {
-    const filePath = path.join(DATA_DIR, `${userId}.json`);
-    try {
-      const content = await fs.readFile(filePath, 'utf8');
-      return JSON.parse(content);
-    } catch (e) {
-      // Return default if file doesn't exist
-      return {
-        history: [],
-        mistakeBook: [],
-        weakTags: [],
-        nickname: userId === 'demo-user' ? 'Demo User' : null,
-        settings: {}
-      };
-    }
+  // Check DB availability via init
+  const dbOk = await db.initDb();
+
+  // In Neon mode, DB must be available
+  if (IS_NEON_MODE && !dbOk) {
+    throw new Error('DB required in Neon mode but unavailable');
+  }
+
+  // In Strict Mode (Neon/Production), we require DB.
+  if (!dbOk) {
+    throw new Error('Database unavailable. Please check connection.');
   }
 
   // Standard Demo Mode (when DB is available but user is demo)
@@ -183,12 +195,12 @@ async function loadUserData(userId, email) {
   }
 
   try {
-    const res = await db.pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+    const res = await db.query('SELECT * FROM users WHERE id = $1', [userId]);
 
     if (res.rows.length === 0) {
       // Create new user if not exists
       const initialData = { history: [], mistakeBook: {}, weakTags: [], settings: {} };
-      await db.pool.query(
+      await db.query(
         'INSERT INTO users (id, email, data) VALUES ($1, $2, $3)',
         [userId, email || '', JSON.stringify(initialData)]
       );
@@ -196,7 +208,8 @@ async function loadUserData(userId, email) {
     }
 
     const { data, nickname } = res.rows[0];
-    return { ...data, nickname };
+    const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+    return { ...parsedData, nickname };
   } catch (err) {
     console.error('DB load error:', err);
     throw err;
@@ -204,10 +217,17 @@ async function loadUserData(userId, email) {
 }
 
 async function saveUserData(userId, data) {
-  // Fallback to File System if DB unavailable
-  if (!IS_DB_AVAILABLE) {
-    const filePath = path.join(DATA_DIR, `${userId}.json`);
-    await fs.writeFile(filePath, JSON.stringify(data, null, 2));
+  // Check DB availability via init
+  const dbOk = await db.initDb();
+
+  // In Neon mode, DB must be available
+  if (IS_NEON_MODE && !dbOk) {
+    throw new Error('DB required in Neon mode but unavailable');
+  }
+
+  // Skip save if DB unavailable (ephemeral mode)
+  if (!dbOk) {
+    console.log(`[WARN] DB unavailable, skipping save for user ${userId}`);
     return;
   }
 
@@ -217,56 +237,64 @@ async function saveUserData(userId, data) {
   const { nickname, ttsCache, ...jsonData } = data;
 
   if (nickname) {
-    await db.pool.query(
+    await db.query(
       'UPDATE users SET data = $1, nickname = $2 WHERE id = $3',
       [JSON.stringify(jsonData), nickname, userId]
     );
   } else {
-    await db.pool.query(
+    await db.query(
       'UPDATE users SET data = $1 WHERE id = $2',
       [JSON.stringify(jsonData), userId]
     );
   }
 }
 
-// Helper: Manage Sessions
-async function manageSession(userId, existingSessionId) {
-  // 1. Clean up expired sessions
-  await db.pool.query('DELETE FROM sessions WHERE expires_at < NOW()');
+// Helper: Manage Sessions (Max 1 session per user - new login forces logout of previous)
+async function manageSession(userId, existingSessionId, email = '') {
+  try {
+    // Use transaction to ensure atomicity
+    await db.query('BEGIN');
 
-  // 2. Check if existing session is valid (must be a valid UUID)
-  const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(existingSessionId);
+    // 0. Ensure user exists (UPSERT) - prevents FK violation on sessions insert
+    await db.query(`
+      INSERT INTO users (id, email, data)
+      VALUES ($1, $2, '{}')
+      ON CONFLICT (id) DO UPDATE SET last_login_at = NOW()
+    `, [userId, email || '']);
 
-  if (existingSessionId && isUUID) {
-    const res = await db.pool.query('SELECT id FROM sessions WHERE id = $1 AND user_id = $2', [existingSessionId, userId]);
-    if (res.rows.length > 0) {
-      // Refresh expiry (extend by 7 days)
-      await db.pool.query("UPDATE sessions SET expires_at = NOW() + INTERVAL '7 days' WHERE id = $1", [existingSessionId]);
-      return existingSessionId;
+    // 1. Clean up expired sessions
+    await db.query('DELETE FROM sessions WHERE expires_at < NOW()');
+
+    // 2. Check if existing session is valid (must be a valid UUID)
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(existingSessionId);
+
+    if (existingSessionId && isUUID) {
+      const res = await db.query('SELECT id FROM sessions WHERE id = $1 AND user_id = $2', [existingSessionId, userId]);
+      if (res.rows.length > 0) {
+        // Refresh expiry (extend by 7 days)
+        await db.query("UPDATE sessions SET expires_at = NOW() + INTERVAL '7 days' WHERE id = $1", [existingSessionId]);
+        await db.query('COMMIT');
+        return existingSessionId;
+      }
     }
-  }
 
-  // 3. Create new session (Enforce limit 3)
-  const countRes = await db.pool.query('SELECT COUNT(*) FROM sessions WHERE user_id = $1', [userId]);
-  const count = parseInt(countRes.rows[0].count);
+    // 3. Delete ALL existing sessions for this user (enforce 1 session limit)
+    await db.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
 
-  if (count >= 3) {
-    // Delete oldest session
-    await db.pool.query(`
-      DELETE FROM sessions WHERE id IN (
-        SELECT id FROM sessions WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1
-      )
+    // 4. Create new session
+    const newSessionRes = await db.query(`
+      INSERT INTO sessions (user_id, token, expires_at)
+      VALUES ($1, 'valid', NOW() + INTERVAL '7 days')
+      RETURNING id
     `, [userId]);
+
+    await db.query('COMMIT');
+    return newSessionRes.rows[0].id;
+  } catch (err) {
+    await db.query('ROLLBACK').catch(() => { });
+    console.error('manageSession error:', err.code || 'UNKNOWN', err.message);
+    throw err;
   }
-
-  // Create new session
-  const newSessionRes = await db.pool.query(`
-    INSERT INTO sessions (user_id, token, expires_at)
-    VALUES ($1, 'valid', NOW() + INTERVAL '7 days')
-    RETURNING id
-  `, [userId]);
-
-  return newSessionRes.rows[0].id;
 }
 
 // Get user data (Acts as Login/Session Init)
@@ -274,21 +302,48 @@ app.post('/api/user-data', authMiddleware, async (req, res) => {
   try {
     const { sessionId } = req.body; // Frontend sends current session ID if exists
 
-    // Manage Session
-    const activeSessionId = await manageSession(req.user.userId, sessionId);
+    // Check DB status
+    const dbOk = await db.initDb();
+
+    // Manage Session (only if DB available and not demo user)
+    let activeSessionId = null;
+    if (dbOk && req.user.userId !== 'demo-user') {
+      try {
+        activeSessionId = await manageSession(req.user.userId, sessionId, req.user.email);
+      } catch (e) {
+        console.error('Session management failed:', e.message, e.code || '', e.detail || '');
+        // Continue without session if DB fails momentarily
+      }
+    }
 
     // Load Data
     const data = await loadUserData(req.user.userId, req.user.email);
 
-    // Update last login
-    await db.pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [req.user.userId]);
+    // Update last login (only if DB available and not demo)
+    if (dbOk && req.user.userId !== 'demo-user') {
+      try {
+        await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [req.user.userId]);
+      } catch (e) {
+        console.error('Update last_login failed:', e.message, e.code || '');
+      }
+    }
 
     res.json({ ...data, sessionId: activeSessionId });
   } catch (err) {
-    console.error('Load user data error:', err);
-    res.status(500).json({ error: 'Failed to load user data' });
+    console.error('Load user data error:', {
+      message: err.message,
+      code: err.code || 'UNKNOWN',
+      detail: err.detail || null,
+      stack: err.stack
+    });
+    res.status(500).json({
+      error: 'Failed to load user data',
+      code: err.code || 'UNKNOWN',
+      message: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 });
+
 
 // Save user data
 app.put('/api/user-data', authMiddleware, async (req, res) => {
@@ -317,7 +372,7 @@ app.post('/api/notebook', authMiddleware, async (req, res) => {
     const hash = generateQuestionHash(question);
 
     // Upsert question to bank (ignore if exists)
-    await db.pool.query(
+    await db.query(
       `INSERT INTO questions (hash, content, keywords) 
        VALUES ($1, $2, $3) 
        ON CONFLICT (hash) DO NOTHING`,
@@ -325,13 +380,13 @@ app.post('/api/notebook', authMiddleware, async (req, res) => {
     );
 
     if (action === 'remove') {
-      await db.pool.query(
+      await db.query(
         'DELETE FROM user_notebook WHERE user_id = $1 AND question_hash = $2',
         [userId, hash]
       );
     } else {
       // Upsert notebook entry
-      await db.pool.query(
+      await db.query(
         `INSERT INTO user_notebook (user_id, question_hash, note, tags)
          VALUES ($1, $2, $3, $4)
          ON CONFLICT (user_id, question_hash) 
@@ -353,7 +408,7 @@ app.get('/api/notebook', authMiddleware, async (req, res) => {
     const userId = req.user.userId;
     if (IS_DEMO_MODE || userId === 'demo-user') return res.json({ items: [] });
 
-    const result = await db.pool.query(`
+    const result = await db.query(`
       SELECT n.*, q.content, q.hash
       FROM user_notebook n
       JOIN questions q ON n.question_hash = q.hash
@@ -399,7 +454,7 @@ async function saveQuestionsFromTest(testData) {
         for (const item of mondai.items) {
           const hash = generateQuestionHash(item);
           // Fire and forget insert
-          db.pool.query(
+          db.query(
             `INSERT INTO questions (hash, content, keywords) 
              VALUES ($1, $2, $3) 
              ON CONFLICT (hash) DO NOTHING`,
@@ -458,6 +513,7 @@ function sanitizeMondaiForClient(data) {
         delete item.answer_index;
         delete item.correct_answer;
         delete item.answer_key;
+        delete item.answer_keys; // Ensure plural is also removed
         delete item.explanation_source; // Internal notes
       });
     }
@@ -522,57 +578,33 @@ function generateMondaiHash(mondai) {
   return crypto.createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
 }
 
+// ============ V2 Pool Architecture ============
+
+const ON_DEMAND_BATCH = 1;
+const WARM_TARGET_PER_BUCKET = 50;
+
 /**
- * Ensure pool snapshot exists and has sufficient items
- * Lazy generation if missing or insufficient
+ * Ensure pool snapshot exists (Meta only)
+ * Does NOT actively fill pool - on-demand generation in buildExamBlueprint handles this
  */
 async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
-  if (!IS_DB_AVAILABLE) return null; // Fallback to live gen if no DB
+  // Wait for DB initialization instead of checking boolean
+  const ok = await db.initDb();
+  if (!ok) return null;
 
-  const TARGET_PER_BUCKET = 50; // Start small for cost control (Plan said 100)
+  // UPSERT Snapshot (race-safe)
+  const snapshotRes = await db.query(`
+    INSERT INTO pool_snapshots (exam_id, level, mode, date_ymd)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (exam_id, level, mode, date_ymd)
+    DO UPDATE SET exam_id = EXCLUDED.exam_id
+    RETURNING id
+  `, [examSpec.exam_id, level, mode, dateYmd]);
 
-  // 1. Check/Create Snapshot
-  let snapshotRes = await db.pool.query(`
-    SELECT id FROM pool_snapshots 
-    WHERE exam_id=$1 AND level=$2 AND date_ymd=$3 AND mode=$4
-  `, [examSpec.exam_id, level, dateYmd, mode]);
+  const snapshotId = snapshotRes.rows[0]?.id;
 
-  let snapshotId;
-  if (snapshotRes.rows.length === 0) {
-    const createRes = await db.pool.query(`
-      INSERT INTO pool_snapshots (exam_id, level, date_ymd, mode)
-      VALUES ($1, $2, $3, $4)
-      RETURNING id
-    `, [examSpec.exam_id, level, dateYmd, mode]);
-    snapshotId = createRes.rows[0].id;
-  } else {
-    snapshotId = snapshotRes.rows[0].id;
-  }
-
-  // 2. Check Buckets and Fill
-  for (const group of examSpec.groups) {
-    for (const mondaiDef of group.mondai) {
-      if (!mondaiDef.types || mondaiDef.types.length === 0) continue;
-
-      const primaryType = mondaiDef.types[0];
-      const bucketKey = getBucketKey(group.group_id, mondaiDef.mondai_id, primaryType);
-
-      const countRes = await db.pool.query(`
-        SELECT COUNT(*) FROM pool_snapshot_items
-        WHERE snapshot_id=$1 AND bucket_key=$2
-      `, [snapshotId, bucketKey]);
-
-      const currentCount = parseInt(countRes.rows[0].count);
-      if (currentCount < TARGET_PER_BUCKET) {
-        // Need to fill
-        await generateMondaiForBucket({
-          examSpec, level, mode, group, mondaiDef, bucketKey, snapshotId,
-          count: TARGET_PER_BUCKET - currentCount,
-          plan
-        });
-      }
-    }
-  }
+  // NOTE: No preroll here - on-demand generation in buildExamBlueprint handles missing items
+  // This ensures /api/exam/start returns quickly without blocking Gemini calls
 
   return snapshotId;
 }
@@ -583,109 +615,155 @@ async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
 async function generateMondaiForBucket(params) {
   const { examSpec, level, mode, group, mondaiDef, bucketKey, snapshotId, count, plan } = params;
 
-  // Use lower tier model for bulk generation if possible, or standard logic
-  // For now verify logic relies on default model behavior or context
-
-  const BATCH_SIZE = 3;
-  let remaining = count;
+  let remaining = Math.max(0, Number(count) || 0);
+  if (remaining === 0) return;
 
   while (remaining > 0) {
-    const currentBatch = Math.min(remaining, BATCH_SIZE);
+    const prompt = buildMondaiChunkPrompt(examSpec, mode, group, 0, [mondaiDef], 0, []);
 
-    // Reuse buildMondaiChunkPrompt: needs careful args
-    // We want to generate 'currentBatch' items of THIS mondai_id
-    // But buildMondaiChunkPrompt is designed for progressive flow (1 mondai at a time usually)
-    // We can ask it to generate specific mondai definition
-    // We'll pass [mondaiDef] repeated? No, the prompt builder iterates.
-    // Actually buildMondaiChunkPrompt takes (examSpec, mode, group, groupIndex, mondaiList, startIndex, context)
-    // We can pass a constructed list of just this mondaiDef repeated 'currentBatch' times?
-    // OR just call it once per item?
-    // Optimization: Ask for 3 questions/items?
-    // The Prompt is typically "Generate mondai chunk for these mondai IDs"
-    // Let's create a temporary group structure
-
-    const tempGroup = { ...group, mondai: [mondaiDef] };
-    // We want 'currentBatch' instances of this Mondai? 
-    // Usually JLPT has 1 instance of M1, 1 of M2 per exam.
-    // But here we are building a POOL of different variants of M1.
-    // So we invoke the prompt to generate M1 multiple times?
-    // The LLM Prompt usually generates ONE instance of the list passed.
-    // So if we want 3 variants, we need 3 calls OR ask for 3 distinct variants?
-    // Prompt structure: "Generate the next 2-3 mondai".
-    // If we pass [M1, M1, M1], it might be confused.
-    // Better to loop and call 1 by 1 or small batch if distinct mondai types.
-    // Since we are filling ONE bucket (e.g. valid variants of M1), we should call loop.
-
-    // Let's call for 1 instance at a time for safety/quality, but parallelize?
-    // Or just generating 3 variants in one prompt? 
-    // "Create 3 distinct variations of Mondai M1"
-    // buildMondaiChunkPrompt might not support that explicitly.
-    // We will stick to 1 by 1 for now to ensure quality and format compliance.
-    // It's a background process anyway (lazy/cron).
-
-    // Actually, to be faster, if remaining >= 3, we can try to ask for 3?
-    // But let's keep it simple: Loop.
-
-    const prompt = buildMondaiChunkPrompt(
-      examSpec, mode, group, 0, [mondaiDef], 0, []
-    );
-
-    // Modify prompt to ask for VARIATION if needed? 
-    // The prompt includes "Make a unique question". 
-    // LLM temperature handles variety.
-
-    // Call LLM
     try {
-      // Use PRO model for quality even in pool? Or Flash for speed?
-      // Plan said: "Use free tier for pool generation".
-      const result = await callGemini(prompt, {
-        temperature: 0.8, // High temp for variety
-        proOnly: false // Allow flash
-      });
+      const result = await callGemini(prompt, { temperature: 0.8, proOnly: false, plan });
+      const mondaiList = Array.isArray(result?.mondai) ? result.mondai : [];
 
-      if (result && result.mondai) {
-        for (const m of result.mondai) {
-          // Normalize and hash
-          m.mondai_id = mondaiDef.mondai_id; // Ensure ID matches
-          m.primary_type = mondaiDef.types[0];
+      if (mondaiList.length === 0) {
+        remaining -= 1;
+        continue;
+      }
 
-          const hash = generateMondaiHash(m);
+      for (const m of mondaiList) {
+        if (remaining <= 0) break;
+        // Normalize and hash
+        m.mondai_id = mondaiDef.mondai_id; // Ensure ID matches
+        m.primary_type = mondaiDef.types[0];
 
-          // Save to Bank
-          await db.pool.query(`
-            INSERT INTO mondai_bank (hash, exam_id, group_id, mondai_id, primary_type, content, meta)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        const hash = generateMondaiHash(m);
+
+        // Extract item_type and estimated cost
+        const itemType = m.mondai_type || mondaiDef.mondai_type || 'unknown';
+        const estimatedCost = mondaiDef.estimated_seconds || 60;
+
+        // Save to Bank with all required columns
+        await db.query(`
+            INSERT INTO mondai_bank (
+              hash, exam_id, level, group_id, mondai_id, 
+              primary_type, item_type, estimated_cost, content, meta
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
             ON CONFLICT (hash) DO NOTHING
           `, [
-            hash, examSpec.exam_id, group.group_id, mondaiDef.mondai_id, mondaiDef.types[0],
-            JSON.stringify(m),
-            JSON.stringify({ level, mode, generated_at: new Date().toISOString() })
-          ]);
+          hash,
+          examSpec.exam_id,
+          level,
+          group.group_id,
+          mondaiDef.mondai_id,
+          mondaiDef.types[0],
+          itemType,
+          estimatedCost,
+          JSON.stringify(m),
+          JSON.stringify({ mode, generated_at: new Date().toISOString() })
+        ]);
 
-          // Link to Bucket
-          // Check redundancy in bucket done by checking if hash in use? 
-          // pool_snapshot_items allows same hash multiple times? 
-          // No, usually we want unique items per bucket if possible, or weighted.
-          // But here verify "ON CONFLICT DO NOTHING" in bank handles duplicate content.
-          // Then we insert into pool_snapshot_items.
+        // Link to Bucket with ON CONFLICT (more efficient than WHERE NOT EXISTS)
+        await db.query(`
+            INSERT INTO pool_snapshot_items (snapshot_id, bucket_key, mondai_hash, group_id)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (snapshot_id, bucket_key, mondai_hash) DO NOTHING
+          `, [snapshotId, bucketKey, hash, group.group_id]);
 
-          await db.pool.query(`
-            INSERT INTO pool_snapshot_items (snapshot_id, bucket_key, mondai_hash)
-            SELECT $1, $2, $3
-            WHERE NOT EXISTS (
-              SELECT 1 FROM pool_snapshot_items WHERE snapshot_id=$1 AND bucket_key=$2 AND mondai_hash=$3
-            )
-          `, [snapshotId, bucketKey, hash]);
-
-          remaining--;
-        }
+        remaining--;
       }
     } catch (e) {
-      console.error('Pool generation error:', e);
-      // Skip to next to avoid infinite loop
-      remaining--;
+      console.error('Pool generation error:', e?.message || e);
+      remaining -= 1;
     }
   }
+}
+
+/**
+ * Warm pool buckets with bounded limits (safe for serverless)
+ * @param {string} snapshotId - Pool snapshot ID
+ * @param {object} examSpec - Exam specification
+ * @param {string} level - JLPT level
+ * @param {string} mode - Exam mode
+ * @param {string} dateYmd - Date string YYYY-MM-DD
+ * @param {object} opts - Options: targetPerBucket, maxBuckets, maxGenerateTotal
+ * @returns {object} Stats: { bucketsProcessed, generated, skipped }
+ */
+async function warmPool(snapshotId, examSpec, level, mode, dateYmd, opts = {}) {
+  const {
+    targetPerBucket = WARM_TARGET_PER_BUCKET,
+    maxBuckets = 10,
+    maxGenerateTotal = 20
+  } = opts;
+
+  let bucketsProcessed = 0;
+  let generated = 0;
+  let skipped = 0;
+
+  // Gather all buckets from examSpec
+  const buckets = [];
+  for (const group of examSpec.groups) {
+    for (const mondaiDef of group.mondai) {
+      if (!mondaiDef.types?.[0]) continue;
+      const primaryType = mondaiDef.types[0];
+      const bucketKey = getBucketKey(group.group_id, mondaiDef.mondai_id, primaryType);
+      buckets.push({ group, mondaiDef, bucketKey });
+    }
+  }
+
+  // Process up to maxBuckets
+  for (const bucket of buckets) {
+    if (bucketsProcessed >= maxBuckets) break;
+    if (generated >= maxGenerateTotal) break;
+
+    const { group, mondaiDef, bucketKey } = bucket;
+
+    // Check current count in bucket
+    const countRes = await db.query(
+      `SELECT COUNT(*) FROM pool_snapshot_items WHERE snapshot_id=$1 AND bucket_key=$2`,
+      [snapshotId, bucketKey]
+    );
+    const current = parseInt(countRes.rows[0]?.count || 0);
+
+    if (current >= targetPerBucket) {
+      skipped++;
+      continue;
+    }
+
+    // Calculate how many to generate (bounded by remaining quota)
+    const needed = Math.min(targetPerBucket - current, maxGenerateTotal - generated);
+    if (needed <= 0) {
+      skipped++;
+      continue;
+    }
+
+    console.log(`[Warmup] Filling ${bucketKey}: ${current} -> ${current + needed} (target: ${targetPerBucket})`);
+
+    // Generate in small batches
+    const batchSize = Math.min(needed, 5);
+    let batchGenerated = 0;
+
+    for (let i = 0; i < needed && generated < maxGenerateTotal; i += batchSize) {
+      const count = Math.min(batchSize, needed - i, maxGenerateTotal - generated);
+
+      try {
+        await generateMondaiForBucket({
+          examSpec, level, mode, group, mondaiDef, bucketKey, snapshotId,
+          count,
+          plan: 'warmup'
+        });
+        batchGenerated += count;
+        generated += count;
+      } catch (e) {
+        console.error(`[Warmup] Error generating for ${bucketKey}:`, e?.message || e);
+        break;
+      }
+    }
+
+    bucketsProcessed++;
+  }
+
+  return { bucketsProcessed, generated, skipped };
 }
 
 /**
@@ -712,8 +790,10 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
     }
   };
 
-  const modeConfig = examSpec.modes[mode];
-  const qScale = modeConfig.question_scale;
+
+
+  const modeConfig = examSpec.modes?.[mode] || DEFAULT_MODES[mode] || DEFAULT_MODES.official || { question_scale: 1.0, time_scale: 1.0 };
+  const qScale = modeConfig.question_scale || 1.0;
 
   // Track used hashes to avoid duplicates across exam
   const usedHashes = new Set();
@@ -739,7 +819,24 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
       // For Vocab: 1 mondai slot = 1 set of questions (micro chunk).
 
       try {
-        const hash = await sampleMondaiFromBucket(snapshotId, bucketKey, rng, Array.from(usedHashes));
+        let hash;
+        try {
+          hash = await sampleMondaiFromBucket(snapshotId, bucketKey, rng, Array.from(usedHashes));
+        } catch (e) {
+          // On-demand generation if bucket empty/exhausted
+          // Log only important event
+          console.log(`[Blueprint] Bucket empty/exhausted: ${bucketKey}. Triggering on-demand generation.`);
+
+          await generateMondaiForBucket({
+            examSpec, level, mode, group, mondaiDef, bucketKey, snapshotId,
+            count: ON_DEMAND_BATCH,
+            plan
+          });
+
+          // Retry sampling (if this fails, we skip this slot)
+          hash = await sampleMondaiFromBucket(snapshotId, bucketKey, rng, Array.from(usedHashes));
+        }
+
         usedHashes.add(hash);
 
         // Determine item type for reading
@@ -753,7 +850,8 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
           delivery_mode: isReading ? 'whole' : 'flexible'
         });
       } catch (e) {
-        console.warn(`Failed to sample for ${bucketKey}:`, e.message);
+        // Soft fail for individual slots if generation fails
+        console.warn(`Failed to fill slot for ${bucketKey} after retry:`, e.message);
       }
     }
     blueprint.groups.push(groupBlueprint);
@@ -777,7 +875,7 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
 
     const candidates = await Promise.all(readingSlots.map(async slot => {
       // Fetch cost from DB
-      const res = await db.pool.query('SELECT estimated_cost, item_type FROM mondai_bank WHERE hash=$1', [slot.mondai_hash]);
+      const res = await db.query('SELECT estimated_cost, item_type FROM mondai_bank WHERE hash=$1', [slot.mondai_hash]);
       const cost = res.rows[0]?.estimated_cost || (60 + slot.question_count * 45); // fallback
       return { ...slot, cost, item_type: res.rows[0]?.item_type || slot.type };
     }));
@@ -837,17 +935,20 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
 }
 
 async function sampleMondaiFromBucket(snapshotId, bucketKey, rng, usedHashes) {
-  // Query available items
-  const res = await db.pool.query(`
-    SELECT mondai_hash FROM pool_snapshot_items 
+  const used = Array.isArray(usedHashes) ? new Set(usedHashes) : new Set();
+
+  const res = await db.query(`
+    SELECT mondai_hash
+    FROM pool_snapshot_items
     WHERE snapshot_id=$1 AND bucket_key=$2
   `, [snapshotId, bucketKey]);
 
-  const available = res.rows.filter(r => !usedHashes.includes(r.mondai_hash));
+  const available = (res.rows || []).filter((r) => r?.mondai_hash && !used.has(r.mondai_hash));
   if (available.length === 0) throw new Error('Bucket empty or exhausted');
 
-  const idx = Math.floor(rng() * available.length);
-  return available[idx].mondai_hash;
+  const x = rng();
+  const clamped = Math.max(0, Math.min(0.999999, Number.isFinite(x) ? x : 0));
+  return available[Math.floor(clamped * available.length)].mondai_hash;
 }
 
 // ============ LLM Endpoints ============
@@ -1031,6 +1132,9 @@ function validateGroupResult(group) {
   if (!Array.isArray(group.mondai) || group.mondai.length === 0) errors.push('missing_mondai');
   if (!Array.isArray(group.mondai)) return errors;
 
+  // Listening types for validation
+  const listeningTypes = ['listening_dialogue', 'listening_mono', 'listen_respond', 'listen_integration', 'listen_task'];
+
   for (let mi = 0; mi < group.mondai.length; mi++) {
     const m = group.mondai[mi];
     if (!m || typeof m !== 'object') {
@@ -1043,6 +1147,10 @@ function validateGroupResult(group) {
     if (!Array.isArray(m.items) || m.items.length === 0) errors.push(`mondai_${mi}_missing_items`);
 
     if (!Array.isArray(m.items)) continue;
+
+    // Check if this is a listening mondai
+    const isListeningMondai = m.items.some(item => item && listeningTypes.includes(item.type));
+
     for (let ii = 0; ii < m.items.length; ii++) {
       const item = m.items[ii];
       const itemErrors = validateQuestionItem(item);
@@ -1051,9 +1159,25 @@ function validateGroupResult(group) {
         if (ids.has(item.id)) errors.push(`duplicate_id:${item.id}`);
         ids.add(item.id);
       }
-      const needsScript = item && item.media && Object.prototype.hasOwnProperty.call(item.media, 'script_text');
-      if (needsScript && item.media.script_text !== null && typeof item.media.script_text !== 'string') {
-        errors.push(`mondai_${mi}_item_${ii}:script_text_invalid`);
+
+      // Listening Mode B: item-level script_text is NOT allowed for listening mondai
+      if (isListeningMondai && item && item.media?.script_text) {
+        errors.push(`mondai_${mi}_item_${ii}:script_text_should_be_at_mondai_level`);
+      }
+
+      // Legacy: non-listening items with media.script_text (keep existing validation)
+      if (!isListeningMondai) {
+        const needsScript = item && item.media && Object.prototype.hasOwnProperty.call(item.media, 'script_text');
+        if (needsScript && item.media.script_text !== null && typeof item.media.script_text !== 'string') {
+          errors.push(`mondai_${mi}_item_${ii}:script_text_invalid`);
+        }
+      }
+    }
+
+    // Listening Mode B: mondai-level script_text is REQUIRED for listening mondai
+    if (isListeningMondai) {
+      if (!m.media?.script_text || typeof m.media.script_text !== 'string' || m.media.script_text.trim() === '') {
+        errors.push(`mondai_${mi}_missing_mondai_script_text`);
       }
     }
   }
@@ -1536,7 +1660,7 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
 
     // Save to Exam Results Table (Robust storage)
     try {
-      await db.pool.query(
+      await db.query(
         'INSERT INTO exam_results (user_id, exam_id, score, summary, data) VALUES ($1, $2, $3, $4, $5)',
         [req.user.userId, test.meta.exam_id, result.score_summary.total_score, JSON.stringify(result), JSON.stringify({ test, answers })]
       );
@@ -1589,9 +1713,22 @@ app.post('/api/prepare-tts-text', authMiddleware, async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('TTS text prep error:', err);
-    res.status(500).json({ error: 'Failed to prepare TTS text: ' + err.message });
+    res.status(500).json({ error: 'Failed to prepare TTS text: ' + err.message }).catch(console.error);
   }
 });
+
+// Helper: Parse JSONB safely (Neon may return as string)
+function parseJsonb(value, fallback = {}) {
+  if (!value) return fallback;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+// ============ User Management ============
 
 // ============ TTS Endpoints ============
 
@@ -2164,7 +2301,11 @@ function buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGener
 
     if (isListening) {
       return `  ${mondaiNum}. ${m.mondai_id} (${m.title_vi}): ${totalQuestions} questions, types: ${m.types.join(', ')}
-    *** Include script_text with natural dialogue/monologue for TTS ***`;
+    ★★★ LISTENING AUDIO RULES ★★★
+    - Put script_text at MONDAI level: mondai.media.script_text (NOT in items)
+    - Use dialogue format: "A: こんにちは\nB: はい、こんにちは" (preferred for multi-voice TTS)
+    - If monologue, still place at mondai.media.script_text
+    - items[].media MUST be null or omitted`;
     }
 
     return `  ${mondaiNum}. ${m.mondai_id} (${m.title_vi}): ${totalQuestions} questions, types: ${m.types.join(', ')}`;
@@ -2335,13 +2476,37 @@ Return RAW JSON ONLY.
 - DO NOT end with explanations.
 - The output must start clearly with '{' and end with '}'.
 
+-------------------------
+EMPHASIS MARKERS (CRITICAL)
+-------------------------
+When highlighting kanji/vocabulary in prompts:
+- Use [[word]] markers (double brackets) for emphasis
+- Example: "Choose the correct reading for [[漢字]] in the sentence."
+- DO NOT use HTML tags like <u> or <b>
+- DO NOT use markdown ** or __
+- ONLY use [[...]] for emphasized/target words
+
+-------------------------
+TITLE RULES (meta.display_title)
+-------------------------
+For each mondai, optionally include "meta.display_title" with format:
+- Listening mondai: "Listen X" or "Listen X: {localizedTitle} ({日本語タイトル})"
+- Non-listening: "Mondai X" or "Mondai X: {localizedTitle} ({日本語タイトル})"
+Where X is the mondai number (1, 2, 3...).
+{localizedTitle} should be in Vietnamese (target user language).
+{日本語タイトル} is optional Japanese title in parentheses.
+If omitted, UI will fallback to "Mondai X" / "Listen X".
+DO NOT include titles/headers inside passage.text or script_text.
+
 {
   "mondai": [
     {
       "mondai_id": "<string>",
       "title_vi": "<string>",
       "instructions_vi": "<Vietnamese instructions>",
+      "meta": { "display_title": "<optional: Mondai X or Listen X: Localized Title (日本語)>" },
       "passage": { "title": "<optional>", "text": "<for reading>" },
+      "media": { "script_text": "<for listening mondai ONLY - dialogue format A: ... B: ... preferred>" },
       "items": [
         {
           "id": "<unique_id>",
@@ -2350,8 +2515,7 @@ Return RAW JSON ONLY.
           "choices": ["<A text>", "<B text>", "<C text>", "<D text>"],
           "answer_index": 0,
           "explain_brief": "<brief explanation>",
-          "tags": ["<tag1>", "<tag2>"],
-          "media": { "script_text": "<for listening, null otherwise>" }
+          "tags": ["<tag1>", "<tag2>"]
         }
       ]
     }
@@ -2452,20 +2616,113 @@ function buildTtsTextPrompt(text, language) {
 
 // ============ V2 Endpoints (Pool Architectre) ============
 
+// ============ Admin Warmup Endpoint ============
+
+/**
+ * GET /api/admin/warmup - Pre-fill pool buckets (for cron/admin use)
+ * Authentication: x-warmup-secret header OR ?secret= query param
+ * Params: exam_id, level, mode, date_ymd, target, max_buckets, max_gen
+ */
+app.get('/api/admin/warmup', async (req, res) => {
+  const startTime = Date.now();
+
+  // Authenticate via secret
+  const secret = req.headers['x-warmup-secret'] || req.query.secret;
+  const expectedSecret = process.env.WARMUP_SECRET;
+
+  if (!expectedSecret || secret !== expectedSecret) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    // Wait for DB
+    if (!(await db.initDb())) {
+      return res.status(503).json({ error: 'DB unavailable' });
+    }
+
+    // Parse params with defaults
+    const examId = req.query.exam_id || 'jlpt_base_N2';
+    const level = req.query.level || 'N2';
+    const mode = req.query.mode || 'standard';
+    const dateYmd = req.query.date_ymd || new Date().toISOString().split('T')[0];
+    const targetPerBucket = parseInt(req.query.target) || 50;
+    const maxBuckets = parseInt(req.query.max_buckets) || 10;
+    const maxGenerateTotal = parseInt(req.query.max_gen) || 20;
+
+    // Load exam spec (simplified - uses default N2 structure)
+    // In production, this should load from a config or DB
+    const examSpec = {
+      exam_id: examId,
+      level: level,
+      language: 'ja-JP',
+      display_name_vi: `JLPT ${level}`,
+      modes: DEFAULT_MODES,
+      groups: [
+        {
+          group_id: 'vocab',
+          title_vi: 'Từ vựng - Ngữ pháp',
+          mondai: [
+            { mondai_id: 'M1', title_vi: 'Đọc Hán tự', count_official: 5, types: ['kanji_reading'] },
+            { mondai_id: 'M2', title_vi: 'Viết Hán tự', count_official: 5, types: ['kanji_writing'] },
+            { mondai_id: 'M3', title_vi: 'Ghép từ', count_official: 5, types: ['word_formation'] },
+            { mondai_id: 'M4', title_vi: 'Nghĩa từ vựng', count_official: 7, types: ['context_vocab'] },
+            { mondai_id: 'M5', title_vi: 'Cách dùng', count_official: 5, types: ['usage'] },
+            { mondai_id: 'M6', title_vi: 'Chọn ngữ pháp', count_official: 5, types: ['grammar_select'] },
+            { mondai_id: 'M7', title_vi: 'Sắp xếp câu', count_official: 5, types: ['sentence_order'] },
+            { mondai_id: 'M8', title_vi: 'Điền ngữ pháp', count_official: 5, types: ['grammar_cloze'] }
+          ]
+        }
+      ]
+    };
+
+    console.log(`[Warmup] Starting for ${examId} ${level} ${mode} on ${dateYmd}`);
+
+    // Ensure snapshot exists
+    const snapshotId = await ensurePoolSnapshot(examSpec, level, dateYmd, 'warmup', mode);
+    if (!snapshotId) {
+      return res.status(500).json({ error: 'Failed to create snapshot' });
+    }
+
+    // Run warmPool with bounded limits
+    const stats = await warmPool(snapshotId, examSpec, level, mode, dateYmd, {
+      targetPerBucket,
+      maxBuckets,
+      maxGenerateTotal
+    });
+
+    const durationMs = Date.now() - startTime;
+
+    console.log(`[Warmup] Complete: ${stats.bucketsProcessed} buckets, ${stats.generated} generated in ${durationMs}ms`);
+
+    res.json({
+      snapshotId,
+      date_ymd: dateYmd,
+      bucketsProcessed: stats.bucketsProcessed,
+      generated: stats.generated,
+      skipped: stats.skipped,
+      durationMs
+    });
+
+  } catch (err) {
+    console.error('[Warmup] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /**
  * Helper: Deliver next chunk for an instance
  */
 async function deliverNextChunk(instanceKey, want) {
   // Load instance + blueprint
-  const inst = await db.pool.query(
+  const inst = await db.query(
     'SELECT blueprint, delivery_state FROM exam_instances_cache WHERE instance_key=$1',
     [instanceKey]
   );
 
   if (inst.rows.length === 0) throw new Error('Instance not found');
 
-  const blueprint = inst.rows[0].blueprint; // jsonb is auto-parsed by pg? Yes usually.
-  const deliveryState = inst.rows[0].delivery_state;
+  const blueprint = parseJsonb(inst.rows[0].blueprint);
+  const deliveryState = parseJsonb(inst.rows[0].delivery_state, {});
 
   // Find requested group
   const groupIdx = blueprint.groups.findIndex(g => g.group_id === want.group_id);
@@ -2475,6 +2732,7 @@ async function deliverNextChunk(instanceKey, want) {
   let cursor = deliveryState.cursors?.[want.group_id] || 0;
 
   const mondaiToDeliver = [];
+  let blueprintModified = false;
 
   // Deliver items until we satisfy want_count or run out
   // Logic: 
@@ -2485,13 +2743,45 @@ async function deliverNextChunk(instanceKey, want) {
     const slot = group.mondai_slots[cursor];
 
     // Load mondai content
-    const mRes = await db.pool.query(
+    let content = null;
+    const mRes = await db.query(
       'SELECT content FROM mondai_bank WHERE hash=$1',
       [slot.mondai_hash]
     );
 
     if (mRes.rows.length > 0) {
-      const content = mRes.rows[0].content; // JSONB
+      content = parseJsonb(mRes.rows[0].content);
+    } else {
+      // SAFETY NET: Content missing from bank (data inconsistency)
+      // Attempt to repair by finding another item from the same bucket
+      console.warn(`[Chunk] Missing content for hash ${slot.mondai_hash}. Attempting repair...`);
+      try {
+        const snapRes = await db.query(
+          'SELECT snapshot_id, bucket_key FROM pool_snapshot_items WHERE mondai_hash=$1 LIMIT 1',
+          [slot.mondai_hash]
+        );
+
+        if (snapRes.rows.length > 0) {
+          const { snapshot_id, bucket_key } = snapRes.rows[0];
+          // Resample (using simple random as this is emergency fallback)
+          const newHash = await sampleMondaiFromBucket(snapshot_id, bucket_key, Math.random, [slot.mondai_hash]);
+
+          // Fetch new content
+          const mRes2 = await db.query('SELECT content FROM mondai_bank WHERE hash=$1', [newHash]);
+          if (mRes2.rows.length > 0) {
+            content = parseJsonb(mRes2.rows[0].content);
+            // Update Blueprint (Persistent Repair)
+            slot.mondai_hash = newHash;
+            blueprintModified = true;
+            console.log(`[Chunk] Repaired slot with new hash ${newHash}`);
+          }
+        }
+      } catch (e) {
+        console.error('[Chunk] Repair failed:', e.message);
+      }
+    }
+
+    if (content) {
       mondaiToDeliver.push(content);
     }
 
@@ -2508,10 +2798,17 @@ async function deliverNextChunk(instanceKey, want) {
   if (!deliveryState.cursors) deliveryState.cursors = {};
   deliveryState.cursors[want.group_id] = cursor;
 
-  await db.pool.query(
-    'UPDATE exam_instances_cache SET delivery_state=$1 WHERE instance_key=$2',
-    [JSON.stringify(deliveryState), instanceKey]
-  );
+  if (blueprintModified) {
+    await db.query(
+      'UPDATE exam_instances_cache SET delivery_state=$1, blueprint=$2 WHERE instance_key=$3',
+      [JSON.stringify(deliveryState), JSON.stringify(blueprint), instanceKey]
+    );
+  } else {
+    await db.query(
+      'UPDATE exam_instances_cache SET delivery_state=$1 WHERE instance_key=$2',
+      [JSON.stringify(deliveryState), instanceKey]
+    );
+  }
 
   return {
     mondai: mondaiToDeliver,
@@ -2523,56 +2820,141 @@ async function deliverNextChunk(instanceKey, want) {
 // POST /api/exam/start
 app.post('/api/exam/start', authMiddleware, async (req, res) => {
   try {
-    const { examSpec, mode, setNo } = req.body;
+    const { examSpec, mode, setNo, force_new, resume, daily } = req.body;
     const userId = req.user.userId;
 
-    if (!IS_DB_AVAILABLE) return res.status(503).json({ error: 'DB unavailable for V2' });
+    // Wait for DB initialization
+    if (!(await db.initDb())) {
+      return res.status(503).json({ error: 'DB unavailable for V2' });
+    }
 
     const user = await loadUserData(userId, req.user.email);
     const plan = user.plan || 'free';
     const level = examSpec.level || examSpec.default_level;
 
-    // Deterministic Set No logic
-    const today = new Date().toISOString().split('T')[0];
+    // Normalize Exam Spec (prevent crashes)
+    if (!examSpec.modes) examSpec.modes = DEFAULT_MODES;
+
+    // Set No logic with backward-compatible options
     let finalSetNo = setNo;
-    if (finalSetNo === undefined) {
+
+    if (resume) {
+      // RESUME: Find latest unexpired instance
+      const latestRes = await db.query(
+        `SELECT set_no FROM exam_instances_cache 
+         WHERE user_id=$1 AND exam_id=$2 AND level=$3 AND mode=$4 AND expires_at > NOW()
+         ORDER BY created_at DESC LIMIT 1`,
+        [userId, examSpec.exam_id, level, mode]
+      );
+      if (latestRes.rows.length > 0) {
+        finalSetNo = latestRes.rows[0].set_no;
+        console.log(`[Exam] Resume: using set_no ${finalSetNo}`);
+      }
+    }
+
+    if (finalSetNo === undefined && daily) {
+      // DAILY: Deterministic by date (old behavior)
+      const today = new Date().toISOString().split('T')[0];
       const hash = crypto.createHash('sha256')
         .update(`${userId}-${level}-${mode}-${today}`)
         .digest('hex');
       finalSetNo = parseInt(hash.substring(0, 8), 16) % 100;
+      console.log(`[Exam] Daily mode: set_no ${finalSetNo}`);
     }
 
-    // Ensure Pool
-    const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
+    if (finalSetNo === undefined || force_new) {
+      // DEFAULT: Create NEW set_no = MAX(existing) + 1
+      const maxRes = await db.query(
+        'SELECT COALESCE(MAX(set_no), 0) + 1 AS next_set FROM exam_instances_cache WHERE user_id=$1 AND exam_id=$2 AND level=$3 AND mode=$4',
+        [userId, examSpec.exam_id, level, mode]
+      );
+      finalSetNo = maxRes.rows[0].next_set;
+      console.log(`[Exam] New set_no: ${finalSetNo}`);
+    }
 
-    // Build Blueprint
-    const seed = crypto.randomUUID();
-    const blueprint = await buildExamBlueprint(examSpec, level, mode, seed, finalSetNo, plan, snapshotId);
+    // 1. Check if instance already exists (Idempotency)
+    // Optimization: Avoid expensive blueprint build if we can reuse.
+    let instanceKey, blueprint;
 
-    // Extract Answer Keys for secure grading
-    const answerKeys = {};
-    // Note: We need to iterate blueprint and load hashes? 
-    // Optimization: We can load them lazily during grading or store now.
-    // Storing now requires querying all hashes. 
-    // Let's store EMPTY now and load on demand or just graded from hashes in quickgrade.
-    // Better: quickgrade looks up hashes from blueprint.
+    // Helper to fetch existing
+    const fetchExisting = async () => {
+      const res = await db.query(
+        'SELECT instance_key, blueprint FROM exam_instances_cache WHERE user_id=$1 AND exam_id=$2 AND level=$3 AND mode=$4 AND set_no=$5',
+        [userId, examSpec.exam_id, level, mode, finalSetNo]
+      );
+      return res.rows[0];
+    };
 
-    const instanceKey = crypto.randomUUID();
-    await db.pool.query(`
-      INSERT INTO exam_instances_cache 
-      (instance_key, user_id, exam_id, level, mode, plan, seed, set_no, blueprint, delivery_state, answer_keys)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-    `, [
-      instanceKey, userId, examSpec.exam_id, level, mode, plan, seed, finalSetNo,
-      JSON.stringify(blueprint),
-      JSON.stringify({ cursors: {} }),
-      JSON.stringify(answerKeys)
-    ]);
+    const existingRow = await fetchExisting();
 
-    await db.pool.query(`
-      INSERT INTO attempts (instance_key, user_id, status)
-      VALUES ($1, $2, 'active')
-    `, [instanceKey, userId]);
+    if (existingRow) {
+      // REUSE EXISTING
+      console.log(`[Exam] Reusing existing instance for user ${userId}, set ${finalSetNo}`);
+      instanceKey = existingRow.instance_key;
+      blueprint = parseJsonb(existingRow.blueprint);
+
+      // Extend expiry AND RESET delivery state (as requested)
+      await db.query(`
+            UPDATE exam_instances_cache 
+            SET expires_at = (CURRENT_TIMESTAMP + INTERVAL '3 days'),
+                delivery_state = $2
+            WHERE instance_key = $1
+        `, [instanceKey, JSON.stringify({ cursors: {} })]);
+
+    } else {
+      // CREATE NEW
+
+      // Ensure Pool (fast/lazy)
+      const today = new Date().toISOString().split('T')[0];
+      const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
+
+      // Build Blueprint
+      const seed = crypto.randomUUID();
+      const newBlueprint = await buildExamBlueprint(examSpec, level, mode, seed, finalSetNo, plan, snapshotId);
+      const newInstanceKey = crypto.randomUUID();
+      const answerKeys = {}; // Loaded lazily
+
+      try {
+        // Insert with ON CONFLICT DO NOTHING (Race condition handling)
+        // If conflict occurs (someone else created it while we were building), we catch 23505 or handle via row count.
+        await db.query(`
+              INSERT INTO exam_instances_cache 
+              (instance_key, user_id, exam_id, level, mode, plan, seed, set_no, blueprint, delivery_state, answer_keys)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            `, [
+          newInstanceKey, userId, examSpec.exam_id, level, mode, plan, seed, finalSetNo,
+          JSON.stringify(newBlueprint),
+          JSON.stringify({ cursors: {} }),
+          JSON.stringify(answerKeys)
+        ]);
+
+        instanceKey = newInstanceKey;
+        blueprint = newBlueprint;
+      } catch (e) {
+        // Race condition: Conflict on unique key?
+        if (e.code === '23505') {
+          console.log('[Exam] Race condition on insert, reusing winner.');
+          const winnerRow = await fetchExisting();
+          if (winnerRow) {
+            instanceKey = winnerRow.instance_key;
+            blueprint = parseJsonb(winnerRow.blueprint);
+            // Reset state for the winner too? user implies "start fresh"
+            await db.query(`UPDATE exam_instances_cache SET delivery_state = $2 WHERE instance_key = $1`, [instanceKey, JSON.stringify({ cursors: {} })]);
+          } else {
+            throw e; // Should not happen
+          }
+        } else {
+          throw e;
+        }
+      }
+
+      // Ensure attempt record exists
+      await db.query(`
+          INSERT INTO attempts (instance_key, user_id, status)
+          VALUES ($1, $2, 'active')
+          ON CONFLICT DO NOTHING
+        `, [instanceKey, userId]);
+    }
 
     // First chunk (first 2 items of first group)
     const firstGroup = blueprint.groups[0];
@@ -2607,7 +2989,11 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
 app.post('/api/exam/chunk', authMiddleware, async (req, res) => {
   try {
     const { instanceKey, want } = req.body;
-    if (!IS_DB_AVAILABLE) return res.status(503).json({ error: 'DB unavailable' });
+
+    // Wait for DB initialization
+    if (!(await db.initDb())) {
+      return res.status(503).json({ error: 'DB unavailable' });
+    }
 
     const chunk = await deliverNextChunk(instanceKey, want);
 
@@ -2626,9 +3012,13 @@ app.post('/api/exam/chunk', authMiddleware, async (req, res) => {
 app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
   try {
     const { instanceKey, answers } = req.body;
-    if (!IS_DB_AVAILABLE) return res.status(503).json({ error: 'DB unavailable' });
 
-    const inst = await db.pool.query(
+    // Wait for DB initialization
+    if (!(await db.initDb())) {
+      return res.status(503).json({ error: 'DB unavailable' });
+    }
+
+    const inst = await db.query(
       'SELECT blueprint, user_id FROM exam_instances_cache WHERE instance_key=$1',
       [instanceKey]
     );
@@ -2636,7 +3026,7 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
     if (inst.rows.length === 0) return res.status(404).json({ error: 'Instance not found' });
     if (inst.rows[0].user_id !== req.user.userId) return res.status(403).json({ error: 'Unauthorized' });
 
-    const blueprint = inst.rows[0].blueprint;
+    const blueprint = parseJsonb(inst.rows[0].blueprint);
 
     // Grade by checking each answer against mondai_bank content
     // This assumes we didn't store answer_keys in cache yet.
@@ -2663,7 +3053,7 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
 
     // Query DB for all contents (might be heavy for full exam, but efficient with hash IN (...))
     // Limit to 100 items?
-    const contentRes = await db.pool.query(
+    const contentRes = await db.query(
       'SELECT content FROM mondai_bank WHERE hash = ANY($1)',
       [allHashes]
     );
@@ -2671,7 +3061,7 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
     // Build efficient map: QuestionID -> CorrectAnswer
     const answerMap = {};
     contentRes.rows.forEach(row => {
-      const m = row.content;
+      const m = parseJsonb(row.content);
       if (m.items) {
         m.items.forEach(item => {
           if (item.id && item.answer_index !== undefined) {
@@ -2689,16 +3079,33 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
         const isCorrect = (userAns === correct);
         if (isCorrect) correctCount++;
         totalCount++;
-        byQuestion[qId] = { correct: isCorrect };
-        // DO NOT return correct answer
+        // Return full info for UI highlighting
+        byQuestion[qId] = {
+          is_correct: isCorrect,
+          user_index: userAns,
+          correct_index: correct
+        };
       }
     }
 
-    // Update attempts
-    await db.pool.query(
-      "UPDATE attempts SET status='submitted', submitted_at=NOW(), summary=$1 WHERE instance_key=$2",
-      [JSON.stringify({ correct: correctCount, total: totalCount }), instanceKey]
-    );
+    // Update attempts (fallback for missing UNIQUE constraint)
+    const summaryJson = JSON.stringify({ correct: correctCount, total: totalCount });
+    const updateRes = await db.query(`
+      UPDATE attempts 
+      SET status='submitted', summary=$3, submitted_at=NOW()
+      WHERE user_id=$1 AND instance_key=$2
+    `, [req.user.userId, instanceKey, summaryJson]);
+
+    if (updateRes.rowCount === 0) {
+      try {
+        await db.query(`
+          INSERT INTO attempts (user_id, instance_key, status, summary, submitted_at)
+          VALUES ($1, $2, 'submitted', $3, NOW())
+        `, [req.user.userId, instanceKey, summaryJson]);
+      } catch (insertErr) {
+        // Ignore duplicate key errors if a race condition happened
+      }
+    }
 
     res.json({
       score_summary: {
@@ -2720,6 +3127,15 @@ app.post('/api/exam/prefetch-tts', authMiddleware, async (req, res) => {
   try {
     const { items } = req.body;
     if (!Array.isArray(items)) return res.status(400).json({ error: 'Items array required' });
+
+    // Wait for DB initialization (required for metrics logging)
+    if (!(await db.initDb())) {
+      // In auto mode, we might proceed without metrics? 
+      // But prefetch is a "premium" feature likely requiring DB. 
+      // Let's enforce it or log warning.
+      // Given plan says V2 endpoints must check DB.
+      return res.status(503).json({ error: 'DB unavailable' });
+    }
 
     let cachedCount = 0;
     const scheduled = [];
@@ -2756,7 +3172,7 @@ app.post('/api/exam/prefetch-tts', authMiddleware, async (req, res) => {
           setTTSCache(task.hash, audio);
 
           // Log metric
-          await db.pool.query(
+          await db.query(
             `INSERT INTO tts_metrics (provider, voice, language, text_len, latency_ms) VALUES ($1, $2, $3, $4, 0)`,
             ['deepgram-prefetch', task.voice, task.lang, task.text.length]
           ).catch(e => console.error('Metric log error:', e.message));
@@ -2798,10 +3214,23 @@ app.get('*', (req, res) => {
 
 // Start server
 if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`Language Exam Server running on http://localhost:${PORT}`);
-    console.log(`Auth Mode: ${IS_DEMO_MODE ? 'DEMO MODE (no auth required)' : 'Privy (' + PRIVY_APP_ID + ')'}`);
-  });
+  (async () => {
+    // Fail-fast DB check for Neon mode
+    if (IS_NEON_MODE) {
+      console.log('[Boot] Neon mode active. Checking DB connection...');
+      const ok = await db.initDb();
+      if (!ok) {
+        console.error('[FATAL] Neon mode requires DB connection. Exiting.');
+        process.exit(1);
+      }
+    }
+
+    app.listen(PORT, () => {
+      console.log(`Language Exam Server running on http://localhost:${PORT}`);
+      console.log(`DB Mode: ${DB_MODE} (Strict: ${IS_NEON_MODE})`);
+      console.log(`Auth Mode: ${IS_DEMO_MODE ? 'DEMO MODE (no auth required)' : 'Privy (' + PRIVY_APP_ID + ')'}`);
+    });
+  })();
 }
 
 module.exports = app;

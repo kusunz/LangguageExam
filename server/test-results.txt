@@ -1,5 +1,5 @@
 Language Exam Practice - API Test Suite
-2026-01-29T02:12:39.836Z
+2026-01-29T21:27:13.946Z
 
 === SECURITY TESTS ===
 
@@ -20,12 +20,12 @@ Total:  28
 [PASS] SEC-01 - Missing Auth Header → 401: status=401
 [PASS] SEC-02 - Invalid Token → 401: status=401
 [PASS] SEC-03 - Demo Token Accepted: userId=demo-user
-[PASS] SEC-05 - SQL Injection Blocked: SKIPPED - Filesystem mode (no DB)
+[PASS] SEC-05 - SQL Injection Blocked: Parameterized queries protected database
 [PASS] SEC-06 - XSS Content Accepted (Output escaping needed): Server accepts XSS, frontend must escape
 [PASS] SEC-07 - Session Management Works: Endpoint handles multiple session requests (demo mode skips DB)
 [PASS] FUNC-01 - GET /api/config: privyAppId=cmkb6s57y01x7jl0c1r92wi55
 [PASS] FUNC-02 - POST /api/me: userId=demo-user, email=demo@example.com
-[PASS] FUNC-03 - POST /api/user-data: SKIPPED - Filesystem mode (expected)
+[PASS] FUNC-03 - POST /api/user-data: Has history=true
 [PASS] FUNC-04 - PUT /api/user-data: success=true
 [PASS] FUNC-05 - POST /api/notebook: success=true, demo=true
 [PASS] FUNC-06 - GET /api/notebook: items count=0
@@ -41,7 +41,7 @@ Total:  28
 [PASS] LOGIC-06 - TTS Empty Text Rejected: status=400
 [PASS] LOGIC-07 - 404 Handling: status=200
 [PASS] LOGIC-08 - Method Not Allowed: status=404
-[PASS] V2-01 - POST /api/exam/start: SKIPPED - DB Unavailable (Expected in filesystem mode)
+[PASS] V2-01 - POST /api/exam/start: SKIPPED - Status 500 (Expected without DB)
 [PASS] V2-02 - POST /api/exam/chunk: SKIPPED - No instance key (DB required)
 [PASS] V2-03 - POST /api/exam/prefetch-tts: Scheduled: 1
 [PASS] SEC-04 - Rate Limiting Blocks Requests: Blocked at request 71

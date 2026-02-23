@@ -922,14 +922,26 @@ body::before {
   }
 }
 
-/* Mondai Navigation */
+/* Test Actions Bar - sticky at top */
+.test-actions {
+  position: sticky;
+  top: 0;
+  z-index: 45;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--glass-border);
+  flex-shrink: 0;
+}
+
+/* Mondai Navigation (now in footer) */
 .mondai-nav {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: var(--space-md);
-  padding: var(--space-sm) var(--space-md);
-  border-radius: var(--radius-md);
+  padding: var(--space-sm) 0;
   flex-shrink: 0;
 }
 
@@ -990,12 +1002,20 @@ body::before {
   font-size: var(--text-sm);
 }
 
-/* Passage Container */
+/* Passage Container - sticky with internal scroll for reading sections */
 .passage-container {
   background: var(--bg-secondary);
   border-radius: var(--radius-md);
   padding: var(--space-md);
   margin-bottom: var(--space-lg);
+  /* Sticky behavior for reading passages */
+  position: sticky;
+  top: 120px;
+  /* Below header + actions bar */
+  z-index: 20;
+  max-height: 40vh;
+  overflow-y: auto;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
 .passage-container.hidden {
@@ -1047,6 +1067,14 @@ body::before {
 
 .question-prompt.zh {
   font-family: var(--font-cn);
+}
+
+/* Emphasis highlight for kanji/vocab (converted from [[...]] or <u>) */
+.hl {
+  font-weight: 700;
+  background: linear-gradient(transparent 60%, rgba(99, 102, 241, 0.3) 40%);
+  padding: 0 2px;
+  border-radius: 2px;
 }
 
 .choices {
@@ -1439,7 +1467,8 @@ body::before {
 }
 
 .review-choice.correct-answer {
-  border: 2px solid var(--success) !important;
+  border: 1px solid var(--success) !important;
+  background-color: var(--success-bg);
 }
 
 .review-choice.correct-answer .choice-letter {
@@ -1448,7 +1477,8 @@ body::before {
 }
 
 .review-choice.wrong-answer {
-  border: 2px solid var(--error) !important;
+  border: 1px solid var(--error) !important;
+  background-color: var(--error-bg);
 }
 
 .review-choice.wrong-answer .choice-letter {
@@ -2044,4 +2074,37 @@ body::before {
   50% {
     opacity: 0.5;
   }
+}
+
+/* ============================================
+   Fullscreen Loading Overlay
+   ============================================ */
+.fullscreen-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fullscreen-loader.hidden {
+  display: none;
+}
+
+.fullscreen-loader-content {
+  text-align: center;
+  color: white;
+}
+
+.fullscreen-loader-content .loader-spinner {
+  margin-bottom: var(--space-lg);
+  color: var(--accent-primary);
+}
+
+.fullscreen-loader-content p {
+  font-size: var(--text-lg);
+  font-weight: 500;
 }
