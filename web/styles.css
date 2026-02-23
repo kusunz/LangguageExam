@@ -1467,7 +1467,8 @@ body::before {
 }
 
 .review-choice.correct-answer {
-  border: 2px solid var(--success) !important;
+  border: 1px solid var(--success) !important;
+  background-color: var(--success-bg);
 }
 
 .review-choice.correct-answer .choice-letter {
@@ -1476,7 +1477,8 @@ body::before {
 }
 
 .review-choice.wrong-answer {
-  border: 2px solid var(--error) !important;
+  border: 1px solid var(--error) !important;
+  background-color: var(--error-bg);
 }
 
 .review-choice.wrong-answer .choice-letter {

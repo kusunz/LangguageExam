@@ -2974,9 +2974,9 @@
                                 if (result) {
                                     questionsWithAnswers.push({
                                         id: item.id,
-                                        is_correct: result.correct,
+                                        is_correct: result.is_correct,
                                         user_answer_index: State.answers[item.id],
-                                        // correct_index: item.answer_index, // Likely unavailable in V2 (Sanitized)
+                                        correct_index: result.correct_index,
                                         prompt: item.prompt,
                                         choices: item.choices,
                                         key_point_vi: item.explain_brief || '',
@@ -3420,7 +3420,7 @@
                 if (!questionData) return '';
 
                 const userAnswer = State.answers[item.id];
-                const correctAnswer = questionData.answer_index;
+                const correctAnswer = item.correct_index !== undefined ? item.correct_index : questionData.answer_index;
 
                 return `
           <div class="review-item ${item.is_correct ? '' : 'incorrect'}">
