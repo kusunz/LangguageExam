@@ -1,5 +1,5 @@
 Language Exam Practice - API Test Suite
-2026-01-29T21:27:13.946Z
+2026-03-05T16:18:35.191Z
 
 === SECURITY TESTS ===
 
@@ -43,5 +43,5 @@ Total:  28
 [PASS] LOGIC-08 - Method Not Allowed: status=404
 [PASS] V2-01 - POST /api/exam/start: SKIPPED - Status 500 (Expected without DB)
 [PASS] V2-02 - POST /api/exam/chunk: SKIPPED - No instance key (DB required)
-[PASS] V2-03 - POST /api/exam/prefetch-tts: Scheduled: 1
+[PASS] V2-03 - POST /api/exam/prefetch-tts: Scheduled: 0
 [PASS] SEC-04 - Rate Limiting Blocks Requests: Blocked at request 71

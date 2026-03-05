@@ -132,6 +132,50 @@ async function runTest() {
         console.log('Quickgrade Response OK.');
         console.log('Score Summary:', gradeData.score_summary);
 
+        // 6. Test: Start Twice => Different instanceKey (no reuse)
+        console.log('\n[4] Testing exam uniqueness (start twice => different instanceKey)...');
+        const startRes2 = await fetch(`${baseUrl}/api/exam/start`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer demo-token'
+            },
+            body: JSON.stringify({
+                examSpec: {
+                    exam_id: 'jlpt_base_N2',
+                    display_name_vi: 'JLPT N2 (Test)',
+                    level: 'N2',
+                    language: 'ja-JP',
+                    groups: [
+                        {
+                            group_id: 'vocab',
+                            title_vi: 'Từ vựng (Test)',
+                            mondai: [
+                                { mondai_id: 'M1', title_vi: 'Hán tự', count_official: 2, types: ['kanji_reading'] }
+                            ]
+                        }
+                    ],
+                    official_time_limits_sec: { overall_time_sec: 1000, groups: [] },
+                    modes: { standard: { question_scale: 1, time_scale: 1 } }
+                },
+                mode: 'standard'
+            })
+        });
+
+        if (!startRes2.ok) {
+            const txt = await startRes2.text();
+            throw new Error(`Second /start failed: ${startRes2.status} ${txt}`);
+        }
+
+        const startData2 = await startRes2.json();
+        console.log('Second Start Response OK. InstanceKey:', startData2.instanceKey);
+
+        if (startData.instanceKey !== startData2.instanceKey) {
+            console.log('✅ PASS: Different instanceKeys returned (no unintended reuse)');
+        } else {
+            throw new Error('FAIL: Same instanceKey returned on second start! Exam reuse bug still present.');
+        }
+
         console.log('\n--- TEST SUCCESS ---');
 
     } catch (err) {

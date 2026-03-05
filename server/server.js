@@ -619,13 +619,18 @@ async function generateMondaiForBucket(params) {
   if (remaining === 0) return;
 
   while (remaining > 0) {
-    const prompt = buildMondaiChunkPrompt(examSpec, mode, group, 0, [mondaiDef], 0, []);
+    // Generate in batches to save LLM calls (up to 3 variants per call)
+    const batchSize = Math.min(remaining, 3);
+    const mondaiBatch = Array(batchSize).fill(mondaiDef);
+
+    const prompt = buildMondaiChunkPrompt(examSpec, mode, group, 0, mondaiBatch, 0, []);
 
     try {
       const result = await callGemini(prompt, { temperature: 0.8, proOnly: false, plan });
       const mondaiList = Array.isArray(result?.mondai) ? result.mondai : [];
 
       if (mondaiList.length === 0) {
+        // Prevent infinite loop if model structure fails
         remaining -= 1;
         continue;
       }
@@ -1643,12 +1648,164 @@ app.post('/api/verify-answer', authMiddleware, verifyAnswerLimiter, (req, res) =
 
 app.post('/api/grade-test', authMiddleware, async (req, res) => {
   try {
-    const { test, answers, provider } = req.body;
+    const { test, answers, provider, instanceKey } = req.body;
     const llmProvider = provider || process.env.DEFAULT_LLM_PROVIDER || 'gemini';
 
-    // Note: Quick grading is now handled client-side using answer_hash verification
-    // This endpoint is only for AI detailed grading
+    // ======== V2 Branch: instanceKey present ========
+    if (instanceKey && await db.initDb()) {
+      const inst = await db.query(
+        'SELECT blueprint, user_id FROM exam_instances_cache WHERE instance_key=$1',
+        [instanceKey]
+      );
+      if (inst.rows.length === 0) return res.status(404).json({ error: 'Instance not found' });
+      if (inst.rows[0].user_id !== req.user.userId) return res.status(403).json({ error: 'Unauthorized' });
 
+      const blueprint = parseJsonb(inst.rows[0].blueprint);
+
+      // Compute answers hash for caching (includes instanceKey for uniqueness)
+      const sortedAnswers = JSON.stringify(Object.entries(answers || {}).sort());
+      const answersHash = crypto.createHash('sha256').update(instanceKey + sortedAnswers).digest('hex');
+
+      // Check cache: if same answers were graded before, return cached result
+      const cachedAttempt = await db.query(
+        'SELECT summary FROM attempts WHERE instance_key=$1 AND user_id=$2 AND answers_hash=$3 AND summary IS NOT NULL',
+        [instanceKey, req.user.userId, answersHash]
+      );
+      if (cachedAttempt.rows.length > 0 && cachedAttempt.rows[0].summary) {
+        const cached = parseJsonb(cachedAttempt.rows[0].summary);
+        if (cached && cached.by_question) {
+          console.log('[Grade V2] Returning cached AI result');
+          cached.cached = true;
+          return res.json(cached);
+        }
+      }
+
+      // Batch fetch all mondai content
+      const allHashes = [];
+      blueprint.groups.forEach(g => g.mondai_slots.forEach(s => allHashes.push(s.mondai_hash)));
+      const contentRes = await db.query(
+        'SELECT hash, content FROM mondai_bank WHERE hash = ANY($1)',
+        [allHashes]
+      );
+
+      // Build question map: { qId: { correct_index, prompt, choices, tags, mondai_context } }
+      const questionMap = {};
+      contentRes.rows.forEach(row => {
+        const m = parseJsonb(row.content);
+        if (m.items) {
+          m.items.forEach(item => {
+            if (item.id && item.answer_index !== undefined) {
+              questionMap[item.id] = {
+                correct_index: item.answer_index,
+                prompt: item.prompt,
+                choices: item.choices,
+                tags: item.tags || [],
+                explain_brief: item.explain_brief || '',
+                passage: m.passage || ''
+              };
+            }
+          });
+        }
+      });
+
+      // Deterministic grade
+      let correctCount = 0;
+      let totalCount = 0;
+      const byQuestion = [];
+      const wrongQuestions = [];
+
+      for (const [qId, userAns] of Object.entries(answers || {})) {
+        const q = questionMap[qId];
+        if (!q) continue;
+
+        totalCount++;
+        const isCorrect = userAns === q.correct_index;
+        if (isCorrect) correctCount++;
+
+        const qResult = {
+          id: qId,
+          is_correct: isCorrect,
+          user_answer_index: userAns,
+          correct_index: q.correct_index,
+          prompt: q.prompt,
+          choices: q.choices,
+          tags: q.tags,
+          key_point_vi: q.explain_brief
+        };
+
+        byQuestion.push(qResult);
+
+        if (!isCorrect) {
+          wrongQuestions.push({
+            id: qId,
+            prompt: q.prompt,
+            choices: q.choices,
+            user_answer: userAns !== null && userAns !== undefined ? q.choices[userAns] : '(chưa trả lời)',
+            correct_answer: q.choices[q.correct_index],
+            passage_snippet: q.passage ? q.passage.substring(0, 200) : ''
+          });
+        }
+      }
+
+      // AI explanation for wrong questions only (if any)
+      if (wrongQuestions.length > 0) {
+        try {
+          const wrongPrompt = `Bạn là gia sư JLPT. Giải thích ngắn gọn bằng tiếng Việt cho ${wrongQuestions.length} câu sai.
+Trả lời JSON: { "explanations": { "<question_id>": "<giải thích 1-2 câu>" } }
+
+${wrongQuestions.map((wq, idx) => `[Câu ${idx + 1}] id="${wq.id}"
+Đề: ${wq.prompt}
+Đáp án đúng: ${wq.correct_answer}
+Thí sinh chọn: ${wq.user_answer}
+${wq.passage_snippet ? `Ngữ cảnh: ${wq.passage_snippet}...` : ''}`).join('\n\n')}`;
+
+          let aiResult;
+          if (llmProvider === 'openai') {
+            aiResult = await callOpenAI([{ role: 'user', content: wrongPrompt }]);
+          } else {
+            aiResult = await callGemini(wrongPrompt);
+          }
+
+          // Merge explanations into byQuestion
+          const explanations = aiResult?.explanations || {};
+          byQuestion.forEach(q => {
+            if (explanations[q.id]) {
+              q.key_point_vi = explanations[q.id];
+            }
+          });
+        } catch (aiErr) {
+          console.error('[Grade V2] AI explanation failed (non-fatal):', aiErr.message);
+          // Continue without AI explanations - deterministic grade is the fallback
+        }
+      }
+
+      const result = {
+        score_summary: {
+          total_score: correctCount,
+          max_score: totalCount,
+          percentage: totalCount ? Math.round(correctCount / totalCount * 100) : 0,
+          weak_tags: byQuestion.filter(q => !q.is_correct).flatMap(q => q.tags || []).filter((v, i, a) => a.indexOf(v) === i).slice(0, 10),
+          recommendation_vi: correctCount >= totalCount * 0.7
+            ? 'Kết quả tốt! Tiếp tục luyện tập để cải thiện.'
+            : 'Cần ôn tập thêm các phần còn yếu.'
+        },
+        by_question: byQuestion,
+        grading_mode: 'ai',
+        cached: false
+      };
+
+      // Persist to attempts with answers_hash + ai_grade for caching
+      const summaryJson = JSON.stringify(result);
+      await db.query(`
+        UPDATE attempts 
+        SET status='graded', summary=$3, answers_hash=$4, ai_grade=$5, submitted_at=NOW()
+        WHERE user_id=$1 AND instance_key=$2
+      `, [req.user.userId, instanceKey, summaryJson, answersHash, summaryJson]);
+
+      return res.json(result);
+    }
+
+    // ======== V1 Legacy: full test object ========
     const prompt = buildGradeTestPrompt(test, answers);
 
     let result;
@@ -1658,7 +1815,7 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
       result = await callGemini(prompt);
     }
 
-    // Save to Exam Results Table (Robust storage)
+    // Save to Exam Results Table
     try {
       await db.query(
         'INSERT INTO exam_results (user_id, exam_id, score, summary, data) VALUES ($1, $2, $3, $4, $5)',
@@ -1668,7 +1825,7 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
       console.error('Failed to save exam result to DB:', dbErr);
     }
 
-    // Update User History (Legacy/Frontend compatibility)
+    // Update User History
     try {
       const userData = await loadUserData(req.user.userId, req.user.email);
       userData.history = userData.history || [];
@@ -1680,9 +1837,7 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
         max_score: result.score_summary.max_score,
         summary: result.score_summary
       });
-      // Limit history to 20
       if (userData.history.length > 20) userData.history.pop();
-
       await saveUserData(req.user.userId, userData);
     } catch (histErr) {
       console.error('Failed to update user history:', histErr);
@@ -2451,6 +2606,15 @@ ANSWER OPTION INTEGRITY
 - Never rely on cultural trivia or external knowledge
 
 -------------------------
+FORMATTING & EMPHASIS RULES
+-------------------------
+- FORBIDDEN: Do not use HTML tags like <u>, <i>, <b>.
+- REQUIRED: For underlining/emphasis targets in questions, use exactly DOUBLE SQUARE BRACKETS.
+  Example: 「[[昨日]]、何をしましたか。」
+- Keep text plain and rely on [[...]] markers for highlights.
+- For reading passages, structure with simple newlines.
+
+-------------------------
 DIFFICULTY SAFETY CHECK
 -------------------------
 Before finalizing, verify:
@@ -2731,29 +2895,34 @@ async function deliverNextChunk(instanceKey, want) {
   const group = blueprint.groups[groupIdx];
   let cursor = deliveryState.cursors?.[want.group_id] || 0;
 
+  // Determine which slots we'll try to deliver (for batch fetch)
+  const slotsToConsider = [];
+  let tempCursor = cursor;
+  while (tempCursor < group.mondai_slots.length && slotsToConsider.length < want.want_count) {
+    slotsToConsider.push({ slot: group.mondai_slots[tempCursor], idx: tempCursor });
+    tempCursor++;
+    if (group.mondai_slots[tempCursor - 1]?.delivery_mode === 'whole') break;
+  }
+
+  // Batch fetch all hashes in one query
+  const hashesToFetch = slotsToConsider.map(s => s.slot.mondai_hash);
+  const contentMap = {};
+  if (hashesToFetch.length > 0) {
+    const batchRes = await db.query(
+      'SELECT hash, content FROM mondai_bank WHERE hash = ANY($1)',
+      [hashesToFetch]
+    );
+    batchRes.rows.forEach(r => { contentMap[r.hash] = parseJsonb(r.content); });
+  }
+
   const mondaiToDeliver = [];
   let blueprintModified = false;
 
-  // Deliver items until we satisfy want_count or run out
-  // Logic: 
-  // - Reading (whole): Take 1 mondai, done.
-  // - Others (flexible): Take up to want_count mondai slots.
+  for (const { slot, idx } of slotsToConsider) {
+    let content = contentMap[slot.mondai_hash] || null;
 
-  while (cursor < group.mondai_slots.length && mondaiToDeliver.length < want.want_count) {
-    const slot = group.mondai_slots[cursor];
-
-    // Load mondai content
-    let content = null;
-    const mRes = await db.query(
-      'SELECT content FROM mondai_bank WHERE hash=$1',
-      [slot.mondai_hash]
-    );
-
-    if (mRes.rows.length > 0) {
-      content = parseJsonb(mRes.rows[0].content);
-    } else {
+    if (!content) {
       // SAFETY NET: Content missing from bank (data inconsistency)
-      // Attempt to repair by finding another item from the same bucket
       console.warn(`[Chunk] Missing content for hash ${slot.mondai_hash}. Attempting repair...`);
       try {
         const snapRes = await db.query(
@@ -2763,14 +2932,10 @@ async function deliverNextChunk(instanceKey, want) {
 
         if (snapRes.rows.length > 0) {
           const { snapshot_id, bucket_key } = snapRes.rows[0];
-          // Resample (using simple random as this is emergency fallback)
           const newHash = await sampleMondaiFromBucket(snapshot_id, bucket_key, Math.random, [slot.mondai_hash]);
-
-          // Fetch new content
           const mRes2 = await db.query('SELECT content FROM mondai_bank WHERE hash=$1', [newHash]);
           if (mRes2.rows.length > 0) {
             content = parseJsonb(mRes2.rows[0].content);
-            // Update Blueprint (Persistent Repair)
             slot.mondai_hash = newHash;
             blueprintModified = true;
             console.log(`[Chunk] Repaired slot with new hash ${newHash}`);
@@ -2784,14 +2949,7 @@ async function deliverNextChunk(instanceKey, want) {
     if (content) {
       mondaiToDeliver.push(content);
     }
-
-    cursor++;
-
-    if (slot.delivery_mode === 'whole') {
-      // If reading, stop after 1 to ensure integrity (unless client asked for more?)
-      // Requirement says "Whole mondai at once". A chunk can contain 1 reading mondai.
-      break;
-    }
+    cursor = idx + 1;
   }
 
   // Update state
@@ -2837,6 +2995,7 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
 
     // Set No logic with backward-compatible options
     let finalSetNo = setNo;
+    let forceCreateNew = !!force_new;
 
     if (resume) {
       // RESUME: Find latest unexpired instance
@@ -2853,7 +3012,7 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
     }
 
     if (finalSetNo === undefined && daily) {
-      // DAILY: Deterministic by date (old behavior)
+      // DAILY: Deterministic by date
       const today = new Date().toISOString().split('T')[0];
       const hash = crypto.createHash('sha256')
         .update(`${userId}-${level}-${mode}-${today}`)
@@ -2862,98 +3021,141 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
       console.log(`[Exam] Daily mode: set_no ${finalSetNo}`);
     }
 
-    if (finalSetNo === undefined || force_new) {
-      // DEFAULT: Create NEW set_no = MAX(existing) + 1
-      const maxRes = await db.query(
-        'SELECT COALESCE(MAX(set_no), 0) + 1 AS next_set FROM exam_instances_cache WHERE user_id=$1 AND exam_id=$2 AND level=$3 AND mode=$4',
-        [userId, examSpec.exam_id, level, mode]
-      );
-      finalSetNo = maxRes.rows[0].next_set;
-      console.log(`[Exam] New set_no: ${finalSetNo}`);
+    if (finalSetNo === undefined) {
+      // DEFAULT (no resume, no daily, no explicit setNo): always create new
+      forceCreateNew = true;
     }
 
-    // 1. Check if instance already exists (Idempotency)
-    // Optimization: Avoid expensive blueprint build if we can reuse.
     let instanceKey, blueprint;
 
     // Helper to fetch existing
-    const fetchExisting = async () => {
+    const fetchExisting = async (sn) => {
       const res = await db.query(
         'SELECT instance_key, blueprint FROM exam_instances_cache WHERE user_id=$1 AND exam_id=$2 AND level=$3 AND mode=$4 AND set_no=$5',
-        [userId, examSpec.exam_id, level, mode, finalSetNo]
+        [userId, examSpec.exam_id, level, mode, sn]
       );
       return res.rows[0];
     };
 
-    const existingRow = await fetchExisting();
+    if (forceCreateNew) {
+      // CREATE NEW with retry loop (concurrency-safe)
+      const MAX_ATTEMPTS = 5;
+      let created = false;
 
-    if (existingRow) {
-      // REUSE EXISTING
-      console.log(`[Exam] Reusing existing instance for user ${userId}, set ${finalSetNo}`);
-      instanceKey = existingRow.instance_key;
-      blueprint = parseJsonb(existingRow.blueprint);
+      for (let attempt = 0; attempt < MAX_ATTEMPTS && !created; attempt++) {
+        // Compute next set_no each iteration (handles 23505 retries)
+        const maxRes = await db.query(
+          'SELECT COALESCE(MAX(set_no), 0) + 1 AS next_set FROM exam_instances_cache WHERE user_id=$1 AND exam_id=$2 AND level=$3 AND mode=$4',
+          [userId, examSpec.exam_id, level, mode]
+        );
+        finalSetNo = maxRes.rows[0].next_set;
+        console.log(`[Exam] New set_no: ${finalSetNo} (attempt ${attempt + 1})`);
 
-      // Extend expiry AND RESET delivery state (as requested)
-      await db.query(`
-            UPDATE exam_instances_cache 
-            SET expires_at = (CURRENT_TIMESTAMP + INTERVAL '3 days'),
-                delivery_state = $2
-            WHERE instance_key = $1
-        `, [instanceKey, JSON.stringify({ cursors: {} })]);
+        // Ensure Pool (fast/lazy)
+        const today = new Date().toISOString().split('T')[0];
+        const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
 
-    } else {
-      // CREATE NEW
+        // Build Blueprint
+        const seed = crypto.randomUUID();
+        const newBlueprint = await buildExamBlueprint(examSpec, level, mode, seed, finalSetNo, plan, snapshotId);
+        const newInstanceKey = crypto.randomUUID();
 
-      // Ensure Pool (fast/lazy)
-      const today = new Date().toISOString().split('T')[0];
-      const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
+        try {
+          await db.query(`
+            INSERT INTO exam_instances_cache 
+            (instance_key, user_id, exam_id, level, mode, plan, seed, set_no, blueprint, delivery_state, answer_keys)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          `, [
+            newInstanceKey, userId, examSpec.exam_id, level, mode, plan, seed, finalSetNo,
+            JSON.stringify(newBlueprint),
+            JSON.stringify({ cursors: {} }),
+            JSON.stringify({})
+          ]);
 
-      // Build Blueprint
-      const seed = crypto.randomUUID();
-      const newBlueprint = await buildExamBlueprint(examSpec, level, mode, seed, finalSetNo, plan, snapshotId);
-      const newInstanceKey = crypto.randomUUID();
-      const answerKeys = {}; // Loaded lazily
-
-      try {
-        // Insert with ON CONFLICT DO NOTHING (Race condition handling)
-        // If conflict occurs (someone else created it while we were building), we catch 23505 or handle via row count.
-        await db.query(`
-              INSERT INTO exam_instances_cache 
-              (instance_key, user_id, exam_id, level, mode, plan, seed, set_no, blueprint, delivery_state, answer_keys)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            `, [
-          newInstanceKey, userId, examSpec.exam_id, level, mode, plan, seed, finalSetNo,
-          JSON.stringify(newBlueprint),
-          JSON.stringify({ cursors: {} }),
-          JSON.stringify(answerKeys)
-        ]);
-
-        instanceKey = newInstanceKey;
-        blueprint = newBlueprint;
-      } catch (e) {
-        // Race condition: Conflict on unique key?
-        if (e.code === '23505') {
-          console.log('[Exam] Race condition on insert, reusing winner.');
-          const winnerRow = await fetchExisting();
-          if (winnerRow) {
-            instanceKey = winnerRow.instance_key;
-            blueprint = parseJsonb(winnerRow.blueprint);
-            // Reset state for the winner too? user implies "start fresh"
-            await db.query(`UPDATE exam_instances_cache SET delivery_state = $2 WHERE instance_key = $1`, [instanceKey, JSON.stringify({ cursors: {} })]);
-          } else {
-            throw e; // Should not happen
+          instanceKey = newInstanceKey;
+          blueprint = newBlueprint;
+          created = true;
+          console.log(`[Exam] Created new instance ${instanceKey.substring(0, 8)}... set_no=${finalSetNo}`);
+        } catch (e) {
+          if (e.code === '23505' && attempt < MAX_ATTEMPTS - 1) {
+            console.log(`[Exam] Conflict on set_no ${finalSetNo}, retrying (attempt ${attempt + 1})...`);
+            continue;
           }
-        } else {
           throw e;
         }
       }
 
+      if (!created) throw new Error('Failed to create exam instance after max retries');
+
       // Ensure attempt record exists
       await db.query(`
+        INSERT INTO attempts (instance_key, user_id, status)
+        VALUES ($1, $2, 'active')
+        ON CONFLICT DO NOTHING
+      `, [instanceKey, userId]);
+
+    } else {
+      // REUSE or CREATE for resume/daily/explicit setNo
+      const existingRow = await fetchExisting(finalSetNo);
+
+      if (existingRow) {
+        console.log(`[Exam] Reusing existing instance for user ${userId}, set ${finalSetNo}`);
+        instanceKey = existingRow.instance_key;
+        blueprint = parseJsonb(existingRow.blueprint);
+
+        // Extend expiry AND RESET delivery state
+        await db.query(`
+          UPDATE exam_instances_cache 
+          SET expires_at = (CURRENT_TIMESTAMP + INTERVAL '3 days'),
+              delivery_state = $2
+          WHERE instance_key = $1
+        `, [instanceKey, JSON.stringify({ cursors: {} })]);
+      } else {
+        // Create new for this specific setNo (daily/explicit)
+        const today = new Date().toISOString().split('T')[0];
+        const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
+        const seed = crypto.randomUUID();
+        const newBlueprint = await buildExamBlueprint(examSpec, level, mode, seed, finalSetNo, plan, snapshotId);
+        const newInstanceKey = crypto.randomUUID();
+
+        try {
+          await db.query(`
+            INSERT INTO exam_instances_cache 
+            (instance_key, user_id, exam_id, level, mode, plan, seed, set_no, blueprint, delivery_state, answer_keys)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          `, [
+            newInstanceKey, userId, examSpec.exam_id, level, mode, plan, seed, finalSetNo,
+            JSON.stringify(newBlueprint),
+            JSON.stringify({ cursors: {} }),
+            JSON.stringify({})
+          ]);
+
+          instanceKey = newInstanceKey;
+          blueprint = newBlueprint;
+        } catch (e) {
+          if (e.code === '23505') {
+            // Race: someone else created it, reuse
+            const winnerRow = await fetchExisting(finalSetNo);
+            if (winnerRow) {
+              instanceKey = winnerRow.instance_key;
+              blueprint = parseJsonb(winnerRow.blueprint);
+              await db.query(`UPDATE exam_instances_cache SET delivery_state = $2 WHERE instance_key = $1`,
+                [instanceKey, JSON.stringify({ cursors: {} })]);
+            } else {
+              throw e;
+            }
+          } else {
+            throw e;
+          }
+        }
+
+        // Ensure attempt record
+        await db.query(`
           INSERT INTO attempts (instance_key, user_id, status)
           VALUES ($1, $2, 'active')
           ON CONFLICT DO NOTHING
         `, [instanceKey, userId]);
+      }
     }
 
     // First chunk (first 2 items of first group)
