@@ -2108,3 +2108,201 @@ body::before {
   font-size: var(--text-lg);
   font-weight: 500;
 }
+
+/* ============================================
+   Emphasis Highlight (.hl)
+   Used for [[word]] markers and legacy <u> tags
+   ============================================ */
+strong.hl {
+  font-weight: 700;
+  color: var(--accent-primary);
+  background: linear-gradient(to bottom, transparent 60%, rgba(99, 102, 241, 0.2) 60%);
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+[data-theme="light"] strong.hl {
+  color: var(--accent-hover);
+  background: linear-gradient(to bottom, transparent 60%, rgba(37, 99, 235, 0.15) 60%);
+}
+
+/* Mobile passage sticky */
+@media (max-width: 767px) {
+  .passage-container {
+    position: sticky;
+    top: 0;
+    max-height: 40vh;
+    overflow-y: auto;
+    z-index: 10;
+    background: var(--bg-primary);
+    border-bottom: 1px solid var(--glass-border);
+    margin: 0 calc(-1 * var(--space-md));
+    padding: var(--space-sm) var(--space-md);
+  }
+}
+
+/* ============================================
+   Review UI: Answer Highlighting + Explanation Toggle
+   ============================================ */
+.review-item {
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 12px;
+  border-left: 4px solid var(--glass-border);
+  transition: border-color 0.2s;
+}
+
+.review-item.incorrect {
+  border-left-color: #ef4444;
+}
+
+.review-item:not(.incorrect) {
+  border-left-color: #22c55e;
+}
+
+.review-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.review-item-id {
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.review-status {
+  font-weight: 600;
+  font-size: 0.85rem;
+  padding: 2px 10px;
+  border-radius: 6px;
+}
+
+.review-status.correct {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.12);
+}
+
+.review-status.incorrect {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.review-prompt {
+  margin-bottom: 10px;
+  line-height: 1.6;
+}
+
+/* Choice highlighting in review */
+.review-choice {
+  padding: 8px 12px;
+  margin: 4px 0;
+  border-radius: 8px;
+  border: 1.5px solid transparent;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  transition: all 0.15s;
+}
+
+.review-choice.correct-answer {
+  background: rgba(34, 197, 94, 0.10);
+  border-color: #22c55e;
+}
+
+.review-choice.correct-answer .choice-letter {
+  background: #22c55e;
+  color: #fff;
+}
+
+.review-choice.wrong-answer {
+  background: rgba(239, 68, 68, 0.10);
+  border-color: #ef4444;
+}
+
+.review-choice.wrong-answer .choice-letter {
+  background: #ef4444;
+  color: #fff;
+}
+
+.review-choice.user-selected:not(.wrong-answer):not(.correct-answer) {
+  border-color: var(--accent);
+}
+
+/* Correct answer inline label */
+.correct-answer-label {
+  margin-top: 8px;
+  padding: 6px 12px;
+  background: rgba(34, 197, 94, 0.08);
+  border-radius: 8px;
+  font-size: 0.9rem;
+  color: #22c55e;
+  font-weight: 500;
+}
+
+/* Explanation toggle */
+.explanation-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 6px 14px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.explanation-toggle:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.explanation-toggle .toggle-icon {
+  transition: transform 0.2s;
+  font-size: 0.75rem;
+}
+
+.explanation-toggle.expanded .toggle-icon {
+  transform: rotate(90deg);
+}
+
+.review-feedback {
+  margin-top: 10px;
+  padding: 12px;
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  border-left: 3px solid var(--accent);
+}
+
+.review-feedback .feedback-section {
+  margin-bottom: 8px;
+}
+
+.review-feedback .feedback-section:last-child {
+  margin-bottom: 0;
+}
+
+.review-feedback h4 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 0 0 4px;
+}
+
+.review-feedback p {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+/* Utility */
+.hidden {
+  display: none !important;
+}

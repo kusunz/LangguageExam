@@ -1,4 +1,6 @@
 
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 const http = require('http');
 // server.js is expected to be in the same directory
 const app = require('./server');
@@ -174,6 +176,116 @@ async function runTest() {
             console.log('✅ PASS: Different instanceKeys returned (no unintended reuse)');
         } else {
             throw new Error('FAIL: Same instanceKey returned on second start! Exam reuse bug still present.');
+        }
+
+        // 7. Test: Quickgrade UPSERT has correct fields
+        console.log('\n[5] Testing quickgrade result fields...');
+        if (gradeData.score_summary) {
+            const hasTotalCorrect = gradeData.score_summary.total_correct !== undefined;
+            const hasTotalQuestions = gradeData.score_summary.total_questions !== undefined;
+            if (hasTotalCorrect && hasTotalQuestions) {
+                console.log('✅ PASS: score_summary has total_correct and total_questions');
+            } else {
+                console.log('⚠️  WARN: score_summary missing expected fields:', Object.keys(gradeData.score_summary));
+            }
+        } else {
+            console.log('⚠️  WARN: No score_summary in quickgrade response');
+        }
+
+        // 8. Test: Chunk endpoint with want_count > 1
+        console.log('\n[6] Testing chunk with want_count > 1...');
+        const chunkRes2 = await fetch(`${baseUrl}/api/exam/chunk`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer demo-token'
+            },
+            body: JSON.stringify({
+                instanceKey: startData2.instanceKey,
+                want: { group_id: 'vocab', want_count: 3 }
+            })
+        });
+
+        if (chunkRes2.ok) {
+            const chunkData2 = await chunkRes2.json();
+            console.log('Multi-chunk response OK. Items:', chunkData2.chunk ? chunkData2.chunk.length : 0);
+            console.log('✅ PASS: Chunk with want_count > 1 returns successfully');
+        } else {
+            console.log('⚠️  WARN: Multi-chunk request returned', chunkRes2.status);
+        }
+
+        // 9b. Test: Answer probing with fake questionId → 400
+        console.log('\n[6b] Testing grade with fake questionId (probing prevention)...');
+        const probeRes = await fetch(`${baseUrl}/api/grade-test`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer demo-token'
+            },
+            body: JSON.stringify({
+                instanceKey: startData.instanceKey,
+                answers: { 'FAKE-ID-999': 0, 'FAKE-ID-888': 1 }
+            })
+        });
+
+        if (probeRes.status === 400) {
+            const probeData = await probeRes.json();
+            if (probeData.error === 'Invalid question IDs' && probeData.invalid?.length > 0) {
+                console.log('✅ PASS: Fake questionId correctly rejected with 400');
+            } else {
+                console.log('⚠️  WARN: Got 400 but unexpected body:', JSON.stringify(probeData));
+            }
+        } else {
+            throw new Error(`FAIL: Expected 400 for fake questionId, got ${probeRes.status}`);
+        }
+
+        // 10. Test: Warm-pool endpoint (requires WARMUP_SECRET env var)
+        const warmSecret = process.env.WARMUP_SECRET;
+        if (warmSecret) {
+            console.log('\n[7] Testing POST /api/admin/warm-pool...');
+
+            // Test 7a: Unauthenticated should return 401
+            const warmNoAuth = await fetch(`${baseUrl}/api/admin/warm-pool`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ level: 'N2', mode: 'basic' })
+            });
+            if (warmNoAuth.status === 401) {
+                console.log('✅ PASS: Unauthenticated warm-pool returns 401');
+            } else {
+                throw new Error(`FAIL: Expected 401 for unauthenticated warm-pool, got ${warmNoAuth.status}`);
+            }
+
+            // Test 7b: Authenticated should return 200 with stats
+            const warmRes = await fetch(`${baseUrl}/api/admin/warm-pool`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-warmup-secret': warmSecret
+                },
+                body: JSON.stringify({
+                    level: 'N2',
+                    mode: 'basic',
+                    targetPerBucket: 1,
+                    maxBuckets: 2,
+                    maxConcurrency: 1
+                })
+            });
+
+            if (warmRes.ok) {
+                const warmData = await warmRes.json();
+                console.log('Warm-pool response:', JSON.stringify(warmData));
+                if (warmData.snapshotId && warmData.durationMs !== undefined) {
+                    console.log('✅ PASS: warm-pool returns valid stats');
+                } else {
+                    throw new Error('FAIL: warm-pool response missing expected fields');
+                }
+            } else {
+                const txt = await warmRes.text();
+                throw new Error(`FAIL: warm-pool failed: ${warmRes.status} ${txt}`);
+            }
+        } else {
+            console.log('\n[7] SKIPPED: POST /api/admin/warm-pool (set WARMUP_SECRET env var to test)');
         }
 
         console.log('\n--- TEST SUCCESS ---');

@@ -1,0 +1,26 @@
+[DB] Mode: auto, Neon strict: false
+[DB] Driver: pg Pool
+--- STARTING V2 AUTO TEST ---
+Waiting for DB initialization...
+Test Server running on http://localhost:11188
+
+[1] Testing POST /api/exam/start...
+[2026-02-23T17:45:59.476Z] [INFO] Demo token accepted {"path":"/api/exam/start"}
+[DB] Connection OK
+[DB] Running migrations...
+[DB] Migrations complete
+[Exam] New set_no: 4
+Start Response OK. InstanceKey: c1548a8e-1071-4090-9c42-d1604476d7bb
+First Chunk Items: 1
+
+[2] Testing POST /api/exam/chunk...
+[2026-02-23T17:46:01.163Z] [INFO] Demo token accepted {"path":"/api/exam/chunk"}
+Chunk Response OK. Items: 0
+Done flag: true
+
+[3] Testing POST /api/exam/quickgrade...
+[2026-02-23T17:46:01.247Z] [INFO] Demo token accepted {"path":"/api/exam/quickgrade"}
+Quickgrade Response OK.
+Score Summary: { correct: 2, total: 2, percentage: 100 }
+
+--- TEST SUCCESS ---

@@ -68,6 +68,16 @@ const verifyAnswerLimiter = rateLimit({
   keyGenerator: (req) => req.user?.userId || req.ip
 });
 
+// Rate limiting for TTS endpoints (prevent cost runaway)
+const ttsLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // 10 TTS requests per minute per user
+  message: { error: 'Too many TTS requests, please slow down' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.user?.userId || req.ip
+});
+
 // Data directory: (Removed for strict DB mode)
 // We rely entirely on the database.
 const DATA_DIR = IS_VERCEL ? '/tmp/data' : path.join(__dirname, 'data');
@@ -582,6 +592,7 @@ function generateMondaiHash(mondai) {
 
 const ON_DEMAND_BATCH = 1;
 const WARM_TARGET_PER_BUCKET = 50;
+const MAX_GEMINI_CALLS_PER_REQUEST = 3; // Cap LLM calls per user request (start/chunk/warm)
 
 /**
  * Ensure pool snapshot exists (Meta only)
@@ -1713,10 +1724,19 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
       let totalCount = 0;
       const byQuestion = [];
       const wrongQuestions = [];
+      // Validate all submitted questionIds belong to this exam instance
+      const submittedIds = Object.keys(answers || {});
+      const invalidIds = submittedIds.filter(id => !questionMap[id]);
+      if (invalidIds.length > 0) {
+        return res.status(400).json({
+          error: 'Invalid question IDs',
+          invalid: invalidIds.slice(0, 10) // Cap to avoid data leak
+        });
+      }
 
       for (const [qId, userAns] of Object.entries(answers || {})) {
         const q = questionMap[qId];
-        if (!q) continue;
+        if (!q) continue; // Already validated above, but defensive
 
         totalCount++;
         const isCorrect = userAns === q.correct_index;
@@ -2014,7 +2034,7 @@ async function generateDeepgramAudio(text, voice) {
 }
 
 // STREAMING TTS endpoint - sends audio chunks as SSE
-app.post('/api/tts/stream', authMiddleware, async (req, res) => {
+app.post('/api/tts/stream', authMiddleware, ttsLimiter, async (req, res) => {
   try {
     const { text, language } = req.body;
 
@@ -2078,7 +2098,7 @@ app.post('/api/tts/stream', authMiddleware, async (req, res) => {
 });
 
 // Non-streaming TTS endpoint with smart dialogue detection + caching
-app.post('/api/tts', authMiddleware, async (req, res) => {
+app.post('/api/tts', authMiddleware, ttsLimiter, async (req, res) => {
   try {
     const { text, language, provider, speed, voice } = req.body;
     const ttsProvider = provider || 'deepgram';
@@ -2805,39 +2825,32 @@ app.get('/api/admin/warmup', async (req, res) => {
     }
 
     // Parse params with defaults
-    const examId = req.query.exam_id || 'jlpt_base_N2';
+    const examId = req.query.exam_id || 'jlpt_n2';
     const level = req.query.level || 'N2';
     const mode = req.query.mode || 'standard';
     const dateYmd = req.query.date_ymd || new Date().toISOString().split('T')[0];
-    const targetPerBucket = parseInt(req.query.target) || 50;
-    const maxBuckets = parseInt(req.query.max_buckets) || 10;
+    const targetPerBucket = parseInt(req.query.target) || 5;
+    const maxBuckets = parseInt(req.query.max_buckets) || 20;
     const maxGenerateTotal = parseInt(req.query.max_gen) || 20;
 
-    // Load exam spec (simplified - uses default N2 structure)
-    // In production, this should load from a config or DB
-    const examSpec = {
-      exam_id: examId,
-      level: level,
-      language: 'ja-JP',
-      display_name_vi: `JLPT ${level}`,
-      modes: DEFAULT_MODES,
-      groups: [
-        {
-          group_id: 'vocab',
-          title_vi: 'Từ vựng - Ngữ pháp',
-          mondai: [
-            { mondai_id: 'M1', title_vi: 'Đọc Hán tự', count_official: 5, types: ['kanji_reading'] },
-            { mondai_id: 'M2', title_vi: 'Viết Hán tự', count_official: 5, types: ['kanji_writing'] },
-            { mondai_id: 'M3', title_vi: 'Ghép từ', count_official: 5, types: ['word_formation'] },
-            { mondai_id: 'M4', title_vi: 'Nghĩa từ vựng', count_official: 7, types: ['context_vocab'] },
-            { mondai_id: 'M5', title_vi: 'Cách dùng', count_official: 5, types: ['usage'] },
-            { mondai_id: 'M6', title_vi: 'Chọn ngữ pháp', count_official: 5, types: ['grammar_select'] },
-            { mondai_id: 'M7', title_vi: 'Sắp xếp câu', count_official: 5, types: ['sentence_order'] },
-            { mondai_id: 'M8', title_vi: 'Điền ngữ pháp', count_official: 5, types: ['grammar_cloze'] }
-          ]
-        }
-      ]
-    };
+    // Load real exam spec from file (includes listening/reading)
+    let examSpec;
+    try {
+      const specPath = path.join(__dirname, '../web/public/exams', `${examId}.json`);
+      const raw = await fs.readFile(specPath, 'utf-8');
+      examSpec = JSON.parse(raw);
+      examSpec.level = level; // Override level from param
+    } catch (specErr) {
+      console.warn(`[Warmup] Could not load ${examId}.json, using fallback spec`);
+      examSpec = {
+        exam_id: examId, level, language: 'ja-JP',
+        display_name_vi: `JLPT ${level}`, modes: DEFAULT_MODES,
+        groups: [{
+          group_id: 'vocab', title_vi: 'Từ vựng',
+          mondai: [{ mondai_id: 'M1', title_vi: 'Hán tự', count_official: 5, types: ['kanji_reading'] }]
+        }]
+      };
+    }
 
     console.log(`[Warmup] Starting for ${examId} ${level} ${mode} on ${dateYmd}`);
 
@@ -2869,6 +2882,207 @@ app.get('/api/admin/warmup', async (req, res) => {
 
   } catch (err) {
     console.error('[Warmup] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/admin/warm-pool - Enhanced warm with round-robin + concurrency limiter
+ * Authentication: x-warmup-secret header
+ * Body: { exam_id?, level?, mode?, date_ymd?, targetPerBucket?, maxBuckets?, maxConcurrency? }
+ */
+app.post('/api/admin/warm-pool', async (req, res) => {
+  const startTime = Date.now();
+
+  // Authenticate via secret header
+  const secret = req.headers['x-warmup-secret'];
+  const expectedSecret = process.env.WARMUP_SECRET;
+  if (!expectedSecret || secret !== expectedSecret) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    if (!(await db.initDb())) {
+      return res.status(503).json({ error: 'DB unavailable' });
+    }
+
+    const {
+      exam_id = 'jlpt_n2',
+      level = 'N2',
+      mode = 'standard',
+      date_ymd = new Date().toISOString().split('T')[0],
+      targetPerBucket = 5,
+      maxBuckets = 20,
+      maxConcurrency = 2
+    } = req.body || {};
+
+    // Load real exam spec from file
+    let examSpec;
+    try {
+      const specPath = path.join(__dirname, '../web/public/exams', `${exam_id}.json`);
+      const raw = await fs.readFile(specPath, 'utf-8');
+      examSpec = JSON.parse(raw);
+      examSpec.level = level;
+    } catch (specErr) {
+      return res.status(400).json({ error: `Exam spec ${exam_id}.json not found` });
+    }
+
+    if (!examSpec.modes) examSpec.modes = DEFAULT_MODES;
+
+    console.log(`[WarmPool] Starting for ${exam_id} ${level} ${mode} on ${date_ymd} (target=${targetPerBucket}, maxBuckets=${maxBuckets}, concurrency=${maxConcurrency})`);
+
+    const snapshotId = await ensurePoolSnapshot(examSpec, level, date_ymd, 'warmup', mode);
+    if (!snapshotId) {
+      return res.status(500).json({ error: 'Failed to create snapshot' });
+    }
+
+    // Build round-robin bucket list across all groups
+    const groupBuckets = examSpec.groups.map(group => {
+      return group.mondai.filter(m => m.types?.[0]).map(mondaiDef => ({
+        group, mondaiDef,
+        bucketKey: getBucketKey(group.group_id, mondaiDef.mondai_id, mondaiDef.types[0])
+      }));
+    });
+
+    // Interleave buckets: take 1 from each group in turn
+    const interleaved = [];
+    let maxLen = Math.max(...groupBuckets.map(g => g.length));
+    for (let i = 0; i < maxLen; i++) {
+      for (const gb of groupBuckets) {
+        if (i < gb.length) interleaved.push(gb[i]);
+      }
+    }
+
+    // Simple concurrency limiter
+    let running = 0;
+    let bucketsProcessed = 0;
+    let generatedCount = 0;
+    let skipped = 0;
+
+    const warmBucket = async (bucket) => {
+      const { group, mondaiDef, bucketKey } = bucket;
+
+      const countRes = await db.query(
+        'SELECT COUNT(*) FROM pool_snapshot_items WHERE snapshot_id=$1 AND bucket_key=$2',
+        [snapshotId, bucketKey]
+      );
+      const current = parseInt(countRes.rows[0]?.count || 0);
+
+      if (current >= targetPerBucket) {
+        skipped++;
+        return;
+      }
+
+      const needed = Math.min(targetPerBucket - current, 3); // Cap per-bucket batch
+      if (needed <= 0) { skipped++; return; }
+
+      console.log(`[WarmPool] Filling ${bucketKey}: ${current} -> ${current + needed}`);
+
+      try {
+        await generateMondaiForBucket({
+          examSpec, level, mode, group, mondaiDef, bucketKey, snapshotId,
+          count: needed, plan: 'warmup'
+        });
+        generatedCount += needed;
+      } catch (e) {
+        console.error(`[WarmPool] Error generating for ${bucketKey}:`, e?.message || e);
+      }
+      bucketsProcessed++;
+    };
+
+    // Process with concurrency limit
+    const bucketsToProcess = interleaved.slice(0, maxBuckets);
+    const semaphore = { active: 0, queue: [] };
+
+    const acquire = () => new Promise(resolve => {
+      if (semaphore.active < maxConcurrency) {
+        semaphore.active++;
+        resolve();
+      } else {
+        semaphore.queue.push(resolve);
+      }
+    });
+
+    const release = () => {
+      semaphore.active--;
+      if (semaphore.queue.length > 0) {
+        semaphore.active++;
+        semaphore.queue.shift()();
+      }
+    };
+
+    await Promise.all(bucketsToProcess.map(async (bucket) => {
+      await acquire();
+      try { await warmBucket(bucket); }
+      finally { release(); }
+    }));
+
+    const durationMs = Date.now() - startTime;
+    console.log(`[WarmPool] Complete: ${bucketsProcessed} buckets, ${generatedCount} generated, ${skipped} skipped in ${durationMs}ms`);
+
+    res.json({
+      snapshotId,
+      date_ymd,
+      bucketsProcessed,
+      generatedCount,
+      skipped,
+      durationMs
+    });
+
+  } catch (err) {
+    console.error('[WarmPool] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/admin/cleanup - Remove old pool snapshots and items
+ * Authentication: x-warmup-secret header
+ * Body: { keepDays?: number } (default 14)
+ */
+app.post('/api/admin/cleanup', async (req, res) => {
+  const secret = req.headers['x-warmup-secret'];
+  const expectedSecret = process.env.WARMUP_SECRET;
+  if (!expectedSecret || secret !== expectedSecret) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    if (!(await db.initDb())) {
+      return res.status(503).json({ error: 'DB unavailable' });
+    }
+
+    const keepDays = Math.max(1, parseInt(req.body?.keepDays) || 14);
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - keepDays);
+    const cutoffYmd = cutoffDate.toISOString().split('T')[0];
+
+    console.log(`[Cleanup] Removing pool data older than ${cutoffYmd} (${keepDays} days)`);
+
+    // Delete items linked to old snapshots first (FK safety)
+    const itemsRes = await db.query(
+      `DELETE FROM pool_snapshot_items WHERE snapshot_id IN (
+        SELECT id FROM pool_snapshots WHERE date_ymd < $1
+      )`, [cutoffYmd]
+    );
+
+    // Delete the old snapshots
+    const snapsRes = await db.query(
+      'DELETE FROM pool_snapshots WHERE date_ymd < $1', [cutoffYmd]
+    );
+
+    const result = {
+      deletedSnapshots: snapsRes.rowCount || 0,
+      deletedItems: itemsRes.rowCount || 0,
+      cutoffDate: cutoffYmd,
+      keepDays
+    };
+
+    console.log(`[Cleanup] Done: ${result.deletedSnapshots} snapshots, ${result.deletedItems} items removed`);
+    res.json(result);
+
+  } catch (err) {
+    console.error('[Cleanup] Error:', err);
     res.status(500).json({ error: err.message });
   }
 });

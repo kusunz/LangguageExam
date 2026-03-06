@@ -12,6 +12,10 @@
         {
             "path": "/api/admin/warmup?level=N2&mode=official",
             "schedule": "20 0 * * *"
+        },
+        {
+            "path": "/api/admin/warmup?level=N2&mode=basic&target=3&max_buckets=10",
+            "schedule": "0 */6 * * *"
         }
     ],
     "rewrites": [

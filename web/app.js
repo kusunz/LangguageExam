@@ -49,6 +49,14 @@
                     this.active--;
                     this.process();
                 });
+        },
+
+        clear() {
+            // Reject all pending (unstarted) queue items
+            const pending = this.queue.splice(0);
+            pending.forEach(({ reject }) => {
+                try { reject(new Error('Queue cleared')); } catch (_) { }
+            });
         }
     };
 
@@ -96,6 +104,11 @@
         // 2. Stop all timers
         if (typeof Timer !== 'undefined' && Timer.stopAll) {
             try { Timer.stopAll(); } catch (_) { }
+        }
+
+        // 2b. Drain pending chunk prefetch queue
+        if (typeof RequestQueue !== 'undefined' && RequestQueue.clear) {
+            try { RequestQueue.clear(); } catch (_) { }
         }
 
         // 3. Reset TestUI flags (safe if not defined yet)
@@ -296,15 +309,18 @@
             });
         },
 
-        async gradeTest(test, answers, provider, model = null) {
+        async gradeTest(test, answers, provider, model = null, instanceKey = null) {
             // Set 300s timeout for grading
             const controller = new AbortController();
             const id = setTimeout(() => controller.abort(), 300000);
 
             try {
+                const body = { test, answers, provider, model };
+                if (instanceKey) body.instanceKey = instanceKey;
+
                 const res = await this.request('/grade-test', {
                     method: 'POST',
-                    body: { test, answers, provider, model },
+                    body,
                     signal: controller.signal
                 });
                 clearTimeout(id);
@@ -1715,15 +1731,18 @@
         },
 
         stop() {
-            // Abort any ongoing fetch requests
+            // Abort ongoing fetch requests fully
+            if (this.streamAbortController) {
+                try { this.streamAbortController.abort(); } catch (_) { }
+                this.streamAbortController = null;
+            }
             if (this.abortController) {
-                try {
-                    this.abortController.abort();
-                } catch (_) { }
+                try { this.abortController.abort(); } catch (_) { }
                 this.abortController = null;
             }
             if (State.ttsAudio) {
                 State.ttsAudio.pause();
+                // Revoke src to avoid leaks, except if it's cached. But we're fully stopping.
                 if (State.ttsAudio.src) URL.revokeObjectURL(State.ttsAudio.src);
                 State.ttsAudio = null;
             }
@@ -1737,6 +1756,11 @@
             this.currentIndex = 0;
             this.combinedBlob = null;
             this.currentAudioKey = null;
+            // Reset audio timer/progress UI
+            const audioTime = $('#audio-time');
+            if (audioTime) audioTime.textContent = '00:00';
+            const audioSeek = $('#audio-seek');
+            if (audioSeek) audioSeek.value = 0;
         },
 
         // Helper to resume streaming safely
@@ -2266,9 +2290,9 @@
         },
 
         renderCurrentMondai() {
-            // Stop any playing audio before rendering new mondai
-            if (typeof TTSManager !== 'undefined' && TTSManager.stop) {
-                try { TTSManager.stop(); } catch (_) { }
+            // Stop runtime playing audio before rendering new mondai to PRESERVE cache 
+            if (typeof TTSManager !== 'undefined' && TTSManager.stopRuntimeOnly) {
+                try { TTSManager.stopRuntimeOnly(); } catch (_) { }
             }
 
             const test = State.test;
@@ -2514,10 +2538,15 @@
             if (scriptText) {
                 const lang = State.test.meta.language || getExamLanguage(State.test.meta.exam_id);
 
-                // Generate deterministic audioKey for this mondai
-                const groupId = State.test.groups?.[State.currentGroupIndex]?.group_id || 'unknown-group';
-                const mondaiId = mondaiData?.mondai?.mondai_id || String(State.currentMondaiIndex);
-                const audioKey = `${lang}|${groupId}|${mondaiId}|${fnv1a32(scriptText)}`;
+                // Quick SHA-256 for stable exact cache key
+                const getSha256Str = async (str) => {
+                    const msgBuffer = new TextEncoder().encode(str);
+                    const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+                    const hashArray = Array.from(new Uint8Array(hashBuffer));
+                    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+                };
+
+                const audioKey = await getSha256Str(`${lang}|${scriptText}`);
 
                 // Set active key for this mondai
                 TTSManager.setActiveKey(audioKey);
@@ -2810,14 +2839,11 @@
 
         // Show confirmation for unanswered questions
         async confirmUnansweredSubmit(count, isWholeTest = false) {
-            return new Promise((resolve) => {
-                const msg = isWholeTest
-                    ? `Bạn còn ${count} câu chưa trả lời. Bạn vẫn muốn nộp bài thi?`
-                    : `Bạn còn ${count} câu chưa trả lời. Bạn vẫn muốn nộp phần này?`;
-
-                // Use browser confirm for simplicity
-                resolve(confirm(msg));
-            });
+            const title = isWholeTest ? 'Nộp bài thi?' : 'Nộp phần này?';
+            const msg = isWholeTest
+                ? `Bạn còn ${count} câu chưa trả lời. Bạn vẫn muốn nộp bài thi?`
+                : `Bạn còn ${count} câu chưa trả lời. Bạn vẫn muốn nộp phần này?`;
+            return this.showConfirm(title, msg);
         },
 
         async moveToNextGroup() {
@@ -3084,8 +3110,11 @@
 
             try {
                 const llmProvider = $('#llm-provider').value;
-                const feedback = await Api.gradeTest(State.test, State.answers, llmProvider);
-                feedback.grading_mode = 'ai'; // Flag for UI
+                const feedback = await Api.gradeTest(
+                    State.test, State.answers, llmProvider, null,
+                    State.currentInstanceKey || null
+                );
+                feedback.grading_mode = 'ai';
                 State.feedback = feedback;
 
                 // Stop progress and complete to 100%
@@ -3452,8 +3481,17 @@
                 }).join('')}
             </div>
             
-            ${!item.is_correct ? `
-              <div class="review-feedback">
+            ${!item.is_correct && correctAnswer !== undefined ? `
+              <div class="correct-answer-label">
+                ✓ Đáp án đúng: ${String.fromCharCode(65 + correctAnswer)}. ${TestUI.escapeHtml(questionData.choices[correctAnswer] || '')}
+              </div>
+            ` : ''}
+
+            ${!item.is_correct && (item.why_wrong_vi || item.key_point_vi || item.mini_lesson_vi || questionData.media?.script_text) ? `
+              <button class="explanation-toggle" onclick="this.classList.toggle('expanded'); this.nextElementSibling.classList.toggle('hidden');">
+                <i class="fa-solid fa-chevron-right toggle-icon"></i> Xem giải thích
+              </button>
+              <div class="review-feedback hidden">
                 ${item.why_wrong_vi ? `<div class="feedback-section"><h4>Tại sao sai:</h4><p>${item.why_wrong_vi}</p></div>` : ''}
                 ${item.key_point_vi ? `
                   <div class="feedback-section">
