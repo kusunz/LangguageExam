@@ -284,6 +284,42 @@ async function runTest() {
                 const txt = await warmRes.text();
                 throw new Error(`FAIL: warm-pool failed: ${warmRes.status} ${txt}`);
             }
+
+            // Test 8: Admin Cleanup endpoint
+            console.log('\n[8] Testing POST /api/admin/cleanup...');
+            const cleanupNoAuth = await fetch(`${baseUrl}/api/admin/cleanup`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ keepDays: 7 })
+            });
+
+            if (cleanupNoAuth.status === 401) {
+                console.log('✅ PASS: Unauthenticated cleanup returns 401');
+            } else {
+                throw new Error(`FAIL: Expected 401 for unauthenticated cleanup, got ${cleanupNoAuth.status}`);
+            }
+
+            const cleanupRes = await fetch(`${baseUrl}/api/admin/cleanup`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-warmup-secret': warmSecret
+                },
+                body: JSON.stringify({ keepDays: 7 })
+            });
+
+            if (cleanupRes.ok) {
+                const cleanupData = await cleanupRes.json();
+                console.log('Cleanup response:', JSON.stringify(cleanupData));
+                if (cleanupData.deletedSnapshots !== undefined && cleanupData.deletedItems !== undefined) {
+                    console.log('✅ PASS: cleanup returns valid stats');
+                } else {
+                    throw new Error('FAIL: cleanup response missing expected fields');
+                }
+            } else {
+                const txt = await cleanupRes.text();
+                throw new Error(`FAIL: cleanup failed: ${cleanupRes.status} ${txt}`);
+            }
         } else {
             console.log('\n[7] SKIPPED: POST /api/admin/warm-pool (set WARMUP_SECRET env var to test)');
         }
