@@ -523,6 +523,20 @@
             }
         },
 
+        showAuthLoading(message) {
+            const loader = $('#fullscreen-loader');
+            const loaderText = $('#fullscreen-loader-text');
+            if (loader && loaderText) {
+                loader.classList.remove('hidden');
+                loaderText.textContent = message || 'Đang tải...';
+            }
+        },
+
+        hideAuthLoading() {
+            const loader = $('#fullscreen-loader');
+            if (loader) loader.classList.add('hidden');
+        },
+
         async loginWithEmail() {
             if (this.privy) {
                 // Show email modal
@@ -598,11 +612,13 @@
                 try {
                     $('#btn-verify-otp').disabled = true;
                     $('#btn-verify-otp').textContent = 'Đang xác thực...';
+                    this.showAuthLoading('Đang xác thực OTP...');
 
                     const session = await this.privy.auth.email.loginWithCode(this.pendingEmail, code);
                     modal.classList.add('hidden');
                     await this.handlePrivySession(session);
                 } catch (err) {
+                    this.hideAuthLoading();
                     error.textContent = 'Mã OTP không đúng hoặc đã hết hạn';
                     error.classList.remove('hidden');
                 } finally {
@@ -620,30 +636,34 @@
         async handlePrivySession(session) {
             console.log('Privy session received:', session);
 
-            // Extract user info from session
-            const user = session.user;
-            const accessToken = session.token || session.privy_access_token;
+            try {
+                // Extract user info from session
+                const user = session.user;
+                const accessToken = session.token || session.privy_access_token;
 
-            // Get email from linked_accounts
-            const emailAccount = user.linked_accounts?.find(acc => acc.type === 'email');
-            const email = emailAccount?.address || user.email?.address || 'user@privy.io';
+                // Get email from linked_accounts
+                const emailAccount = user.linked_accounts?.find(acc => acc.type === 'email');
+                const email = emailAccount?.address || user.email?.address || 'user@privy.io';
 
-            State.user = {
-                email: email,
-                token: accessToken,
-                privyUser: user
-            };
+                State.user = {
+                    email: email,
+                    token: accessToken,
+                    privyUser: user
+                };
 
-            console.log('User logged in:', State.user.email);
+                console.log('User logged in:', State.user.email);
 
-            localStorage.setItem('user', JSON.stringify({
-                email: State.user.email,
-                token: State.user.token
-            }));
+                localStorage.setItem('user', JSON.stringify({
+                    email: State.user.email,
+                    token: State.user.token
+                }));
 
-            await this.loadUserData();
-            this.updateUI();
-            showScreen('home-screen');
+                await this.loadUserData();
+                this.updateUI();
+                showScreen('home-screen');
+            } finally {
+                this.hideAuthLoading();
+            }
         },
 
         async loginDemo() {
@@ -651,13 +671,7 @@
         },
 
         async handleAuthSuccess(user, isRestore = false) {
-            // Show fullscreen loading overlay to block all interaction
-            const loader = $('#fullscreen-loader');
-            const loaderText = $('#fullscreen-loader-text');
-            if (loader) {
-                loader.classList.remove('hidden');
-                loaderText.textContent = isRestore ? 'Đang khôi phục phiên...' : 'Đang đăng nhập...';
-            }
+            this.showAuthLoading(isRestore ? 'Đang khôi phục phiên...' : 'Đang đăng nhập...');
 
             try {
                 State.user = {
@@ -671,8 +685,7 @@
                 this.updateUI();
                 showScreen('home-screen');
             } finally {
-                // Always hide the loader
-                if (loader) loader.classList.add('hidden');
+                this.hideAuthLoading();
             }
         },
 
