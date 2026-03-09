@@ -12,10 +12,6 @@
         {
             "path": "/api/admin/warmup/n2/official",
             "schedule": "20 0 * * *"
-        },
-        {
-            "path": "/api/admin/warmup/n2/basic_target3",
-            "schedule": "0 */6 * * *"
         }
     ],
     "rewrites": [
