@@ -1821,6 +1821,9 @@
         loadingGroupIndex: 0, // Current group being loaded
         isSubmitting: false, // Prevent duplicate submissions
         isStartingTest: false, // Prevent duplicate test starts
+        activeLoaders: new Set(),
+        nextLoadFailTimer: null,
+        showNextButtonRetryState: false,
 
         simulateProgress(bar, text) {
             if (!bar) bar = $('#loading-progress');
@@ -1977,6 +1980,28 @@
             }
         },
 
+        async retryFetchNextMondai(targetGroupId) {
+            if (this.activeLoaders.has(targetGroupId)) return;
+
+            this.showNextButtonRetryState = false;
+            this.updateNavigationButtons();
+
+            this.activeLoaders.add(targetGroupId);
+            try {
+                const res = await Api.fetchExamChunk(State.currentInstanceKey, targetGroupId, 3);
+                const group = State.test.groups.find(g => g.group_id === targetGroupId);
+                if (group && res.chunk && res.chunk.length > 0) {
+                    group.mondai.push(...res.chunk);
+                }
+            } catch (err) {
+                console.error('Retry fetch chunk error:', err);
+                this.showNextButtonRetryState = true;
+            } finally {
+                this.activeLoaders.delete(targetGroupId);
+                this.updateNavigationButtons();
+            }
+        },
+
         // Helper to distribute mondai to correct groups based on capacity
         processChunk(mondaiList) {
             const manifest = State.test.meta.manifest;
@@ -2021,6 +2046,7 @@
                     return;
                 }
 
+                this.activeLoaders.add(group_id);
                 let done = false;
                 while (!done) {
                     try {
@@ -2040,6 +2066,8 @@
                         done = true; // Stop loop on error to avoid infinite retry
                     }
                 }
+                this.activeLoaders.delete(group_id);
+                this.updateNavigationButtons();
             };
 
             // Schedule all groups concurrently (limit to 3 concurrent)
@@ -2645,12 +2673,54 @@
             if (isLast) {
                 btnNext.disabled = true;
                 btnNext.innerHTML = '>';
+                btnNext.onclick = null;
+                if (this.nextLoadFailTimer) { clearTimeout(this.nextLoadFailTimer); this.nextLoadFailTimer = null; }
             } else if (!nextMondaiLoaded) {
-                btnNext.disabled = true;
-                btnNext.innerHTML = '> <span class="loading-spinner"><i class="fa-solid fa-spinner fa-spin"></i></span>';
+                let remainingTarget = globalIndex + 1; // 0-indexed needs +1 
+                let targetGroupId = null;
+                if (State.test.meta?.manifest?.groups) {
+                    for (const g of State.test.meta.manifest.groups) {
+                        if (remainingTarget < g.expected_mondai_count) {
+                            targetGroupId = g.group_id;
+                            break;
+                        }
+                        remainingTarget -= g.expected_mondai_count;
+                    }
+                    if (!targetGroupId && State.test.meta.manifest.groups.length > 0) {
+                        targetGroupId = State.test.meta.manifest.groups[State.test.meta.manifest.groups.length - 1].group_id;
+                    }
+                }
+
+                if (this.showNextButtonRetryState) {
+                    btnNext.disabled = false;
+                    btnNext.innerHTML = '<span class="loading-spinner"><i class="fa-solid fa-rotate-right"></i></span> Lỗi tải tiếp';
+                    btnNext.onclick = (e) => {
+                        e.preventDefault();
+                        if (targetGroupId) this.retryFetchNextMondai(targetGroupId);
+                    };
+                } else {
+                    btnNext.disabled = true;
+                    btnNext.innerHTML = '> <span class="loading-spinner"><i class="fa-solid fa-spinner fa-spin"></i> Đang tải tiếp...</span>';
+                    btnNext.onclick = null;
+
+                    if (targetGroupId && !this.activeLoaders.has(targetGroupId)) {
+                        this.retryFetchNextMondai(targetGroupId);
+                    }
+
+                    if (!this.nextLoadFailTimer) {
+                        this.nextLoadFailTimer = setTimeout(() => {
+                            this.showNextButtonRetryState = true;
+                            this.nextLoadFailTimer = null;
+                            this.updateNavigationButtons();
+                        }, 10000); // 10s timeout
+                    }
+                }
             } else {
                 btnNext.disabled = false;
                 btnNext.innerHTML = '>';
+                btnNext.onclick = null;
+                this.showNextButtonRetryState = false;
+                if (this.nextLoadFailTimer) { clearTimeout(this.nextLoadFailTimer); this.nextLoadFailTimer = null; }
             }
 
             // Update loading indicator
@@ -3479,6 +3549,15 @@
                 const userAnswer = State.answers[item.id];
                 const correctAnswer = item.correct_index !== undefined ? item.correct_index : questionData.answer_index;
 
+                // Bilingual extractors
+                const whyWrongVi = item.why_wrong?.vi || item.why_wrong_vi;
+                const whyWrongJa = item.why_wrong?.ja;
+                const keyPointVi = item.key_point?.vi || item.key_point_vi;
+                const keyPointJa = item.key_point?.ja;
+                const miniLessonVi = item.mini_lesson?.vi || item.mini_lesson_vi;
+                const miniLessonJa = item.mini_lesson?.ja;
+                const hasExplanations = whyWrongVi || keyPointVi || miniLessonVi || questionData.media?.script_text;
+
                 return `
           <div class="review-item ${item.is_correct ? '' : 'incorrect'}">
             <div class="review-item-header">
@@ -3515,27 +3594,41 @@
               </div>
             ` : ''}
 
-            ${!item.is_correct && (item.why_wrong_vi || item.key_point_vi || item.mini_lesson_vi || questionData.media?.script_text) ? `
+            ${!item.is_correct && hasExplanations ? `
               <button class="explanation-toggle" onclick="this.classList.toggle('expanded'); this.nextElementSibling.classList.toggle('hidden');">
                 <i class="fa-solid fa-chevron-right toggle-icon"></i> Xem giải thích
               </button>
               <div class="review-feedback hidden">
-                ${item.why_wrong_vi ? `<div class="feedback-section"><h4>Tại sao sai:</h4><p>${item.why_wrong_vi}</p></div>` : ''}
-                ${item.key_point_vi ? `
+                ${whyWrongVi ? `
+                  <div class="feedback-section">
+                    <h4>Tại sao sai:</h4>
+                    <p>${whyWrongVi}</p>
+                    ${whyWrongJa ? `<div style="font-size: 0.9em; margin-top: 4px; color: var(--text-muted);">${whyWrongJa}</div>` : ''}
+                  </div>` : ''}
+                ${keyPointVi ? `
                   <div class="feedback-section">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
                       <h4>Điểm ngữ pháp:</h4>
                       <button onclick="ReviewUI.saveGrammar('${item.id}')" class="btn btn-xs btn-outline" title="Lưu vào sổ tay"><i class="fa-solid fa-floppy-disk"></i> Lưu</button>
                     </div>
-                    <p>${item.key_point_vi}</p>
+                    <p>${keyPointVi}</p>
+                    ${keyPointJa ? `<div style="font-size: 0.9em; margin-top: 4px; color: var(--text-muted);">${keyPointJa}</div>` : ''}
                   </div>` : ''}
-                ${item.mini_lesson_vi ? `<div class="feedback-section"><h4>Bài học nhỏ:</h4><p>${item.mini_lesson_vi}</p></div>` : ''}
+                ${miniLessonVi ? `
+                  <div class="feedback-section">
+                    <h4>Bài học nhỏ:</h4>
+                    <p>${miniLessonVi}</p>
+                    ${miniLessonJa ? `<div style="font-size: 0.9em; margin-top: 4px; color: var(--text-muted);">${miniLessonJa}</div>` : ''}
+                  </div>` : ''}
                 ${questionData.media?.script_text ? `<div class="feedback-section"><h4>Nội dung bài nghe:</h4><p class="script-text">${TestUI.escapeHtml(questionData.media.script_text).replace(/\n/g, '<br>')}</p></div>` : ''}
-                ${item.extra_examples_target?.length ? `
+                ${(item.extra_examples?.length || item.extra_examples_target?.length) ? `
                   <div class="feedback-section">
                     <h4>Ví dụ thêm:</h4>
                     <ul class="examples-list ${isJapanese ? '' : 'zh'}">
-                      ${item.extra_examples_target.map(ex => `<li>${ex}</li>`).join('')}
+                      ${item.extra_examples?.length ?
+                                item.extra_examples.map(ex => `<li>${ex.ja || ex}<div style="font-size: 0.9em; margin-top: 2px; color: var(--text-muted);">${ex.vi || ''}</div></li>`).join('')
+                                : item.extra_examples_target.map(ex => `<li>${ex}</li>`).join('')
+                            }
                     </ul>
                   </div>
                 ` : ''}

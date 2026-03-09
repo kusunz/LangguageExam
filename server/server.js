@@ -2738,11 +2738,11 @@ QUESTIONS AND ANSWERS:
 ${JSON.stringify(questionsWithAnswers, null, 2)}
 
 For each incorrect answer, provide:
-1. why_wrong_vi: Explain why the user's choice was wrong (Vietnamese)
-2. key_point_vi: The key grammar/vocab point being tested (Vietnamese)
-3. mini_lesson_vi: A mini lesson to help the user understand (Vietnamese)
-4. extra_examples_target: 2-3 example sentences in the target language
-5. review_tasks_vi: Suggested review tasks (Vietnamese)
+1. why_wrong: Explain why the user's choice was wrong (bilingual: {vi, ja})
+2. key_point: The key grammar/vocab point being tested (bilingual: {vi, ja})
+3. mini_lesson: A mini lesson to help the user understand (bilingual: {vi, ja})
+4. extra_examples: 2-3 example sentences in the target language (bilingual array of {vi, ja})
+5. review_tasks: Suggested review tasks (bilingual: {vi, ja})
 
 OUTPUT JSON ONLY matching correct schema.
 IMPORTANT:
@@ -2763,11 +2763,11 @@ IMPORTANT:
                 {
                   "id": "<question_id>",
                     "is_correct": true/false,
-                    "why_wrong_vi": "<only if incorrect>",
-                      "key_point_vi": "<key learning point>",
-                        "mini_lesson_vi": "<mini lesson>",
-                          "extra_examples_target": ["<example1>", "<example2>"],
-                            "review_tasks_vi": ["<task1>", "<task2>"]
+                    "why_wrong": { "vi": "<explanation>", "ja": "<explanation>" },
+                    "key_point": { "vi": "<key point>", "ja": "<key point>" },
+                    "mini_lesson": { "vi": "<mini lesson>", "ja": "<mini lesson>" },
+                    "extra_examples": [ { "vi": "<translation>", "ja": "<example>" } ],
+                    "review_tasks": { "vi": ["<task1>"], "ja": ["<task1>"] }
     }
                               ]
 }

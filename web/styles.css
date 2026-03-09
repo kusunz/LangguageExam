@@ -1010,7 +1010,7 @@ body::before {
   margin-bottom: var(--space-lg);
   /* Sticky behavior for reading passages */
   position: sticky;
-  top: 120px;
+  top: 56px;
   /* Below header + actions bar */
   z-index: 20;
   max-height: 40vh;
@@ -1144,7 +1144,13 @@ body::before {
   background: var(--bg-tertiary);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-md);
-  /* Removed sticky and negative margins as requested */
+
+  /* Sticky behavior for mobile */
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  max-height: 25vh;
+  overflow-y: auto;
 }
 
 .audio-controls {
@@ -1786,7 +1792,7 @@ body::before {
 
   .passage-container {
     position: sticky;
-    top: 100px;
+    top: 56px;
     max-height: calc(100vh - 200px);
     overflow-y: auto;
   }
