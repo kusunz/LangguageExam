@@ -2807,7 +2807,7 @@ function buildTtsTextPrompt(text, language) {
  * Authentication: x-warmup-secret header OR ?secret= query param
  * Params: exam_id, level, mode, date_ymd, target, max_buckets, max_gen
  */
-app.get('/api/admin/warmup', async (req, res) => {
+app.get(['/api/admin/warmup', '/api/admin/warmup/:levelParam/:modeParam'], async (req, res) => {
   const startTime = Date.now();
 
   // Authenticate via secret
@@ -2826,11 +2826,21 @@ app.get('/api/admin/warmup', async (req, res) => {
 
     // Parse params with defaults
     const examId = req.query.exam_id || 'jlpt_n2';
-    const level = req.query.level || 'N2';
-    const mode = req.query.mode || 'standard';
+    const level = req.params.levelParam?.toUpperCase() || req.query.level || 'N2';
+
+    let modeToUse = req.params.modeParam?.toLowerCase() || req.query.mode || 'standard';
+    let targetPerBucket = parseInt(req.query.target) || 5;
+    let maxBuckets = parseInt(req.query.max_buckets) || 20;
+
+    // Special handling for Vercel cron path without query strings
+    if (modeToUse === 'basic_target3') {
+      modeToUse = 'basic';
+      targetPerBucket = 3;
+      maxBuckets = 10;
+    }
+
+    const mode = modeToUse;
     const dateYmd = req.query.date_ymd || new Date().toISOString().split('T')[0];
-    const targetPerBucket = parseInt(req.query.target) || 5;
-    const maxBuckets = parseInt(req.query.max_buckets) || 20;
     const maxGenerateTotal = parseInt(req.query.max_gen) || 20;
 
     // Load real exam spec from file (includes listening/reading)

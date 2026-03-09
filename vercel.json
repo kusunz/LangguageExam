@@ -2,19 +2,19 @@
     "version": 2,
     "crons": [
         {
-            "path": "/api/admin/warmup?level=N2&mode=basic",
+            "path": "/api/admin/warmup/n2/basic",
             "schedule": "10 0 * * *"
         },
         {
-            "path": "/api/admin/warmup?level=N2&mode=standard",
+            "path": "/api/admin/warmup/n2/standard",
             "schedule": "15 0 * * *"
         },
         {
-            "path": "/api/admin/warmup?level=N2&mode=official",
+            "path": "/api/admin/warmup/n2/official",
             "schedule": "20 0 * * *"
         },
         {
-            "path": "/api/admin/warmup?level=N2&mode=basic&target=3&max_buckets=10",
+            "path": "/api/admin/warmup/n2/basic_target3",
             "schedule": "0 */6 * * *"
         }
     ],
