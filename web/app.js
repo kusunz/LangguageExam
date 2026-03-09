@@ -3389,8 +3389,18 @@
             // Score circle
             // Schema update: summary -> score_summary, score_total -> total_score, score_max -> max_score
             const scoreSummary = feedback.score_summary || feedback.summary || {};
-            const scoreValue = scoreSummary.total_score !== undefined ? scoreSummary.total_score : (scoreSummary.score_total || 0);
-            const scoreMax = scoreSummary.max_score !== undefined ? scoreSummary.max_score : (scoreSummary.score_max || this.getTotalQuestions());
+
+            let scoreValue = scoreSummary.total_score !== undefined ? scoreSummary.total_score : (scoreSummary.score_total !== undefined ? scoreSummary.score_total : null);
+            let scoreMax = scoreSummary.max_score !== undefined ? scoreSummary.max_score : (scoreSummary.score_max !== undefined ? scoreSummary.score_max : null);
+
+            if (scoreValue === null || scoreMax === null) {
+                const totalQuestions = feedback.by_question?.length || this.getTotalQuestions();
+                const correctCount = feedback.by_question?.filter(q => q.is_correct).length || 0;
+
+                if (scoreValue === null) scoreValue = correctCount;
+                if (scoreMax === null) scoreMax = totalQuestions;
+            }
+
             const percentage = scoreMax > 0 ? (scoreValue / scoreMax) * 100 : 0;
 
             $('#score-value').textContent = scoreValue;
@@ -3431,11 +3441,16 @@
             $('#score-by-group').innerHTML = groupsHtml;
             $('#recommendation').textContent = scoreSummary.recommendation_vi || '';
 
-            // Weak tags
-            const tagsHtml = (scoreSummary.weak_tags || [])
-                .map(tag => `<span class="tag">${tag}</span>`)
-                .join('');
-            $('#weak-tags').innerHTML = tagsHtml || '<span style="color: var(--text-muted)">Không có</span>';
+            // Weak tags & Improvement card
+            const weakAreasCard = document.querySelector('.weak-areas');
+            if (scoreSummary.weak_tags && scoreSummary.weak_tags.length > 0) {
+                if (weakAreasCard) weakAreasCard.classList.remove('hidden');
+                const tagsHtml = scoreSummary.weak_tags.map(tag => `<span class="tag">${tag}</span>`).join('');
+                $('#weak-tags').innerHTML = tagsHtml;
+            } else {
+                if (weakAreasCard) weakAreasCard.classList.add('hidden');
+                $('#weak-tags').innerHTML = '';
+            }
 
             // Review list
             this.renderReviewList();
