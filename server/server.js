@@ -179,6 +179,22 @@ app.post('/api/me', authMiddleware, (req, res) => {
 
 // ============ DB Helper Functions ============
 
+// Text Normalization Helpers
+function toText(obj) {
+  if (!obj) return '';
+  if (typeof obj === 'string') return obj;
+  if (Array.isArray(obj)) return obj.map(toText).join('\n');
+  if (typeof obj === 'object') {
+    return Object.values(obj).map(toText).join('\n');
+  }
+  return String(obj);
+}
+
+function shortText(obj, len = 200) {
+  const txt = toText(obj);
+  return txt.length > len ? txt.substring(0, len) + '...' : txt;
+}
+
 async function loadUserData(userId, email) {
   // Check DB availability via init
   const dbOk = await db.initDb();
@@ -1762,7 +1778,7 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
             choices: q.choices,
             user_answer: userAns !== null && userAns !== undefined ? q.choices[userAns] : '(chưa trả lời)',
             correct_answer: q.choices[q.correct_index],
-            passage_snippet: q.passage ? q.passage.substring(0, 200) : ''
+            passage_snippet: q.passage ? shortText(q.passage) : ''
           });
         }
       }
