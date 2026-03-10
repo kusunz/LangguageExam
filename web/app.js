@@ -1941,11 +1941,16 @@
                         language: getExamLanguage(State.examSpec.exam_id),
                         manifest: res.manifest  // Store manifest for processChunk/loadRemainingChunksV2
                     },
-                    groups: res.manifest.groups.map(g => ({
-                        group_id: g.group_id,
-                        title_vi: g.title_vi,
-                        mondai: [] // Will fill progressively
-                    }))
+                    groups: res.manifest.groups.map(g => {
+                        const specGroup = State.examSpec.groups.find(sg => sg.group_id === g.group_id);
+                        return {
+                            group_id: g.group_id,
+                            title_vi: g.title_vi,
+                            order: specGroup?.mondai?.map(m => m.mondai_id) || [],
+                            _mondaiById: {},
+                            mondai: [] // Legacy array fallback
+                        };
+                    })
                 };
 
                 State.answers = {};
@@ -1991,7 +1996,9 @@
                 const res = await Api.fetchExamChunk(State.currentInstanceKey, targetGroupId, 3);
                 const group = State.test.groups.find(g => g.group_id === targetGroupId);
                 if (group && res.chunk && res.chunk.length > 0) {
-                    group.mondai.push(...res.chunk);
+                    res.chunk.forEach(m => {
+                        group._mondaiById[m.mondai_id] = m;
+                    });
                 }
             } catch (err) {
                 console.error('Retry fetch chunk error:', err);
@@ -2008,21 +2015,20 @@
             if (!manifest) return;
 
             mondaiList.forEach(m => {
-                // Find first group that isn't full
-                // We match based on manifest expected counts
                 for (let i = 0; i < State.test.groups.length; i++) {
                     const group = State.test.groups[i];
-                    const manifestGroup = manifest.groups.find(mg => mg.group_id === group.group_id);
-                    const expected = manifestGroup?.expected_mondai_count || 999;
-
-                    if (group.mondai.length < expected) {
-                        group.mondai.push(m);
+                    if (group.order && group.order.includes(m.mondai_id)) {
+                        const wasPresent = !!group._mondaiById[m.mondai_id];
+                        console.log(`[ProcessChunk] assigning ${m.mondai_id} to ${group.group_id}. Already present: ${wasPresent}`);
+                        group._mondaiById[m.mondai_id] = m;
                         return;
                     }
                 }
                 // Fallback: push to last group
                 if (State.test.groups.length > 0) {
-                    State.test.groups[State.test.groups.length - 1].mondai.push(m);
+                    const group = State.test.groups[State.test.groups.length - 1];
+                    console.log(`[ProcessChunk] fallback assigning ${m.mondai_id} to last group ${group.group_id}`);
+                    group._mondaiById[m.mondai_id] = m;
                 }
             });
         },
@@ -2041,8 +2047,9 @@
                 const manifestGroup = State.test.meta.manifest.groups.find(mg => mg.group_id === group_id);
                 const expected = manifestGroup?.expected_mondai_count || 0;
 
-                if (group.mondai.length >= expected) {
-                    console.log(`Group ${group_id} already has ${group.mondai.length}/${expected} items.`);
+                const currentCount = group.order ? Object.keys(group._mondaiById).length : group.mondai.length;
+                if (currentCount >= expected) {
+                    console.log(`Group ${group_id} already has ${currentCount}/${expected} items.`);
                     return;
                 }
 
@@ -2053,7 +2060,11 @@
                         const res = await Api.fetchExamChunk(instanceKey, group_id, 3);
 
                         if (res.chunk && res.chunk.length > 0) {
-                            group.mondai.push(...res.chunk);
+                            res.chunk.forEach(m => {
+                                const wasPresent = !!group._mondaiById[m.mondai_id];
+                                group._mondaiById[m.mondai_id] = m;
+                                console.log(`[ChunkReq] Recv ${m.mondai_id}. Present before: ${wasPresent}`);
+                            });
                             this.updateNavigationButtons();
                         }
 
@@ -2628,16 +2639,21 @@
         },
 
         getCurrentMondaiData() {
-            const test = State.test;
-            let idx = 0;
-
-            for (const group of test.groups) {
-                for (const mondai of group.mondai) {
-                    if (idx === State.currentMondaiIndex) {
-                        return { group, mondai };
+            let globalIdxCount = 0;
+            for (const group of State.test.groups) {
+                const count = group.order && group.order.length > 0 ? group.order.length : (group.mondai ? group.mondai.length : 0);
+                if (State.currentMondaiIndex >= globalIdxCount && State.currentMondaiIndex < globalIdxCount + count) {
+                    const localIdx = State.currentMondaiIndex - globalIdxCount;
+                    let mondai;
+                    if (group.order && group.order.length > 0) {
+                        const mId = group.order[localIdx];
+                        mondai = group._mondaiById[mId];
+                    } else {
+                        mondai = group.mondai[localIdx];
                     }
-                    idx++;
+                    if (mondai) return { group, mondai };
                 }
+                globalIdxCount += count;
             }
             return null;
         },
@@ -2645,13 +2661,20 @@
         // Check if a mondai at globalIndex has been loaded
         isMondaiLoaded(globalIndex) {
             if (globalIndex < 0) return false;
-            let idx = 0;
+            let globalIdxCount = 0;
             for (const group of State.test.groups) {
-                if (!group || !group.mondai) continue; // Group not loaded yet
-                for (const mondai of group.mondai) {
-                    if (idx === globalIndex) return true;
-                    idx++;
+                if (!group) continue;
+                const count = group.order && group.order.length > 0 ? group.order.length : (group.mondai ? group.mondai.length : 0);
+                if (globalIndex >= globalIdxCount && globalIndex < globalIdxCount + count) {
+                    const localIdx = globalIndex - globalIdxCount;
+                    if (group.order && group.order.length > 0) {
+                        const mId = group.order[localIdx];
+                        return !!group._mondaiById[mId];
+                    } else {
+                        return !!group.mondai[localIdx];
+                    }
                 }
+                globalIdxCount += count;
             }
             return false;
         },

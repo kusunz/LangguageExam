@@ -3101,102 +3101,123 @@ app.post('/api/admin/cleanup', async (req, res) => {
  * Helper: Deliver next chunk for an instance
  */
 async function deliverNextChunk(instanceKey, want) {
-  // Load instance + blueprint
-  const inst = await db.query(
-    'SELECT blueprint, delivery_state FROM exam_instances_cache WHERE instance_key=$1',
-    [instanceKey]
-  );
-
-  if (inst.rows.length === 0) throw new Error('Instance not found');
-
-  const blueprint = parseJsonb(inst.rows[0].blueprint);
-  const deliveryState = parseJsonb(inst.rows[0].delivery_state, {});
-
-  // Find requested group
-  const groupIdx = blueprint.groups.findIndex(g => g.group_id === want.group_id);
-  if (groupIdx === -1) throw new Error('Group not found in blueprint');
-
-  const group = blueprint.groups[groupIdx];
-  let cursor = deliveryState.cursors?.[want.group_id] || 0;
-
-  // Determine which slots we'll try to deliver (for batch fetch)
-  const slotsToConsider = [];
-  let tempCursor = cursor;
-  while (tempCursor < group.mondai_slots.length && slotsToConsider.length < want.want_count) {
-    slotsToConsider.push({ slot: group.mondai_slots[tempCursor], idx: tempCursor });
-    tempCursor++;
-    if (group.mondai_slots[tempCursor - 1]?.delivery_mode === 'whole') break;
-  }
-
-  // Batch fetch all hashes in one query
-  const hashesToFetch = slotsToConsider.map(s => s.slot.mondai_hash);
-  const contentMap = {};
-  if (hashesToFetch.length > 0) {
-    const batchRes = await db.query(
-      'SELECT hash, content FROM mondai_bank WHERE hash = ANY($1)',
-      [hashesToFetch]
+  await db.query('BEGIN');
+  try {
+    // Load instance + blueprint using FOR UPDATE to prevent race conditions
+    const inst = await db.query(
+      'SELECT blueprint, delivery_state FROM exam_instances_cache WHERE instance_key=$1 FOR UPDATE',
+      [instanceKey]
     );
-    batchRes.rows.forEach(r => { contentMap[r.hash] = parseJsonb(r.content); });
-  }
 
-  const mondaiToDeliver = [];
-  let blueprintModified = false;
+    if (inst.rows.length === 0) {
+      await db.query('ROLLBACK');
+      throw new Error('Instance not found');
+    }
 
-  for (const { slot, idx } of slotsToConsider) {
-    let content = contentMap[slot.mondai_hash] || null;
+    const blueprint = parseJsonb(inst.rows[0].blueprint);
+    const deliveryState = parseJsonb(inst.rows[0].delivery_state, {});
 
-    if (!content) {
-      // SAFETY NET: Content missing from bank (data inconsistency)
-      console.warn(`[Chunk] Missing content for hash ${slot.mondai_hash}. Attempting repair...`);
-      try {
-        const snapRes = await db.query(
-          'SELECT snapshot_id, bucket_key FROM pool_snapshot_items WHERE mondai_hash=$1 LIMIT 1',
-          [slot.mondai_hash]
-        );
+    const cursorBefore = deliveryState.cursors?.[want.group_id] || 0;
+    const reqId = Date.now() + '_' + Math.random().toString(36).substr(2, 4);
+    console.log(`[ChunkReq ${reqId}] Start: ${instanceKey} group=${want.group_id} cursor=${cursorBefore}`);
 
-        if (snapRes.rows.length > 0) {
-          const { snapshot_id, bucket_key } = snapRes.rows[0];
-          const newHash = await sampleMondaiFromBucket(snapshot_id, bucket_key, Math.random, [slot.mondai_hash]);
-          const mRes2 = await db.query('SELECT content FROM mondai_bank WHERE hash=$1', [newHash]);
-          if (mRes2.rows.length > 0) {
-            content = parseJsonb(mRes2.rows[0].content);
-            slot.mondai_hash = newHash;
-            blueprintModified = true;
-            console.log(`[Chunk] Repaired slot with new hash ${newHash}`);
+    // Find requested group
+    const groupIdx = blueprint.groups.findIndex(g => g.group_id === want.group_id);
+    if (groupIdx === -1) {
+      await db.query('ROLLBACK');
+      throw new Error('Group not found in blueprint');
+    }
+
+    const group = blueprint.groups[groupIdx];
+    let cursor = deliveryState.cursors?.[want.group_id] || 0;
+
+    // Determine which slots we'll try to deliver (for batch fetch)
+    const slotsToConsider = [];
+    let tempCursor = cursor;
+    while (tempCursor < group.mondai_slots.length && slotsToConsider.length < want.want_count) {
+      slotsToConsider.push({ slot: group.mondai_slots[tempCursor], idx: tempCursor });
+      tempCursor++;
+      if (group.mondai_slots[tempCursor - 1]?.delivery_mode === 'whole') break;
+    }
+
+    // Batch fetch all hashes in one query
+    const hashesToFetch = slotsToConsider.map(s => s.slot.mondai_hash);
+    const contentMap = {};
+    if (hashesToFetch.length > 0) {
+      const batchRes = await db.query(
+        'SELECT hash, content FROM mondai_bank WHERE hash = ANY($1)',
+        [hashesToFetch]
+      );
+      batchRes.rows.forEach(r => { contentMap[r.hash] = parseJsonb(r.content); });
+    }
+
+    const mondaiToDeliver = [];
+    let blueprintModified = false;
+
+    for (const { slot, idx } of slotsToConsider) {
+      let content = contentMap[slot.mondai_hash] || null;
+
+      if (!content) {
+        // SAFETY NET: Content missing from bank (data inconsistency)
+        console.warn(`[Chunk] Missing content for hash ${slot.mondai_hash}. Attempting repair...`);
+        try {
+          const snapRes = await db.query(
+            'SELECT snapshot_id, bucket_key FROM pool_snapshot_items WHERE mondai_hash=$1 LIMIT 1',
+            [slot.mondai_hash]
+          );
+
+          if (snapRes.rows.length > 0) {
+            const { snapshot_id, bucket_key } = snapRes.rows[0];
+            const newHash = await sampleMondaiFromBucket(snapshot_id, bucket_key, Math.random, [slot.mondai_hash]);
+            const mRes2 = await db.query('SELECT content FROM mondai_bank WHERE hash=$1', [newHash]);
+            if (mRes2.rows.length > 0) {
+              content = parseJsonb(mRes2.rows[0].content);
+              slot.mondai_hash = newHash;
+              blueprintModified = true;
+              console.log(`[Chunk] Repaired slot with new hash ${newHash}`);
+            }
           }
+        } catch (e) {
+          console.error('[Chunk] Repair failed:', e.message);
         }
-      } catch (e) {
-        console.error('[Chunk] Repair failed:', e.message);
       }
+
+      if (content) {
+        mondaiToDeliver.push(content);
+      }
+      cursor = idx + 1;
     }
 
-    if (content) {
-      mondaiToDeliver.push(content);
+    // Update state
+    if (!deliveryState.cursors) deliveryState.cursors = {};
+    deliveryState.cursors[want.group_id] = cursor;
+
+    if (blueprintModified) {
+      await db.query(
+        'UPDATE exam_instances_cache SET delivery_state=$1, blueprint=$2 WHERE instance_key=$3',
+        [JSON.stringify(deliveryState), JSON.stringify(blueprint), instanceKey]
+      );
+    } else {
+      await db.query(
+        'UPDATE exam_instances_cache SET delivery_state=$1 WHERE instance_key=$2',
+        [JSON.stringify(deliveryState), instanceKey]
+      );
     }
-    cursor = idx + 1;
+
+    await db.query('COMMIT');
+
+    const resultMondaiIds = mondaiToDeliver.map(m => m.mondai_id);
+    console.log(`[ChunkReq ${reqId}] End: cursor ${cursorBefore} -> ${cursor}. Returned ${resultMondaiIds.length} items: ${resultMondaiIds.join(', ')}`);
+
+    return {
+      mondai: mondaiToDeliver,
+      nextCursor: cursor,
+      done: cursor >= group.mondai_slots.length
+    };
+  } catch (err) {
+    await db.query('ROLLBACK');
+    throw err;
   }
-
-  // Update state
-  if (!deliveryState.cursors) deliveryState.cursors = {};
-  deliveryState.cursors[want.group_id] = cursor;
-
-  if (blueprintModified) {
-    await db.query(
-      'UPDATE exam_instances_cache SET delivery_state=$1, blueprint=$2 WHERE instance_key=$3',
-      [JSON.stringify(deliveryState), JSON.stringify(blueprint), instanceKey]
-    );
-  } else {
-    await db.query(
-      'UPDATE exam_instances_cache SET delivery_state=$1 WHERE instance_key=$2',
-      [JSON.stringify(deliveryState), instanceKey]
-    );
-  }
-
-  return {
-    mondai: mondaiToDeliver,
-    nextCursor: cursor,
-    done: cursor >= group.mondai_slots.length
-  };
 }
 
 // POST /api/exam/start

@@ -1149,7 +1149,7 @@ body::before {
   position: sticky;
   top: 0;
   z-index: 20;
-  max-height: 25vh;
+  max-height: 40vh;
   overflow-y: auto;
 }
 
@@ -1798,7 +1798,7 @@ body::before {
   }
 
   .audio-player {
-    grid-column: 1 / -1;
+    grid-column: 1 / 1;
   }
 
   .score-summary {
