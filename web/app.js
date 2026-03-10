@@ -1999,6 +1999,7 @@
                     res.chunk.forEach(m => {
                         group._mondaiById[m.mondai_id] = m;
                     });
+                    this.updateProgressUI();
                 }
             } catch (err) {
                 console.error('Retry fetch chunk error:', err);
@@ -2031,6 +2032,7 @@
                     group._mondaiById[m.mondai_id] = m;
                 }
             });
+            this.updateProgressUI();
         },
 
         async loadRemainingChunksV2() {
@@ -2066,6 +2068,7 @@
                                 console.log(`[ChunkReq] Recv ${m.mondai_id}. Present before: ${wasPresent}`);
                             });
                             this.updateNavigationButtons();
+                            this.updateProgressUI();
                         }
 
                         done = res.done;
@@ -2374,11 +2377,7 @@
             const mondaiPosInGroup = globalIndex - firstMondaiOfGroup + 1;
 
             // Total uses EXAM SPEC for the full intended count
-            const currentGroupSpec = State.examSpec.groups[State.currentGroupIndex];
-            const totalMondaiInGroup = currentGroupSpec ? currentGroupSpec.mondai.length : currentGroup.mondai.length;
-
-            $('#mondai-current').textContent = Math.min(mondaiPosInGroup, totalMondaiInGroup); // Cap at total
-            $('#mondai-total').textContent = totalMondaiInGroup;
+            this.updateProgressUI();
 
             // Update navigation buttons (prev/next state based on loaded mondai)
             this.updateNavigationButtons();
@@ -2467,25 +2466,8 @@
             // Render question dots
             this.renderQuestionDots(mondai.items);
 
-            // Update submit button text to clarify what is being submitted
-            const submitBtn = $('#btn-submit-group');
-            if (submitBtn) {
-                const currentGroupTitle = this.getGroupLabel(State.currentGroupIndex);
-                const isLastGroup = State.currentGroupIndex === State.examSpec.groups.length - 1;
-
-                // Only update text if not currently submitting/loading
-                if (!submitBtn.disabled || submitBtn.textContent.includes('phần')) {
-                    if (isLastGroup) {
-                        submitBtn.innerHTML = '<span class="btn-icon"><i class="fa-solid fa-flag-checkered"></i></span> Nộp bài thi';
-                        submitBtn.classList.remove('btn-secondary');
-                        submitBtn.classList.add('btn-primary');
-                    } else {
-                        submitBtn.innerHTML = `Nộp phần ${currentGroupTitle}`;
-                        submitBtn.classList.remove('btn-primary');
-                        submitBtn.classList.add('btn-secondary');
-                    }
-                }
-            }
+            // Update submit button text
+            this.updateSubmitButtonLabel();
         },
 
         updateAudioButton(state) {
@@ -2762,6 +2744,60 @@
             return State.currentMondaiIndex;
         },
 
+        updateProgressUI() {
+            if (!State.test || !State.examSpec) return;
+            const currentGroupIdx = State.currentGroupIndex;
+            const expected = State.examSpec.groups[currentGroupIdx].mondai.length;
+            const group = State.test.groups[currentGroupIdx];
+
+            let loaded = 0;
+            if (group) {
+                loaded = group.order ? Object.keys(group._mondaiById).length : group.mondai.length;
+            }
+
+            const progressCurrent = $('#mondai-current');
+            const progressTotal = $('#mondai-total');
+
+            if (progressCurrent && progressTotal) {
+                progressCurrent.textContent = Math.min(loaded, expected);
+                progressTotal.textContent = expected;
+            }
+        },
+
+        updateSubmitButtonLabel() {
+            const submitBtn = $('#btn-submit-group');
+            if (!submitBtn) return;
+
+            if (submitBtn.disabled && !submitBtn.textContent.includes('phần') && !submitBtn.textContent.includes('Nộp bài thi')) return;
+
+            const isLastGroup = State.currentGroupIndex === State.examSpec.groups.length - 1;
+            if (isLastGroup) {
+                submitBtn.innerHTML = '<span class="btn-icon"><i class="fa-solid fa-flag-checkered"></i></span> Nộp bài thi';
+                submitBtn.classList.remove('btn-secondary');
+                submitBtn.classList.add('btn-primary');
+            } else {
+                const currentGroupTitle = this.getGroupLabel(State.currentGroupIndex);
+                submitBtn.innerHTML = `Nộp phần ${currentGroupTitle}`;
+                submitBtn.classList.remove('btn-primary');
+                submitBtn.classList.add('btn-secondary');
+            }
+        },
+
+        isLastMondaiInCurrentGroup() {
+            if (!State.examSpec) return false;
+            const currentGroupIdx = State.currentGroupIndex;
+            const expected = State.examSpec.groups[currentGroupIdx].mondai.length;
+            const globalIndex = this.getGlobalMondaiIndex();
+
+            let firstMondaiOfGroup = 0;
+            for (let i = 0; i < currentGroupIdx; i++) {
+                firstMondaiOfGroup += State.examSpec.groups[i].mondai.length;
+            }
+
+            const mondaiPosInGroup = globalIndex - firstMondaiOfGroup;
+            return mondaiPosInGroup === expected - 1;
+        },
+
         getTotalMondaiCount() {
             // V2: Use manifest for total count (as mondai are loaded lazily)
             if (State.test.meta?.manifest) {
@@ -2862,6 +2898,52 @@
             // Block forward navigation to unloaded mondai
             if (direction > 0 && !this.isMondaiLoaded(newIndex)) {
                 return;
+            }
+
+            // Optional: Auto transition to next group if at boundary
+            if (direction === 1 && this.isLastMondaiInCurrentGroup()) {
+                const isLastGroup = State.currentGroupIndex === State.examSpec.groups.length - 1;
+                if (!isLastGroup) {
+                    const newGroupIndex = State.currentGroupIndex + 1;
+                    const currentGrp = State.test.groups[State.currentGroupIndex];
+                    const nextGrp = State.test.groups[newGroupIndex];
+                    const expected = State.examSpec.groups[newGroupIndex].mondai.length;
+                    const loaded = nextGrp ? (nextGrp.order ? Object.keys(nextGrp._mondaiById).length : nextGrp.mondai.length) : 0;
+
+                    console.log(`[Nav] Auto-transition group: ${currentGrp ? currentGrp.group_id : State.currentGroupIndex} -> ${nextGrp ? nextGrp.group_id : newGroupIndex} | Index: ${newGroupIndex} | Progress: ${loaded}/${expected}`);
+
+                    let newGroupFirstIndex = 0;
+                    for (let i = 0; i < newGroupIndex; i++) {
+                        newGroupFirstIndex += State.examSpec.groups[i].mondai.length;
+                    }
+
+                    TTSManager.stopRuntimeOnly();
+                    TTSManager.resetPlayerUI();
+                    this.updateAudioButton('idle');
+
+                    State.currentGroupIndex = newGroupIndex;
+                    State.currentMondaiIndex = newGroupFirstIndex;
+                    State.currentQuestionIndex = 0;
+
+                    const groupTime = State.test.meta.time_limits.groups[newGroupIndex];
+                    if (groupTime) {
+                        $('#group-label').textContent = this.getGroupLabel(newGroupIndex);
+                        Timer.startGroupTimer(groupTime.time_sec);
+                    }
+
+                    this.renderCurrentMondai();
+                    this.updateProgressUI();
+
+                    const content = document.querySelector('.test-content');
+                    if (content) content.scrollTo({ top: 0, behavior: 'smooth' });
+
+                    // Pre-fetch next group's chunk unconditionally via deduplicator
+                    const targetGroup = State.test.groups[newGroupIndex];
+                    if (targetGroup && targetGroup.group_id && !this.activeLoaders.has(targetGroup.group_id)) {
+                        this.retryFetchNextMondai(targetGroup.group_id);
+                    }
+                    return;
+                }
             }
 
             // Stop current audio session before navigating (preserves cache)
@@ -3149,7 +3231,8 @@
 
             State.test.groups.forEach(group => {
                 let groupCorrect = 0;
-                group.mondai.forEach(mondai => {
+                const mondaiList = group.order ? group.order.map(id => group._mondaiById[id]).filter(Boolean) : (group.mondai || []);
+                mondaiList.forEach(mondai => {
                     mondai.items.forEach(item => {
                         totalCount++;
                         const userAnswer = State.answers[item.id];
@@ -3558,13 +3641,19 @@
                 // Find question data
                 let questionData = null;
                 for (const group of test.groups) {
-                    for (const mondai of group.mondai) {
-                        const found = mondai.items.find(q => q.id === item.id);
+                    const mondaiList = group.order ? group.order.map(id => group._mondaiById[id]).filter(Boolean) : (group.mondai || []);
+                    for (const mondai of mondaiList) {
+                        const items = mondai.items || [];
+                        const found = items.find(q => q.id === item.id);
                         if (found) {
                             questionData = found;
+                            // Bubble up passage or script text for review rendering if not present on item
+                            if (!questionData.passage && mondai.passage) questionData.passage = mondai.passage;
+                            if (!questionData.media && mondai.media) questionData.media = mondai.media;
                             break;
                         }
                     }
+                    if (questionData) break;
                 }
 
                 if (!questionData) return '';
