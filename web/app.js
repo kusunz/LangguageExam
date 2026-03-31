@@ -244,6 +244,38 @@
         });
     }
 
+    function getCurrentUiLocale() {
+        const saved = State.userData?.settings?.uiLanguage;
+        if (saved === 'en') return 'en';
+
+        const docLang = (document.documentElement.getAttribute('lang') || 'vi').toLowerCase();
+        return docLang.startsWith('en') ? 'en' : 'vi';
+    }
+
+    function isJapaneseHeavyText(text) {
+        const value = String(text || '').trim();
+        if (!value) return false;
+        const japaneseChars = (value.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/g) || []).length;
+        return japaneseChars >= 8 && (japaneseChars / Math.max(value.length, 1)) >= 0.2;
+    }
+
+    function pickLocalizedExplanationField(localizedValue, fallbackValue = '', locale = getCurrentUiLocale()) {
+        if (localizedValue && typeof localizedValue === 'object') {
+            const candidates = [localizedValue[locale], localizedValue.vi, localizedValue.en];
+            for (const candidate of candidates) {
+                const text = String(candidate || '').trim();
+                if (!text) continue;
+                if (locale === 'vi' && isJapaneseHeavyText(text)) continue;
+                return text;
+            }
+        }
+
+        const text = String(fallbackValue || '').trim();
+        if (!text) return '';
+        if (locale === 'vi' && isJapaneseHeavyText(text)) return '';
+        return text;
+    }
+
     // ============================================
     // API Client
     // ============================================
@@ -360,13 +392,13 @@
             return this.request('/user-data', { method: 'PUT', body: data });
         },
 
-        async gradeTest(test, answers, provider, model = null, instanceKey = null) {
+        async gradeTest(test, answers, provider, model = null, instanceKey = null, uiLanguage = getCurrentUiLocale()) {
             // Set 300s timeout for grading
             const controller = new AbortController();
             const id = setTimeout(() => controller.abort(), 300000);
 
             try {
-                const body = { test, answers, provider, model };
+                const body = { test, answers, provider, model, uiLanguage };
                 if (instanceKey) body.instanceKey = instanceKey;
 
                 const res = await this.request('/grade-test', {
@@ -3269,6 +3301,7 @@
         async quickGradeTest() {
             Timer.stopAll();
             TTSManager.stop();
+            const uiLocale = getCurrentUiLocale();
 
             // V2 Server-Side Grading
             if (State.currentInstanceKey) {
@@ -3288,16 +3321,22 @@
                             mondai.items.forEach(item => {
                                 const result = feedback.by_question[item.id];
                                 if (result) {
-                                    questionsWithAnswers.push({
+                                    const explainBrief = pickLocalizedExplanationField(null, item.explain_brief, uiLocale);
+                                    const resultItem = {
                                         id: item.id,
                                         is_correct: result.is_correct,
                                         user_answer_index: State.answers[item.id],
                                         correct_index: result.correct_index,
                                         prompt: item.prompt,
                                         choices: item.choices,
-                                        key_point_vi: item.explain_brief || '',
                                         tags: item.tags
-                                    });
+                                    };
+                                    if (explainBrief) {
+                                        resultItem.key_point = { [uiLocale]: explainBrief };
+                                        if (uiLocale === 'en') resultItem.key_point_en = explainBrief;
+                                        else resultItem.key_point_vi = explainBrief;
+                                    }
+                                    questionsWithAnswers.push(resultItem);
                                 }
                             });
                         });
@@ -3342,20 +3381,26 @@
                         totalCount++;
                         const userAnswer = State.answers[item.id];
                         const isCorrect = userAnswer === item.answer_index;
+                        const explainBrief = pickLocalizedExplanationField(null, item.explain_brief, uiLocale);
 
                         if (isCorrect) {
                             correctCount++;
                             groupCorrect++;
                         }
 
-                        questionsWithAnswers.push({
+                        const resultItem = {
                             id: item.id,
                             is_correct: isCorrect,
                             user_answer_index: userAnswer !== undefined ? userAnswer : null,
                             correct_index: item.answer_index,
-                            key_point_vi: item.explain_brief || '',
                             tags: item.tags
-                        });
+                        };
+                        if (explainBrief) {
+                            resultItem.key_point = { [uiLocale]: explainBrief };
+                            if (uiLocale === 'en') resultItem.key_point_en = explainBrief;
+                            else resultItem.key_point_vi = explainBrief;
+                        }
+                        questionsWithAnswers.push(resultItem);
                     });
                 });
                 scoreByGroup[group.group_id] = groupCorrect;
@@ -3367,9 +3412,17 @@
                     max_score: totalCount,
                     score_by_group: scoreByGroup,
                     weak_tags: [],
-                    recommendation_vi: correctCount >= totalCount * 0.7
-                        ? 'Kết quả tốt! Tiếp tục luyện tập để cải thiện.'
-                        : 'Cần ôn tập thêm các phần còn yếu.'
+                    ...(uiLocale === 'en'
+                        ? {
+                            recommendation_en: correctCount >= totalCount * 0.7
+                                ? 'Good result. Keep practicing to improve further.'
+                                : 'You should review the weaker areas and try again.'
+                        }
+                        : {
+                            recommendation_vi: correctCount >= totalCount * 0.7
+                                ? 'Kết quả tốt! Tiếp tục luyện tập để cải thiện.'
+                                : 'Cần ôn tập thêm các phần còn yếu.'
+                        })
                 },
                 by_question: questionsWithAnswers,
                 grading_mode: 'quick'
@@ -3406,7 +3459,8 @@
                 const llmProvider = $('#llm-provider').value;
                 const feedback = await Api.gradeTest(
                     State.test, State.answers, llmProvider, null,
-                    State.currentInstanceKey || null
+                    State.currentInstanceKey || null,
+                    getCurrentUiLocale()
                 );
                 feedback.grading_mode = 'ai';
                 State.feedback = feedback;
@@ -3500,6 +3554,7 @@
             if (!State.userData) State.userData = { history: [], mistakeBook: [] };
             if (!State.userData.history) State.userData.history = [];
             if (!State.userData.mistakeBook) State.userData.mistakeBook = [];
+            const uiLocale = getCurrentUiLocale();
 
             // Add to history
             State.userData.history.push({
@@ -3563,15 +3618,22 @@
                         optimizedQuestion.context = contextText;
                     }
 
+                    const whyWrongText = pickLocalizedExplanationField(item.why_wrong, item.why_wrong_vi || item.why_wrong_en || '', uiLocale);
+                    const keyPointText = pickLocalizedExplanationField(item.key_point, item.key_point_vi || item.key_point_en || '', uiLocale);
+                    const miniLessonText = pickLocalizedExplanationField(item.mini_lesson, item.mini_lesson_vi || item.mini_lesson_en || '', uiLocale);
+
                     State.userData.mistakeBook.push({
                         date: new Date().toISOString(),
                         exam: State.currentExam,
                         question: optimizedQuestion,
                         feedback: {
                             is_correct: item.is_correct,
-                            why_wrong_vi: item.why_wrong_vi,
-                            key_point_vi: item.key_point_vi,
-                            mini_lesson_vi: item.mini_lesson_vi
+                            why_wrong_vi: uiLocale === 'vi' ? whyWrongText : '',
+                            why_wrong_en: uiLocale === 'en' ? whyWrongText : '',
+                            key_point_vi: uiLocale === 'vi' ? keyPointText : '',
+                            key_point_en: uiLocale === 'en' ? keyPointText : '',
+                            mini_lesson_vi: uiLocale === 'vi' ? miniLessonText : '',
+                            mini_lesson_en: uiLocale === 'en' ? miniLessonText : ''
                         },
                         userAnswer: State.answers[item.id]
                     });
@@ -3678,6 +3740,7 @@
         render() {
             const feedback = State.feedback;
             const test = State.test;
+            const uiLocale = getCurrentUiLocale();
 
             // Score circle
             // Schema update: summary -> score_summary, score_total -> total_score, score_max -> max_score
@@ -3732,7 +3795,10 @@
                 }).join('');
 
             $('#score-by-group').innerHTML = groupsHtml;
-            $('#recommendation').textContent = scoreSummary.recommendation_vi || '';
+            $('#recommendation').textContent = scoreSummary[`recommendation_${uiLocale}`]
+                || scoreSummary.recommendation_vi
+                || scoreSummary.recommendation_en
+                || '';
 
             // Weak tags & Improvement card
             const weakAreasCard = document.querySelector('.weak-areas');
@@ -3753,6 +3819,7 @@
             const feedback = State.feedback;
             const test = State.test;
             const isJapanese = test.meta.language === 'ja-JP';
+            const uiLocale = getCurrentUiLocale();
 
             const html = feedback.by_question.map(item => {
                 // Find question data
@@ -3779,14 +3846,10 @@
                 const correctAnswer = item.correct_index !== undefined ? item.correct_index : questionData.answer_index;
                 const reviewLabel = questionData.meta?.review_label || questionData.review_label || item.review_label || item.id;
 
-                // Bilingual extractors
-                const whyWrongVi = item.why_wrong?.vi || item.why_wrong_vi;
-                const whyWrongJa = item.why_wrong?.ja;
-                const keyPointVi = item.key_point?.vi || item.key_point_vi;
-                const keyPointJa = item.key_point?.ja;
-                const miniLessonVi = item.mini_lesson?.vi || item.mini_lesson_vi;
-                const miniLessonJa = item.mini_lesson?.ja;
-                const hasExplanations = whyWrongVi || keyPointVi || miniLessonVi || questionData.media?.script_text;
+                const whyWrongText = pickLocalizedExplanationField(item.why_wrong, item.why_wrong_vi || item.why_wrong_en || '', uiLocale);
+                const keyPointText = pickLocalizedExplanationField(item.key_point, item.key_point_vi || item.key_point_en || '', uiLocale);
+                const miniLessonText = pickLocalizedExplanationField(item.mini_lesson, item.mini_lesson_vi || item.mini_lesson_en || '', uiLocale);
+                const hasExplanations = whyWrongText || keyPointText || miniLessonText || questionData.media?.script_text;
 
                 return `
           <div class="review-item ${item.is_correct ? '' : 'incorrect'}">
@@ -3829,26 +3892,23 @@
                 <i class="fa-solid fa-chevron-right toggle-icon"></i> Xem giải thích
               </button>
               <div class="review-feedback hidden">
-                ${whyWrongVi ? `
+                ${whyWrongText ? `
                   <div class="feedback-section">
                     <h4>Tại sao sai:</h4>
-                    <p>${whyWrongVi}</p>
-                    ${whyWrongJa ? `<div style="font-size: 0.9em; margin-top: 4px; color: var(--text-muted);">${whyWrongJa}</div>` : ''}
+                    <p>${TestUI.escapeHtml(whyWrongText).replace(/\n/g, '<br>')}</p>
                   </div>` : ''}
-                ${keyPointVi ? `
+                ${keyPointText ? `
                   <div class="feedback-section">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
                       <h4>Điểm ngữ pháp:</h4>
                       <button onclick="ReviewUI.saveGrammar('${item.id}')" class="btn btn-xs btn-outline" title="Lưu vào sổ tay"><i class="fa-solid fa-floppy-disk"></i> Lưu</button>
                     </div>
-                    <p>${keyPointVi}</p>
-                    ${keyPointJa ? `<div style="font-size: 0.9em; margin-top: 4px; color: var(--text-muted);">${keyPointJa}</div>` : ''}
+                    <p>${TestUI.escapeHtml(keyPointText).replace(/\n/g, '<br>')}</p>
                   </div>` : ''}
-                ${miniLessonVi ? `
+                ${miniLessonText ? `
                   <div class="feedback-section">
                     <h4>Bài học nhỏ:</h4>
-                    <p>${miniLessonVi}</p>
-                    ${miniLessonJa ? `<div style="font-size: 0.9em; margin-top: 4px; color: var(--text-muted);">${miniLessonJa}</div>` : ''}
+                    <p>${TestUI.escapeHtml(miniLessonText).replace(/\n/g, '<br>')}</p>
                   </div>` : ''}
                 ${questionData.media?.script_text ? `<div class="feedback-section"><h4>Nội dung bài nghe:</h4><p class="script-text">${TestUI.escapeHtml(questionData.media.script_text).replace(/\n/g, '<br>')}</p></div>` : ''}
                 ${(item.extra_examples?.length || item.extra_examples_target?.length) ? `
@@ -3856,8 +3916,14 @@
                     <h4>Ví dụ thêm:</h4>
                     <ul class="examples-list ${isJapanese ? '' : 'zh'}">
                       ${item.extra_examples?.length ?
-                                item.extra_examples.map(ex => `<li>${ex.ja || ex}<div style="font-size: 0.9em; margin-top: 2px; color: var(--text-muted);">${ex.vi || ''}</div></li>`).join('')
-                                : item.extra_examples_target.map(ex => `<li>${ex}</li>`).join('')
+                                item.extra_examples.map(ex => {
+                                    const exampleTarget = typeof ex === 'object' ? (ex.ja || ex.target || '') : ex;
+                                    const exampleMeaning = typeof ex === 'object'
+                                        ? (ex[uiLocale] || ex.vi || ex.en || '')
+                                        : '';
+                                    return `<li>${TestUI.escapeHtml(exampleTarget)}${exampleMeaning ? `<div style="font-size: 0.9em; margin-top: 2px; color: var(--text-muted);">${TestUI.escapeHtml(exampleMeaning)}</div>` : ''}</li>`;
+                                }).join('')
+                                : item.extra_examples_target.map(ex => `<li>${TestUI.escapeHtml(ex)}</li>`).join('')
                             }
                     </ul>
                   </div>
@@ -3873,6 +3939,7 @@
 
         saveGrammar(questionId) {
             const feedback = State.feedback;
+            const uiLocale = getCurrentUiLocale();
             // Find the item by question ID
             const item = feedback.by_question.find(q => q.id === questionId);
             if (!item) {
@@ -3880,9 +3947,12 @@
                 return;
             }
 
+            const keyPointText = pickLocalizedExplanationField(item.key_point, item.key_point_vi || item.key_point_en || '', uiLocale);
+            const miniLessonText = pickLocalizedExplanationField(item.mini_lesson, item.mini_lesson_vi || item.mini_lesson_en || '', uiLocale);
+
             const success = GrammarBook.save(
-                item.key_point_vi,
-                item.mini_lesson_vi || '',
+                keyPointText,
+                miniLessonText || '',
                 '', // Usage not always available from feedback
                 item.extra_examples_target || []
             );
@@ -4010,6 +4080,9 @@
                 const date = new Date(item.date).toLocaleDateString('vi-VN');
                 const question = item.question;
                 const feedback = item.feedback;
+                const whyWrongText = pickLocalizedExplanationField(feedback?.why_wrong, feedback?.why_wrong_vi || feedback?.why_wrong_en || '', getCurrentUiLocale());
+                const keyPointText = pickLocalizedExplanationField(feedback?.key_point, feedback?.key_point_vi || feedback?.key_point_en || '', getCurrentUiLocale());
+                const miniLessonText = pickLocalizedExplanationField(feedback?.mini_lesson, feedback?.mini_lesson_vi || feedback?.mini_lesson_en || '', getCurrentUiLocale());
                 const userAnswer = item.userAnswer;
                 const correctAnswer = question.answer_index;
 
@@ -4038,9 +4111,9 @@
               </div>
               
               <div class="mistake-feedback">
-                ${feedback.why_wrong_vi ? `<div class="feedback-section"><h4>Tại sao sai:</h4><p>${feedback.why_wrong_vi}</p></div>` : ''}
-                ${feedback.key_point_vi ? `<div class="feedback-section"><h4>Điểm ngữ pháp:</h4><p>${feedback.key_point_vi}</p></div>` : ''}
-                ${feedback.mini_lesson_vi ? `<div class="feedback-section"><h4>Bài học nhỏ:</h4><p>${feedback.mini_lesson_vi}</p></div>` : ''}
+                ${whyWrongText ? `<div class="feedback-section"><h4>Tại sao sai:</h4><p>${TestUI.escapeHtml(whyWrongText).replace(/\n/g, '<br>')}</p></div>` : ''}
+                ${keyPointText ? `<div class="feedback-section"><h4>Điểm ngữ pháp:</h4><p>${TestUI.escapeHtml(keyPointText).replace(/\n/g, '<br>')}</p></div>` : ''}
+                ${miniLessonText ? `<div class="feedback-section"><h4>Bài học nhỏ:</h4><p>${TestUI.escapeHtml(miniLessonText).replace(/\n/g, '<br>')}</p></div>` : ''}
               </div>
             </div>
           </div>

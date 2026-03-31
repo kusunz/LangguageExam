@@ -1399,6 +1399,14 @@ function formatLlmProviderLabel(meta) {
   return meta.model ? `${meta.provider}:${meta.model}` : meta.provider;
 }
 
+function normalizeUiLocale(value) {
+  return String(value || '').toLowerCase() === 'en' ? 'en' : 'vi';
+}
+
+function getFeedbackLanguageName(uiLocale) {
+  return uiLocale === 'en' ? 'English' : 'Vietnamese';
+}
+
 // Answer Verification Endpoint (for client-side quick grading)
 app.post('/api/verify-answer', authMiddleware, verifyAnswerLimiter, (req, res) => {
   try {
@@ -1428,6 +1436,7 @@ app.post('/api/verify-answer', authMiddleware, verifyAnswerLimiter, (req, res) =
 app.post('/api/grade-test', authMiddleware, async (req, res) => {
   try {
     const { test, answers, instanceKey } = req.body;
+    const uiLocale = normalizeUiLocale(req.body?.uiLanguage);
 
     // ======== V2 Branch: instanceKey present ========
     if (instanceKey && await db.initDb()) {
@@ -1510,6 +1519,7 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
         totalCount += 1;
         const isCorrect = userAnswer === question.correct_index;
         if (isCorrect) correctCount += 1;
+        const explainBrief = String(question.explain_brief || '').trim();
 
         const questionResult = {
           id: questionId,
@@ -1518,9 +1528,13 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
           correct_index: question.correct_index,
           prompt: question.prompt,
           choices: question.choices,
-          tags: question.tags,
-          key_point_vi: question.explain_brief
+          tags: question.tags
         };
+        if (explainBrief) {
+          questionResult.key_point = { [uiLocale]: explainBrief };
+          if (uiLocale === 'en') questionResult.key_point_en = explainBrief;
+          else questionResult.key_point_vi = explainBrief;
+        }
 
         byQuestion.push(questionResult);
 
@@ -1529,7 +1543,9 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
             id: questionId,
             prompt: question.prompt,
             choices: question.choices,
-            user_answer: userAnswer !== null && userAnswer !== undefined ? question.choices[userAnswer] : '(chưa trả lời)',
+            user_answer: userAnswer !== null && userAnswer !== undefined
+              ? question.choices[userAnswer]
+              : (uiLocale === 'en' ? '(unanswered)' : '(chưa trả lời)'),
             correct_answer: question.choices[question.correct_index],
             passage_snippet: question.passage ? shortText(question.passage) : ''
           });
@@ -1537,7 +1553,16 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
       }
 
       if (wrongQuestions.length > 0) {
-        const wrongPrompt = `Bạn là gia sư JLPT. Giải thích ngắn gọn bằng tiếng Việt cho ${wrongQuestions.length} câu sai.
+        const wrongPrompt = uiLocale === 'en'
+          ? `You are a JLPT tutor. Write short explanations in ${getFeedbackLanguageName(uiLocale)} for ${wrongQuestions.length} incorrect answers.
+Return JSON only: { "explanations": { "<question_id>": "<1-2 sentence explanation>" } }
+
+${wrongQuestions.map((wq, idx) => `[Question ${idx + 1}] id="${wq.id}"
+Prompt: ${wq.prompt}
+Correct answer: ${wq.correct_answer}
+Student chose: ${wq.user_answer}
+${wq.passage_snippet ? `Context: ${wq.passage_snippet}...` : ''}`).join('\n\n')}`
+          : `Bạn là gia sư JLPT. Giải thích ngắn gọn bằng ${getFeedbackLanguageName(uiLocale)} cho ${wrongQuestions.length} câu sai.
 Trả lời JSON: { "explanations": { "<question_id>": "<giải thích 1-2 câu>" } }
 
 ${wrongQuestions.map((wq, idx) => `[Câu ${idx + 1}] id="${wq.id}"
@@ -1555,8 +1580,11 @@ ${wq.passage_snippet ? `Ngữ cảnh: ${wq.passage_snippet}...` : ''}`).join('\n
 
         const explanations = explanationResult?.result?.explanations || {};
         byQuestion.forEach((question) => {
-          if (explanations[question.id]) {
-            question.key_point_vi = explanations[question.id];
+          const explanationText = String(explanations[question.id] || '').trim();
+          if (explanationText) {
+            question.key_point = { ...(question.key_point || {}), [uiLocale]: explanationText };
+            if (uiLocale === 'en') question.key_point_en = explanationText;
+            else question.key_point_vi = explanationText;
           }
         });
       }
@@ -1571,9 +1599,17 @@ ${wq.passage_snippet ? `Ngữ cảnh: ${wq.passage_snippet}...` : ''}`).join('\n
             .flatMap((question) => question.tags || [])
             .filter((value, index, array) => array.indexOf(value) === index)
             .slice(0, 10),
-          recommendation_vi: correctCount >= totalCount * 0.7
-            ? 'Kết quả tốt! Tiếp tục luyện tập để cải thiện.'
-            : 'Cần ôn tập thêm các phần còn yếu.'
+          ...(uiLocale === 'en'
+            ? {
+              recommendation_en: correctCount >= totalCount * 0.7
+                ? 'Good result. Keep practicing to improve further.'
+                : 'You should review the weaker areas and try again.'
+            }
+            : {
+              recommendation_vi: correctCount >= totalCount * 0.7
+                ? 'Kết quả tốt! Tiếp tục luyện tập để cải thiện.'
+                : 'Cần ôn tập thêm các phần còn yếu.'
+            })
         },
         by_question: byQuestion,
         grading_mode: 'ai',
@@ -1591,7 +1627,7 @@ ${wq.passage_snippet ? `Ngữ cảnh: ${wq.passage_snippet}...` : ''}`).join('\n
     }
 
     // ======== V1 Legacy: full test object ========
-    const prompt = buildGradeTestPrompt(test, answers);
+    const prompt = buildGradeTestPrompt(test, answers, uiLocale);
     const grading = await runJsonTask({
       task: 'explain',
       prompt,
@@ -2265,6 +2301,13 @@ When highlighting kanji/vocabulary in prompts:
 - ONLY use [[...]] for emphasized/target words
 
 -------------------------
+SUPPORT TEXT LANGUAGE RULES
+-------------------------
+- "title_vi", "instructions_vi", and "explain_brief" MUST be written in Vietnamese.
+- "explain_brief" should be a short Vietnamese teaching note for the learner.
+- NEVER write "explain_brief" in Japanese or English.
+
+-------------------------
 TITLE RULES (meta.display_title)
 -------------------------
 For each mondai, optionally include "meta.display_title" with format:
@@ -2304,7 +2347,7 @@ QUESTION ID RULES
           "prompt": "<question in ${examSpec.language}>",
           "choices": ["<A text>", "<B text>", "<C text>", "<D text>"],
           "answer_index": 0,
-          "explain_brief": "<brief explanation>",
+          "explain_brief": "<brief explanation in Vietnamese>",
           "tags": ["<tag1>", "<tag2>"]
         }
       ]
@@ -2315,7 +2358,10 @@ QUESTION ID RULES
 GENERATE JSON NOW (NO MARKDOWN):`;
 }
 
-function buildGradeTestPrompt(test, answers) {
+function buildGradeTestPrompt(test, answers, uiLocale = 'vi') {
+  const locale = normalizeUiLocale(uiLocale);
+  const feedbackLanguage = getFeedbackLanguageName(locale);
+  const recommendationKey = locale === 'en' ? 'recommendation_en' : 'recommendation_vi';
   const questionsWithAnswers = [];
   test.groups.forEach(g => {
     g.mondai.forEach(m => {
@@ -2335,7 +2381,7 @@ function buildGradeTestPrompt(test, answers) {
     });
   });
 
-  return `You are an expert exam grader. Grade the following test and provide detailed feedback in VIETNAMESE.
+  return `You are an expert exam grader. Grade the following test and provide detailed feedback in ${feedbackLanguage}.
 
 TEST: ${test.meta.exam_id} ${test.meta.level}
 MODE: ${test.meta.mode}
@@ -2344,11 +2390,11 @@ QUESTIONS AND ANSWERS:
 ${JSON.stringify(questionsWithAnswers, null, 2)}
 
 For each incorrect answer, provide:
-1. why_wrong: Explain why the user's choice was wrong (bilingual: {vi, ja})
-2. key_point: The key grammar/vocab point being tested (bilingual: {vi, ja})
-3. mini_lesson: A mini lesson to help the user understand (bilingual: {vi, ja})
-4. extra_examples: 2-3 example sentences in the target language (bilingual array of {vi, ja})
-5. review_tasks: Suggested review tasks (bilingual: {vi, ja})
+1. why_wrong: Explain why the user's choice was wrong ({"${locale}": "<text>"})
+2. key_point: The key grammar/vocab point being tested ({"${locale}": "<text>"})
+3. mini_lesson: A mini lesson to help the user understand ({"${locale}": "<text>"})
+4. extra_examples: 2-3 example sentences in the target language with translation ([{"ja": "<example>", "${locale}": "<translation>"}])
+5. review_tasks: Suggested review tasks ({"${locale}": ["<task1>"]})
 
 OUTPUT JSON ONLY matching correct schema.
 IMPORTANT:
@@ -2363,17 +2409,17 @@ IMPORTANT:
         "max_score": <total_questions>,
           "score_by_group": {"<group_id>": <score>, ... },
             "weak_tags": ["<tags where user made mistakes>"],
-              "recommendation_vi": "<personalized study recommendation in Vietnamese>"
+              "${recommendationKey}": "<personalized study recommendation in ${feedbackLanguage}>"
   },
                 "by_question": [
                 {
                   "id": "<question_id>",
                     "is_correct": true/false,
-                    "why_wrong": { "vi": "<explanation>", "ja": "<explanation>" },
-                    "key_point": { "vi": "<key point>", "ja": "<key point>" },
-                    "mini_lesson": { "vi": "<mini lesson>", "ja": "<mini lesson>" },
-                    "extra_examples": [ { "vi": "<translation>", "ja": "<example>" } ],
-                    "review_tasks": { "vi": ["<task1>"], "ja": ["<task1>"] }
+                    "why_wrong": { "${locale}": "<explanation>" },
+                    "key_point": { "${locale}": "<key point>" },
+                    "mini_lesson": { "${locale}": "<mini lesson>" },
+                    "extra_examples": [ { "ja": "<example>", "${locale}": "<translation>" } ],
+                    "review_tasks": { "${locale}": ["<task1>"] }
     }
                               ]
 }
