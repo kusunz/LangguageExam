@@ -805,6 +805,18 @@ function generateMondaiHash(mondai) {
 
 const ON_DEMAND_BATCH = 1;
 const WARM_TARGET_PER_BUCKET = 50;
+const BLUEPRINT_EAGER_SLOT_COUNT = Math.max(
+  1,
+  Number.parseInt(process.env.BLUEPRINT_EAGER_SLOT_COUNT || '2', 10)
+);
+const BLUEPRINT_ON_DEMAND_BATCH_SIZE = Math.max(
+  1,
+  Number.parseInt(process.env.BLUEPRINT_ON_DEMAND_BATCH_SIZE || '2', 10)
+);
+const BLUEPRINT_ON_DEMAND_REQUEST_CONCURRENCY = Math.max(
+  1,
+  Number.parseInt(process.env.BLUEPRINT_ON_DEMAND_REQUEST_CONCURRENCY || '2', 10)
+);
 const BLUEPRINT_GENERATION_CONCURRENCY = Math.max(
   1,
   Number.parseInt(process.env.BLUEPRINT_GENERATION_CONCURRENCY || '4', 10)
@@ -817,6 +829,143 @@ const OPENROUTER_RPM = Math.max(
 function getEffectiveBlueprintGenerationConcurrency() {
   const rpmBound = Math.max(1, Math.min(OPENROUTER_RPM, 5));
   return Math.max(1, Math.min(BLUEPRINT_GENERATION_CONCURRENCY, rpmBound));
+}
+
+function getEffectiveOnDemandRequestConcurrency() {
+  return Math.max(
+    1,
+    Math.min(getEffectiveBlueprintGenerationConcurrency(), BLUEPRINT_ON_DEMAND_REQUEST_CONCURRENCY)
+  );
+}
+
+function chunkArray(items, size) {
+  const result = [];
+  const chunkSize = Math.max(1, Number(size) || 1);
+  for (let i = 0; i < items.length; i += chunkSize) {
+    result.push(items.slice(i, i + chunkSize));
+  }
+  return result;
+}
+
+function buildMondaiDefFromSlot(slot) {
+  return {
+    mondai_id: slot?.mondai_id,
+    title_vi: slot?.title_vi || slot?.mondai_id || 'Mondai',
+    types: Array.isArray(slot?.types) && slot.types.length > 0
+      ? slot.types
+      : [slot?.type || 'unknown'],
+    count_official: slot?.count_official || slot?.question_count || 1,
+    estimated_seconds: slot?.estimated_seconds || null,
+    mondai_type: slot?.type || null
+  };
+}
+
+function buildPromptExamSpecFromBlueprint(blueprint) {
+  const meta = blueprint?.meta || {};
+  return {
+    exam_id: meta.exam_id || 'jlpt',
+    display_name_vi: meta.display_name_vi || String(meta.exam_id || 'JLPT').toUpperCase(),
+    language: meta.language || 'ja-JP',
+    level: meta.level || 'N5',
+    modes: meta.modes || DEFAULT_MODES
+  };
+}
+
+async function generateMondaiForSlotBatch(params) {
+  const {
+    examSpec,
+    level,
+    mode,
+    group,
+    batchEntries
+  } = params;
+
+  if (!Array.isArray(batchEntries) || batchEntries.length === 0) return;
+
+  const promptGroup = group?.mondai
+    ? group
+    : {
+      group_id: group?.group_id,
+      title_vi: group?.title_vi,
+      mondai: group?.mondai_slots || batchEntries.map((entry) => entry.slot)
+    };
+  const startMondaiIndex = batchEntries[0]?.slot?.slot_ordinal || 0;
+  const mondaiBatch = batchEntries.map((entry) => entry.mondaiDef);
+
+  const prompt = buildMondaiChunkPrompt(
+    examSpec,
+    mode,
+    promptGroup,
+    0,
+    mondaiBatch,
+    startMondaiIndex,
+    []
+  );
+
+  const generation = await runJsonTask({
+    task: 'generate',
+    prompt,
+    validateResult: validateMondaiChunkResult,
+    maxTokens: 8192,
+    temperature: 0.8
+  });
+
+  const mondaiList = Array.isArray(generation?.result?.mondai) ? generation.result.mondai : [];
+  if (mondaiList.length === 0) {
+    throw createTemporaryUnavailableError(new Error('Batch generation returned no mondai'));
+  }
+
+  const unusedMondai = mondaiList.slice();
+
+  for (const entry of batchEntries) {
+    const expectedMondaiId = String(entry?.mondaiDef?.mondai_id || '').toUpperCase();
+    let matchIndex = unusedMondai.findIndex((mondai) =>
+      String(mondai?.mondai_id || '').toUpperCase() === expectedMondaiId
+    );
+    if (matchIndex === -1) matchIndex = 0;
+
+    const mondai = unusedMondai.splice(matchIndex, 1)[0];
+    if (!mondai) continue;
+
+    mondai.mondai_id = entry.mondaiDef.mondai_id;
+    mondai.primary_type = entry.mondaiDef.types[0];
+    canonicalizeMondaiQuestionIds(mondai, { mondaiId: entry.mondaiDef.mondai_id });
+
+    const hash = generateMondaiHash(mondai);
+    const itemType = mondai.mondai_type || entry.mondaiDef.mondai_type || entry.mondaiDef.types?.[0] || 'unknown';
+    const estimatedCost = entry.mondaiDef.estimated_seconds || 60;
+
+    await db.query(`
+      INSERT INTO mondai_bank (
+        hash, exam_id, level, group_id, mondai_id,
+        primary_type, item_type, estimated_cost, content, meta
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
+      ON CONFLICT (hash) DO NOTHING
+    `, [
+      hash,
+      examSpec.exam_id,
+      level,
+      group.group_id,
+      entry.mondaiDef.mondai_id,
+      entry.mondaiDef.types[0],
+      itemType,
+      estimatedCost,
+      JSON.stringify(mondai),
+      JSON.stringify({
+        mode,
+        generated_at: new Date().toISOString(),
+        llm_provider: formatLlmProviderLabel(generation.meta),
+        batch_strategy: `1x${batchEntries.length}`
+      })
+    ]);
+
+    await db.query(`
+      INSERT INTO pool_snapshot_items (snapshot_id, bucket_key, mondai_hash, group_id)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (snapshot_id, bucket_key, mondai_hash) DO NOTHING
+    `, [entry.snapshotId, entry.slot.bucket_key, hash, group.group_id]);
+  }
 }
 
 /**
@@ -1060,29 +1209,39 @@ async function hydratePendingBlueprintSlots(params) {
     return;
   }
 
-  const generationTasks = pendingSlots.map(({ group, mondaiDef, slot }) => async () => {
-    try {
-      console.log(`[Blueprint] Bucket empty/exhausted: ${slot.bucket_key}. Triggering on-demand generation.`);
-      await generateMondaiForBucket({
-        examSpec,
-        level,
-        mode,
-        group,
-        mondaiDef,
-        bucketKey: slot.bucket_key,
-        snapshotId,
-        count: ON_DEMAND_BATCH,
-        plan
+  const groupedByGroup = new Map();
+  for (const pending of pendingSlots) {
+    const groupKey = pending?.group?.group_id || 'default';
+    if (!groupedByGroup.has(groupKey)) groupedByGroup.set(groupKey, []);
+    groupedByGroup.get(groupKey).push({ ...pending, snapshotId });
+  }
+
+  const generationTasks = [];
+  for (const entries of groupedByGroup.values()) {
+    const batches = chunkArray(entries, BLUEPRINT_ON_DEMAND_BATCH_SIZE);
+    for (const batchEntries of batches) {
+      generationTasks.push(async () => {
+        try {
+          const batchLabel = batchEntries.map((entry) => entry.slot?.mondai_id || entry.slot?.slot_id).join(', ');
+          console.log(`[Blueprint] Triggering on-demand generation batch (${batchEntries.length} mondai): ${batchLabel}`);
+          await generateMondaiForSlotBatch({
+            examSpec,
+            level,
+            mode,
+            group: batchEntries[0].group,
+            batchEntries
+          });
+          return { ok: true, batchEntries };
+        } catch (error) {
+          return { ok: false, batchEntries, error };
+        }
       });
-      return { ok: true, slot, mondaiDef };
-    } catch (error) {
-      return { ok: false, slot, mondaiDef, error };
     }
-  });
+  }
 
   const generationResults = await runTasksWithConcurrency(
     generationTasks,
-    getEffectiveBlueprintGenerationConcurrency()
+    getEffectiveOnDemandRequestConcurrency()
   );
 
   for (const result of generationResults) {
@@ -1091,9 +1250,12 @@ async function hydratePendingBlueprintSlots(params) {
       throw result.error;
     }
 
-    console.warn(`Failed to generate bucket ${result?.slot?.bucket_key}:`, result?.error?.message || result?.error);
+    const failedLabels = (result?.batchEntries || [])
+      .map((entry) => entry?.slot?.bucket_key || entry?.slot?.slot_id || 'unknown')
+      .join(', ');
+    console.warn(`Failed to generate pending slots ${failedLabels}:`, result?.error?.message || result?.error);
     throw createTemporaryUnavailableError(
-      result?.error || new Error(`Failed to generate bucket ${result?.slot?.bucket_key || 'unknown'}`)
+      result?.error || new Error(`Failed to generate pending slots ${failedLabels || 'unknown'}`)
     );
   }
 
@@ -1150,7 +1312,17 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
   const blueprint = {
     groups: [],
     meta: {
-      exam_id: examSpec.exam_id, level, mode, plan, seed, set_no: setNo,
+      exam_id: examSpec.exam_id,
+      display_name_vi: examSpec.display_name_vi || String(examSpec.exam_id || 'JLPT').toUpperCase(),
+      language: examSpec.language || 'ja-JP',
+      modes: examSpec.modes || DEFAULT_MODES,
+      level,
+      mode,
+      plan,
+      seed,
+      set_no: setNo,
+      snapshot_id: snapshotId,
+      date_ymd: new Date().toISOString().split('T')[0],
       generated_at: new Date().toISOString()
     }
   };
@@ -1176,10 +1348,15 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
       const bucketKey = getBucketKey(group.group_id, mondaiDef.mondai_id, mondaiDef.types[0]);
       const slot = {
         slot_id: buildBlueprintSlotId(group.group_id, mondaiDef.mondai_id, groupBlueprint.mondai_slots.length),
+        slot_ordinal: groupBlueprint.mondai_slots.length,
         bucket_key: bucketKey,
         mondai_id: mondaiDef.mondai_id,
+        title_vi: mondaiDef.title_vi,
+        types: Array.isArray(mondaiDef.types) ? mondaiDef.types : [mondaiDef.types].filter(Boolean),
         type: mondaiDef.types[0],
+        count_official: mondaiDef.count_official,
         question_count: targetCount,
+        estimated_seconds: mondaiDef.estimated_seconds || null,
         delivery_mode: isReading ? 'whole' : 'flexible',
         status: 'pending'
       };
@@ -1206,8 +1383,11 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
     blueprint.groups.push(groupBlueprint);
   }
 
+  const eagerPendingSlots = pendingSlots.slice(0, BLUEPRINT_EAGER_SLOT_COUNT);
+  const deferredPendingSlots = pendingSlots.slice(BLUEPRINT_EAGER_SLOT_COUNT);
+
   await hydratePendingBlueprintSlots({
-    pendingSlots,
+    pendingSlots: eagerPendingSlots,
     examSpec,
     level,
     mode,
@@ -1219,8 +1399,12 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
     allowRepeat
   });
 
+  deferredPendingSlots.forEach(({ slot }) => {
+    slot.status = 'deferred';
+  });
+
   const missingSlots = blueprint.groups.flatMap((group) =>
-    (group.mondai_slots || []).filter((slot) => !slot.mondai_hash)
+    (group.mondai_slots || []).filter((slot) => !slot.mondai_hash && slot.status !== 'deferred')
   );
 
   if (missingSlots.length > 0) {
@@ -3046,6 +3230,64 @@ function attachSlotMetaToMondai(content, slot, groupId, slotIndex) {
   return cloned;
 }
 
+function collectBlueprintHashes(blueprint) {
+  const hashes = new Set();
+  for (const group of blueprint?.groups || []) {
+    for (const slot of group?.mondai_slots || []) {
+      if (slot?.mondai_hash) hashes.add(slot.mondai_hash);
+    }
+  }
+  return hashes;
+}
+
+async function hydrateDeferredSlotsForChunk({ blueprint, group, slotsToConsider, userId }) {
+  const pendingSlots = (slotsToConsider || [])
+    .filter(({ slot }) => !slot?.mondai_hash)
+    .map(({ slot }) => ({
+      group: {
+        group_id: group.group_id,
+        title_vi: group.title_vi,
+        mondai_slots: group.mondai_slots
+      },
+      mondaiDef: buildMondaiDefFromSlot(slot),
+      slot
+    }));
+
+  if (pendingSlots.length === 0) return false;
+
+  const examSpec = buildPromptExamSpecFromBlueprint(blueprint);
+  const snapshotId = blueprint?.meta?.snapshot_id || await ensurePoolSnapshot(
+    examSpec,
+    blueprint?.meta?.level || examSpec.level,
+    blueprint?.meta?.date_ymd || new Date().toISOString().split('T')[0],
+    blueprint?.meta?.plan || 'free',
+    blueprint?.meta?.mode || 'official'
+  );
+  const usedHashes = collectBlueprintHashes(blueprint);
+
+  await hydratePendingBlueprintSlots({
+    pendingSlots,
+    examSpec,
+    level: blueprint?.meta?.level || examSpec.level,
+    mode: blueprint?.meta?.mode || 'official',
+    snapshotId,
+    plan: blueprint?.meta?.plan || 'free',
+    rng: Math.random,
+    usedHashes,
+    userId: userId || null,
+    allowRepeat: false
+  });
+
+  if (!blueprint.meta) blueprint.meta = {};
+  blueprint.meta.snapshot_id = snapshotId;
+
+  pendingSlots.forEach(({ slot }) => {
+    if (slot?.mondai_hash) slot.status = 'ready';
+  });
+
+  return pendingSlots.some(({ slot }) => !!slot?.mondai_hash);
+}
+
 /**
  * Helper: Deliver next chunk for an instance
  */
@@ -3054,7 +3296,7 @@ async function deliverNextChunk(instanceKey, want) {
   try {
     // Load instance + blueprint using FOR UPDATE to prevent race conditions
     const inst = await db.query(
-      'SELECT blueprint, delivery_state FROM exam_instances_cache WHERE instance_key=$1 FOR UPDATE',
+      'SELECT blueprint, delivery_state, user_id FROM exam_instances_cache WHERE instance_key=$1 FOR UPDATE',
       [instanceKey]
     );
 
@@ -3079,6 +3321,7 @@ async function deliverNextChunk(instanceKey, want) {
 
     const group = blueprint.groups[groupIdx];
     let cursor = deliveryState.cursors?.[want.group_id] || 0;
+    let blueprintModified = false;
 
     // Determine which slots we'll try to deliver (for batch fetch)
     const slotsToConsider = [];
@@ -3089,8 +3332,26 @@ async function deliverNextChunk(instanceKey, want) {
       if (group.mondai_slots[tempCursor - 1]?.delivery_mode === 'whole') break;
     }
 
+    if (slotsToConsider.some(({ slot }) => !slot?.mondai_hash)) {
+      const hydrated = await hydrateDeferredSlotsForChunk({
+        blueprint,
+        group,
+        slotsToConsider,
+        userId: inst.rows[0]?.user_id || null
+      });
+      if (hydrated || blueprint?.meta?.snapshot_id) blueprintModified = true;
+      blueprint.groups[groupIdx] = group;
+    }
+
+    const unresolvedSlots = slotsToConsider.filter(({ slot }) => !slot?.mondai_hash);
+    if (unresolvedSlots.length > 0) {
+      throw createTemporaryUnavailableError(
+        new Error(`Deferred slots not ready: ${unresolvedSlots.map(({ slot }) => slot?.slot_id || slot?.mondai_id || 'unknown').join(', ')}`)
+      );
+    }
+
     // Batch fetch all hashes in one query
-    const hashesToFetch = slotsToConsider.map(s => s.slot.mondai_hash);
+    const hashesToFetch = slotsToConsider.map(s => s.slot.mondai_hash).filter(Boolean);
     const contentMap = {};
     if (hashesToFetch.length > 0) {
       const batchRes = await db.query(
@@ -3101,12 +3362,11 @@ async function deliverNextChunk(instanceKey, want) {
     }
 
     const mondaiToDeliver = [];
-    let blueprintModified = false;
 
     for (const { slot, idx } of slotsToConsider) {
       let content = contentMap[slot.mondai_hash] || null;
 
-      if (!content) {
+      if (!content && slot?.mondai_hash) {
         // SAFETY NET: Content missing from bank (data inconsistency)
         console.warn(`[Chunk] Missing content for hash ${slot.mondai_hash}. Attempting repair...`);
         try {
@@ -3151,6 +3411,14 @@ async function deliverNextChunk(instanceKey, want) {
         'UPDATE exam_instances_cache SET delivery_state=$1 WHERE instance_key=$2',
         [JSON.stringify(deliveryState), instanceKey]
       );
+    }
+
+    if (blueprintModified) {
+      await recordServedMondaiHistory(db, {
+        userId: inst.rows[0]?.user_id || null,
+        instanceKey,
+        blueprint
+      });
     }
 
     await db.query('COMMIT');
@@ -3456,6 +3724,9 @@ app.post('/api/exam/chunk', authMiddleware, async (req, res) => {
     });
   } catch (err) {
     console.error('Chunk V2 error:', err);
+    if (isTemporaryUnavailableError(err)) {
+      return res.status(503).json(getTemporaryUnavailablePayload(err));
+    }
     res.status(500).json({ error: err.message });
   }
 });

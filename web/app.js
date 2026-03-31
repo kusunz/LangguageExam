@@ -14,7 +14,9 @@
         privyAppId: null, // Set from server or use demo mode
         examSpecs: {},
         defaultExam: 'jlpt',
-        defaultMode: 'official'
+        defaultMode: 'official',
+        chunkRetryAttempts: 3,
+        chunkRetryBaseDelayMs: 700
     };
 
     // ============================================
@@ -2268,7 +2270,7 @@
             try {
                 const group = State.test.groups.find(g => g.group_id === targetGroupId);
                 const lastCursor = group?._cursor ?? 0;
-                const res = await Api.fetchExamChunk(instanceKey, targetGroupId, 3);
+                const res = await this.fetchExamChunkWithRetry(instanceKey, targetGroupId, 3);
                 if (loadCycleId !== this.loadCycleId || !State.test || State.currentInstanceKey !== instanceKey) {
                     return;
                 }
@@ -2334,7 +2336,7 @@
 
             // Load all groups concurrently with bounded concurrency
             const loadGroup = async (gIdx) => {
-                if (loadCycleId !== this.loadCycleId || !State.test || State.currentInstanceKey !== instanceKey) return;
+            if (loadCycleId !== this.loadCycleId || !State.test || State.currentInstanceKey !== instanceKey) return;
                 const group = State.test.groups[gIdx];
                 const group_id = group.group_id;
 
@@ -2358,7 +2360,7 @@
                     }
                     try {
                         const lastCursor = group._cursor ?? 0;
-                        const res = await Api.fetchExamChunk(instanceKey, group_id, 3);
+                        const res = await this.fetchExamChunkWithRetry(instanceKey, group_id, 3);
                         if (loadCycleId !== this.loadCycleId || !State.test || State.currentInstanceKey !== instanceKey) {
                             done = true;
                             break;
@@ -2408,6 +2410,32 @@
             if (loadCycleId === this.loadCycleId) {
                 console.log('All chunks loaded (V2 concurrent).');
             }
+        },
+
+        isRetryableChunkError(err) {
+            return err?.status === 503 || err?.status === 429 || err?.retryable === true;
+        },
+
+        async fetchExamChunkWithRetry(instanceKey, groupId, wantCount = 3) {
+            const maxAttempts = Math.max(1, CONFIG.chunkRetryAttempts || 1);
+            let lastError = null;
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                try {
+                    return await Api.fetchExamChunk(instanceKey, groupId, wantCount);
+                } catch (err) {
+                    lastError = err;
+                    if (!this.isRetryableChunkError(err) || attempt >= maxAttempts) {
+                        throw err;
+                    }
+
+                    const delayMs = CONFIG.chunkRetryBaseDelayMs * attempt;
+                    console.warn(`Chunk fetch retry ${attempt}/${maxAttempts} for ${groupId} after ${delayMs}ms:`, err.message);
+                    await new Promise(resolve => setTimeout(resolve, delayMs));
+                }
+            }
+
+            throw lastError || new Error('Chunk retry failed');
         },
 
 
