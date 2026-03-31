@@ -712,8 +712,8 @@ function canonicalizeMondaiQuestionIds(mondai, options = {}) {
 }
 
 /**
- * Sanitize mondai for client: remove answer_index/keys, add answer_hash
- * Ensures NO server-only data leaks to client
+ * Sanitize mondai for client: remove grading-only fields before sending to browser
+ * Ensures NO server-only answer data leaks to client before submission
  * @param {object} data - Response data with questions
  * @returns {object} - Sanitized data
  */
@@ -727,16 +727,15 @@ function sanitizeMondaiForClient(data) {
   const processItems = (items) => {
     if (Array.isArray(items)) {
       items.forEach(item => {
-        // 1. Generate hash if simple answer_index exists
-        if (item.id && typeof item.answer_index === 'number') {
-          item.answer_hash = generateAnswerHash(item.id, item.answer_index);
-        }
-
-        // 2. Remove sensitive fields
+        // Remove sensitive grading fields before returning any payload to the browser.
         delete item.answer_index;
+        delete item.answer_hash;
         delete item.correct_answer;
+        delete item.correct_index;
         delete item.answer_key;
         delete item.answer_keys; // Ensure plural is also removed
+        delete item.is_correct;
+        delete item.user_answer_index;
         delete item.explanation_source; // Internal notes
       });
     }
@@ -1189,6 +1188,14 @@ async function runTasksWithConcurrency(taskFactories, limit) {
 
 function buildBlueprintSlotId(groupId, mondaiId, ordinal) {
   return `${groupId}:${mondaiId}:${ordinal + 1}`;
+}
+
+function getInitialMondaiBufferCount(group) {
+  const totalSlots = Array.isArray(group?.mondai_slots) ? group.mondai_slots.length : 0;
+  if (totalSlots <= 0) return 2;
+  if (totalSlots <= 4) return totalSlots;
+  if (totalSlots <= 6) return 4;
+  return 3;
 }
 
 async function hydratePendingBlueprintSlots(params) {
@@ -3296,8 +3303,121 @@ async function hydrateDeferredSlotsForChunk({ blueprint, group, slotsToConsider,
   return pendingSlots.some(({ slot }) => !!slot?.mondai_hash);
 }
 
+function getSlotEntriesByIds(group, slotIds) {
+  const wantedIds = Array.from(new Set((slotIds || []).filter(Boolean)));
+  if (!group || wantedIds.length === 0) return { entries: [], missing: [] };
+
+  const slotMap = new Map(
+    (group.mondai_slots || []).map((slot, idx) => [slot?.slot_id, { slot, idx }])
+  );
+
+  const entries = [];
+  const missing = [];
+  for (const slotId of wantedIds) {
+    const match = slotMap.get(slotId);
+    if (!match) {
+      missing.push(slotId);
+      continue;
+    }
+    entries.push(match);
+  }
+
+  entries.sort((a, b) => a.idx - b.idx);
+  return { entries, missing };
+}
+
+async function prepareSlotContentsForDelivery({ blueprint, group, groupIdx, slotsToConsider, userId }) {
+  let blueprintModified = false;
+
+  if (!Array.isArray(slotsToConsider) || slotsToConsider.length === 0) {
+    return { mondaiToDeliver: [], blueprintModified };
+  }
+
+  if (slotsToConsider.some(({ slot }) => !slot?.mondai_hash)) {
+    const hydrated = await hydrateDeferredSlotsForChunk({
+      blueprint,
+      group,
+      slotsToConsider,
+      userId: userId || null
+    });
+    if (hydrated || blueprint?.meta?.snapshot_id) blueprintModified = true;
+    blueprint.groups[groupIdx] = group;
+  }
+
+  const unresolvedSlots = slotsToConsider.filter(({ slot }) => !slot?.mondai_hash);
+  if (unresolvedSlots.length > 0) {
+    throw createTemporaryUnavailableError(
+      new Error(`Deferred slots not ready: ${unresolvedSlots.map(({ slot }) => slot?.slot_id || slot?.mondai_id || 'unknown').join(', ')}`)
+    );
+  }
+
+  const hashesToFetch = slotsToConsider.map(({ slot }) => slot?.mondai_hash).filter(Boolean);
+  const contentMap = {};
+  if (hashesToFetch.length > 0) {
+    const batchRes = await db.query(
+      'SELECT hash, content FROM mondai_bank WHERE hash = ANY($1)',
+      [hashesToFetch]
+    );
+    batchRes.rows.forEach((row) => {
+      contentMap[row.hash] = parseJsonb(row.content);
+    });
+  }
+
+  const mondaiToDeliver = [];
+
+  for (const { slot, idx } of slotsToConsider) {
+    let content = contentMap[slot.mondai_hash] || null;
+
+    if (!content && slot?.mondai_hash) {
+      console.warn(`[Chunk] Missing content for hash ${slot.mondai_hash}. Attempting repair...`);
+      try {
+        const snapRes = await db.query(
+          'SELECT snapshot_id, bucket_key FROM pool_snapshot_items WHERE mondai_hash=$1 LIMIT 1',
+          [slot.mondai_hash]
+        );
+
+        if (snapRes.rows.length > 0) {
+          const { snapshot_id, bucket_key } = snapRes.rows[0];
+          const newHash = await sampleMondaiFromBucket(snapshot_id, bucket_key, Math.random, [slot.mondai_hash]);
+          const mRes2 = await db.query('SELECT content FROM mondai_bank WHERE hash=$1', [newHash]);
+          if (mRes2.rows.length > 0) {
+            content = parseJsonb(mRes2.rows[0].content);
+            slot.mondai_hash = newHash;
+            blueprintModified = true;
+            console.log(`[Chunk] Repaired slot with new hash ${newHash}`);
+          }
+        }
+      } catch (error) {
+        console.error('[Chunk] Repair failed:', error.message);
+      }
+    }
+
+    if (content) {
+      mondaiToDeliver.push(attachSlotMetaToMondai(content, slot, group.group_id, idx));
+    }
+  }
+
+  const deliveredSlotIds = new Set(
+    mondaiToDeliver
+      .map((mondai) => mondai?.slot_id || mondai?.meta?.slot_id)
+      .filter(Boolean)
+  );
+  const missingSlotIds = slotsToConsider
+    .map(({ slot }) => slot?.slot_id)
+    .filter((slotId) => slotId && !deliveredSlotIds.has(slotId));
+
+  if (missingSlotIds.length > 0) {
+    throw createTemporaryUnavailableError(
+      new Error(`Requested slots not ready: ${missingSlotIds.join(', ')}`)
+    );
+  }
+
+  return { mondaiToDeliver, blueprintModified };
+}
+
 /**
- * Helper: Deliver next chunk for an instance
+ * Compatibility helper for legacy count-based chunk delivery.
+ * The active web client now requests explicit slot_ids instead.
  */
 async function deliverNextChunk(instanceKey, want) {
   await db.query('BEGIN');
@@ -3329,7 +3449,6 @@ async function deliverNextChunk(instanceKey, want) {
 
     const group = blueprint.groups[groupIdx];
     let cursor = deliveryState.cursors?.[want.group_id] || 0;
-    let blueprintModified = false;
 
     // Determine which slots we'll try to deliver (for batch fetch)
     const slotsToConsider = [];
@@ -3340,69 +3459,16 @@ async function deliverNextChunk(instanceKey, want) {
       if (group.mondai_slots[tempCursor - 1]?.delivery_mode === 'whole') break;
     }
 
-    if (slotsToConsider.some(({ slot }) => !slot?.mondai_hash)) {
-      const hydrated = await hydrateDeferredSlotsForChunk({
-        blueprint,
-        group,
-        slotsToConsider,
-        userId: inst.rows[0]?.user_id || null
-      });
-      if (hydrated || blueprint?.meta?.snapshot_id) blueprintModified = true;
-      blueprint.groups[groupIdx] = group;
-    }
+    const { mondaiToDeliver, blueprintModified } = await prepareSlotContentsForDelivery({
+      blueprint,
+      group,
+      groupIdx,
+      slotsToConsider,
+      userId: inst.rows[0]?.user_id || null
+    });
 
-    const unresolvedSlots = slotsToConsider.filter(({ slot }) => !slot?.mondai_hash);
-    if (unresolvedSlots.length > 0) {
-      throw createTemporaryUnavailableError(
-        new Error(`Deferred slots not ready: ${unresolvedSlots.map(({ slot }) => slot?.slot_id || slot?.mondai_id || 'unknown').join(', ')}`)
-      );
-    }
-
-    // Batch fetch all hashes in one query
-    const hashesToFetch = slotsToConsider.map(s => s.slot.mondai_hash).filter(Boolean);
-    const contentMap = {};
-    if (hashesToFetch.length > 0) {
-      const batchRes = await db.query(
-        'SELECT hash, content FROM mondai_bank WHERE hash = ANY($1)',
-        [hashesToFetch]
-      );
-      batchRes.rows.forEach(r => { contentMap[r.hash] = parseJsonb(r.content); });
-    }
-
-    const mondaiToDeliver = [];
-
-    for (const { slot, idx } of slotsToConsider) {
-      let content = contentMap[slot.mondai_hash] || null;
-
-      if (!content && slot?.mondai_hash) {
-        // SAFETY NET: Content missing from bank (data inconsistency)
-        console.warn(`[Chunk] Missing content for hash ${slot.mondai_hash}. Attempting repair...`);
-        try {
-          const snapRes = await db.query(
-            'SELECT snapshot_id, bucket_key FROM pool_snapshot_items WHERE mondai_hash=$1 LIMIT 1',
-            [slot.mondai_hash]
-          );
-
-          if (snapRes.rows.length > 0) {
-            const { snapshot_id, bucket_key } = snapRes.rows[0];
-            const newHash = await sampleMondaiFromBucket(snapshot_id, bucket_key, Math.random, [slot.mondai_hash]);
-            const mRes2 = await db.query('SELECT content FROM mondai_bank WHERE hash=$1', [newHash]);
-            if (mRes2.rows.length > 0) {
-              content = parseJsonb(mRes2.rows[0].content);
-              slot.mondai_hash = newHash;
-              blueprintModified = true;
-              console.log(`[Chunk] Repaired slot with new hash ${newHash}`);
-            }
-          }
-        } catch (e) {
-          console.error('[Chunk] Repair failed:', e.message);
-        }
-      }
-
-      if (content) {
-        mondaiToDeliver.push(attachSlotMetaToMondai(content, slot, group.group_id, idx));
-      }
-      cursor = idx + 1;
+    if (slotsToConsider.length > 0) {
+      cursor = Math.max(...slotsToConsider.map(({ idx }) => idx)) + 1;
     }
 
     // Update state
@@ -3438,6 +3504,75 @@ async function deliverNextChunk(instanceKey, want) {
       mondai: mondaiToDeliver,
       nextCursor: cursor,
       done: cursor >= group.mondai_slots.length
+    };
+  } catch (err) {
+    await db.query('ROLLBACK');
+    throw err;
+  }
+}
+
+async function deliverRequestedSlots(instanceKey, want) {
+  await db.query('BEGIN');
+  try {
+    const inst = await db.query(
+      'SELECT blueprint, user_id FROM exam_instances_cache WHERE instance_key=$1 FOR UPDATE',
+      [instanceKey]
+    );
+
+    if (inst.rows.length === 0) {
+      await db.query('ROLLBACK');
+      throw new Error('Instance not found');
+    }
+
+    const blueprint = parseJsonb(inst.rows[0].blueprint);
+    const reqId = Date.now() + '_' + Math.random().toString(36).substr(2, 4);
+
+    const groupIdx = blueprint.groups.findIndex((group) => group.group_id === want.group_id);
+    if (groupIdx === -1) {
+      await db.query('ROLLBACK');
+      throw new Error('Group not found in blueprint');
+    }
+
+    const group = blueprint.groups[groupIdx];
+    const { entries: slotsToConsider, missing } = getSlotEntriesByIds(group, want.slot_ids);
+    if (missing.length > 0) {
+      await db.query('ROLLBACK');
+      throw new Error(`Unknown slot ids requested: ${missing.join(', ')}`);
+    }
+
+    const requestedSlotIds = slotsToConsider.map(({ slot }) => slot.slot_id);
+    console.log(`[SlotReq ${reqId}] Start: ${instanceKey} group=${want.group_id} slots=${requestedSlotIds.join(', ')}`);
+
+    const { mondaiToDeliver, blueprintModified } = await prepareSlotContentsForDelivery({
+      blueprint,
+      group,
+      groupIdx,
+      slotsToConsider,
+      userId: inst.rows[0]?.user_id || null
+    });
+
+    if (blueprintModified) {
+      await db.query(
+        'UPDATE exam_instances_cache SET blueprint=$1 WHERE instance_key=$2',
+        [JSON.stringify(blueprint), instanceKey]
+      );
+
+      await recordServedMondaiHistory(db, {
+        userId: inst.rows[0]?.user_id || null,
+        instanceKey,
+        blueprint
+      });
+    }
+
+    await db.query('COMMIT');
+
+    console.log(`[SlotReq ${reqId}] End: returned ${mondaiToDeliver.length} items: ${mondaiToDeliver.map((m) => m.slot_id || m.mondai_id).join(', ')}`);
+
+    return {
+      mondai: mondaiToDeliver,
+      requestedSlotIds,
+      readySlotIds: mondaiToDeliver.map((m) => m.slot_id || m.meta?.slot_id).filter(Boolean),
+      done: group.mondai_slots.every((slot) => !!slot?.mondai_hash)
     };
   } catch (err) {
     await db.query('ROLLBACK');
@@ -3655,9 +3790,14 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
     await ensureActiveAttempt(userId, instanceKey);
 
     const firstGroup = blueprint.groups[0];
-    const firstChunk = await deliverNextChunk(instanceKey, {
+    const initialWantCount = getInitialMondaiBufferCount(firstGroup);
+    const initialSlotIds = (firstGroup.mondai_slots || [])
+      .slice(0, initialWantCount)
+      .map((slot) => slot?.slot_id)
+      .filter(Boolean);
+    const firstChunk = await deliverRequestedSlots(instanceKey, {
       group_id: firstGroup.group_id,
-      want_count: 2
+      slot_ids: initialSlotIds
     });
 
     res.json({
@@ -3723,11 +3863,15 @@ app.post('/api/exam/chunk', authMiddleware, async (req, res) => {
       return res.status(409).json({ error: 'Exam session has ended' });
     }
 
-    const chunk = await deliverNextChunk(instanceKey, want);
+    const chunk = Array.isArray(want.slot_ids) && want.slot_ids.length > 0
+      ? await deliverRequestedSlots(instanceKey, want)
+      : await deliverNextChunk(instanceKey, want);
 
     res.json({
       chunk: sanitizeMondaiForClient({ mondai: chunk.mondai }).mondai,
       nextCursor: chunk.nextCursor,
+      requestedSlotIds: chunk.requestedSlotIds,
+      readySlotIds: chunk.readySlotIds,
       done: chunk.done
     });
   } catch (err) {

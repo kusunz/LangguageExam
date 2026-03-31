@@ -120,7 +120,8 @@
             TestUI.isStartingTest = false;
             TestUI.pendingGroups = [];
             TestUI.loadingGroupIndex = 0;
-            TestUI.activeLoaders?.clear?.();
+            TestUI.activeSlotRequests?.clear?.();
+            TestUI.failedSlotRequests?.clear?.();
             TestUI.completedGroups?.clear?.();
             TestUI.showNextButtonRetryState = false;
             if (TestUI.nextLoadFailTimer) {
@@ -451,12 +452,18 @@
             });
         },
 
-        async fetchExamChunk(instanceKey, group_id, want_count = 3) {
+        async fetchExamChunk(instanceKey, group_id, want_count = 3, slot_ids = null) {
+            const want = { group_id };
+            if (Array.isArray(slot_ids) && slot_ids.length > 0) {
+                want.slot_ids = slot_ids;
+            } else {
+                want.want_count = want_count;
+            }
             return this.request('/exam/chunk', {
                 method: 'POST',
                 body: {
                     instanceKey,
-                    want: { group_id, want_count }
+                    want
                 }
             });
         },
@@ -1958,7 +1965,8 @@
         loadingGroupIndex: 0, // Current group being loaded
         isSubmitting: false, // Prevent duplicate submissions
         isStartingTest: false, // Prevent duplicate test starts
-        activeLoaders: new Set(),
+        activeSlotRequests: new Set(),
+        failedSlotRequests: new Set(),
         completedGroups: new Set(),
         loadCycleId: 0,
         nextLoadFailTimer: null,
@@ -2042,7 +2050,8 @@
 
         resetChunkLoadingState() {
             this.loadCycleId += 1;
-            this.activeLoaders.clear();
+            this.activeSlotRequests.clear();
+            this.failedSlotRequests.clear();
             this.completedGroups.clear();
             this.showNextButtonRetryState = false;
             if (this.nextLoadFailTimer) {
@@ -2096,6 +2105,58 @@
         getGroupMondaiCount(group) {
             if (!group) return 0;
             return group.order && group.order.length > 0 ? group.order.length : (group.mondai ? group.mondai.length : 0);
+        },
+
+        getSlotRequestWindowSize() {
+            return 4;
+        },
+
+        getGlobalSlotEntries() {
+            if (!State.test?.meta?.manifest?.groups) return [];
+
+            const entries = [];
+            let globalIndex = 0;
+            for (const manifestGroup of State.test.meta.manifest.groups) {
+                const group = State.test.groups.find(g => g.group_id === manifestGroup.group_id);
+                const slotOrder = Array.isArray(manifestGroup.slot_order) ? manifestGroup.slot_order : [];
+                for (const slotId of slotOrder) {
+                    entries.push({
+                        globalIndex,
+                        group_id: manifestGroup.group_id,
+                        group,
+                        slotId
+                    });
+                    globalIndex += 1;
+                }
+            }
+            return entries;
+        },
+
+        getSlotEntryAtGlobalIndex(globalIndex) {
+            return this.getGlobalSlotEntries().find(entry => entry.globalIndex === globalIndex) || null;
+        },
+
+        isSlotReady(entry) {
+            return !!entry?.group?._mondaiById?.[entry.slotId];
+        },
+
+        getNextMissingSlotIdForGroup(groupId) {
+            const group = State.test?.groups?.find(g => g.group_id === groupId);
+            if (!group?.order?.length) return null;
+            return group.order.find(slotId => !group._mondaiById?.[slotId]) || null;
+        },
+
+        getSlotPrefetchCandidates() {
+            const entries = this.getGlobalSlotEntries();
+            if (entries.length === 0) return [];
+
+            const windowSize = this.getSlotRequestWindowSize();
+            return entries
+                .filter((entry) => entry.globalIndex > State.currentMondaiIndex)
+                .filter((entry) => entry.group && !entry.group._mondaiById?.[entry.slotId])
+                .filter((entry) => !this.activeSlotRequests.has(entry.slotId))
+                .filter((entry) => !this.failedSlotRequests.has(entry.slotId))
+                .slice(0, windowSize);
         },
 
         assignMondaiToGroup(group, mondai) {
@@ -2213,7 +2274,7 @@
                         start_time: new Date().toISOString(),
                         time_limits: State.examSpec.scaled_time_limits || State.examSpec.official_time_limits_sec,
                         language: getExamLanguage(State.examSpec.exam_id),
-                        manifest: res.manifest  // Store manifest for processChunk/loadRemainingChunksV2
+                        manifest: res.manifest  // Store manifest for slot-based chunk delivery
                     },
                     groups: res.manifest.groups.map(g => {
                         return {
@@ -2259,47 +2320,21 @@
         },
 
         async retryFetchNextMondai(targetGroupId) {
-            if (!targetGroupId || this.activeLoaders.has(targetGroupId) || this.completedGroups.has(targetGroupId)) return;
+            if (!targetGroupId) return;
 
+            const group = State.test?.groups?.find(g => g.group_id === targetGroupId);
+            const slotId = this.getNextMissingSlotIdForGroup(targetGroupId);
+            if (!group || !slotId) return;
+
+            this.failedSlotRequests.delete(slotId);
             this.showNextButtonRetryState = false;
             this.updateNavigationButtons();
 
-            const loadCycleId = this.loadCycleId;
-            const instanceKey = State.currentInstanceKey;
-            this.activeLoaders.add(targetGroupId);
-            try {
-                const group = State.test.groups.find(g => g.group_id === targetGroupId);
-                const lastCursor = group?._cursor ?? 0;
-                const res = await this.fetchExamChunkWithRetry(instanceKey, targetGroupId, 3);
-                if (loadCycleId !== this.loadCycleId || !State.test || State.currentInstanceKey !== instanceKey) {
-                    return;
-                }
-                if (group && res.chunk && res.chunk.length > 0) {
-                    res.chunk.forEach(m => {
-                        this.assignMondaiToGroup(group, m);
-                    });
-                    this.updateProgressUI();
-                }
-                if (group) {
-                    group._cursor = typeof res.nextCursor === 'number' ? res.nextCursor : lastCursor;
-                }
-                const noProgress = !res.chunk?.length && (res.done || (typeof res.nextCursor === 'number' && res.nextCursor <= lastCursor));
-                if (noProgress || res.done || this.markGroupCompleteIfSatisfied(group)) {
-                    this.completedGroups.add(targetGroupId);
-                }
-            } catch (err) {
-                console.error('Retry fetch chunk error:', err);
-                if (err.status === 404 || err.status === 409) {
-                    this.completedGroups.add(targetGroupId);
-                } else {
-                    this.showNextButtonRetryState = true;
-                }
-            } finally {
-                if (loadCycleId === this.loadCycleId) {
-                    this.activeLoaders.delete(targetGroupId);
-                    this.updateNavigationButtons();
-                }
-            }
+            await this.queueSlotRequest({
+                group_id: targetGroupId,
+                group,
+                slotId
+            }, { force: true });
         },
 
         // Helper to distribute mondai to correct groups based on capacity
@@ -2309,6 +2344,7 @@
 
             mondaiList.forEach(m => {
                 const key = this.getMondaiKey(m);
+                if (key) this.failedSlotRequests.delete(key);
                 for (let i = 0; i < State.test.groups.length; i++) {
                     const group = State.test.groups[i];
                     if (group.order && key && group.order.includes(key)) {
@@ -2328,101 +2364,92 @@
             this.updateProgressUI();
         },
 
-        async loadRemainingChunksV2() {
-            if (!State.currentInstanceKey) return;
+        async queueSlotRequest(entry, options = {}) {
+            if (!entry?.group_id || !entry?.slotId || !State.currentInstanceKey) return;
+            if (!options.force && this.activeSlotRequests.has(entry.slotId)) return;
 
-            const instanceKey = State.currentInstanceKey;
             const loadCycleId = this.loadCycleId;
+            const instanceKey = State.currentInstanceKey;
+            this.activeSlotRequests.add(entry.slotId);
 
-            // Load all groups concurrently with bounded concurrency
-            const loadGroup = async (gIdx) => {
-            if (loadCycleId !== this.loadCycleId || !State.test || State.currentInstanceKey !== instanceKey) return;
-                const group = State.test.groups[gIdx];
-                const group_id = group.group_id;
-
-                // Check if already full from initial chunk
-                const manifestGroup = State.test.meta.manifest.groups.find(mg => mg.group_id === group_id);
-                const expected = manifestGroup?.expected_mondai_count || 0;
-
-                const currentCount = this.getLoadedMondaiCount(group);
-                if (currentCount >= expected) {
-                    this.completedGroups.add(group_id);
-                    console.log(`Group ${group_id} already has ${currentCount}/${expected} items.`);
-                    return;
-                }
-
-                this.activeLoaders.add(group_id);
-                let done = false;
-                while (!done) {
+            return RequestQueue.schedule(async () => {
+                try {
+                    const res = await this.fetchExamChunkWithRetry(instanceKey, entry.group_id, {
+                        slotIds: [entry.slotId],
+                        wantCount: 1
+                    });
                     if (loadCycleId !== this.loadCycleId || !State.test || State.currentInstanceKey !== instanceKey) {
-                        done = true;
-                        break;
+                        return;
                     }
-                    try {
-                        const lastCursor = group._cursor ?? 0;
-                        const res = await this.fetchExamChunkWithRetry(instanceKey, group_id, 3);
-                        if (loadCycleId !== this.loadCycleId || !State.test || State.currentInstanceKey !== instanceKey) {
-                            done = true;
-                            break;
-                        }
-                        group._cursor = typeof res.nextCursor === 'number' ? res.nextCursor : lastCursor;
 
-                        if (res.chunk && res.chunk.length > 0) {
-                            res.chunk.forEach(m => {
-                                const key = this.getMondaiKey(m);
-                                const wasPresent = !!group._mondaiById[key];
-                                this.assignMondaiToGroup(group, m);
-                                console.log(`[ChunkReq] Recv ${key}. Present before: ${wasPresent}`);
-                            });
-                            this.updateNavigationButtons();
-                            this.updateProgressUI();
-                        }
-
-                        const noProgress = !res.chunk?.length && (res.done || group._cursor <= lastCursor);
-                        done = res.done || noProgress;
-                        if (done || this.markGroupCompleteIfSatisfied(group)) {
-                            this.completedGroups.add(group_id);
-                            console.log(`Group ${group_id} fully loaded.`);
-                        }
-                        await new Promise(r => setTimeout(r, 300)); // Reduced delay for faster loading
-
-                    } catch (e) {
-                        console.error(`Error loading chunk for ${group_id}:`, e);
-                        if (e.status === 404 || e.status === 409) {
-                            this.completedGroups.add(group_id);
-                        }
-                        done = true; // Stop loop on error to avoid infinite retry
+                    if (res?.chunk?.length) {
+                        res.chunk.forEach((mondai) => {
+                            const slotKey = this.getMondaiKey(mondai);
+                            const wasPresent = !!entry.group?._mondaiById?.[slotKey];
+                            this.assignMondaiToGroup(entry.group, mondai);
+                            console.log(`[SlotReq] Recv ${slotKey}. Present before: ${wasPresent}`);
+                        });
+                        this.markGroupCompleteIfSatisfied(entry.group);
+                        this.updateProgressUI();
+                    }
+                } catch (err) {
+                    if (loadCycleId !== this.loadCycleId || err?.message === 'Queue cleared') {
+                        return;
+                    }
+                    console.error(`Error loading slot ${entry.slotId}:`, err);
+                    if (err.status === 404 || err.status === 409) {
+                        this.completedGroups.add(entry.group_id);
+                    } else {
+                        this.failedSlotRequests.add(entry.slotId);
+                    }
+                } finally {
+                    if (loadCycleId === this.loadCycleId) {
+                        this.activeSlotRequests.delete(entry.slotId);
+                        this.updateNavigationButtons();
+                        this.pumpSlotRequests();
                     }
                 }
-                if (loadCycleId === this.loadCycleId) {
-                    this.activeLoaders.delete(group_id);
-                    this.updateNavigationButtons();
+            });
+        },
+
+        pumpSlotRequests() {
+            if (!State.currentInstanceKey || !State.test) return;
+
+            RequestQueue.setLimit(this.getSlotRequestWindowSize());
+
+            const available = Math.max(0, this.getSlotRequestWindowSize() - this.activeSlotRequests.size);
+            if (available === 0) return;
+
+            const candidates = this.getSlotPrefetchCandidates().slice(0, available);
+            if (candidates.length === 0) {
+                if (this.completedGroups.size === State.test.groups.length) {
+                    console.log('All slots loaded (V2 slot-based).');
                 }
-            };
-
-            // Schedule all groups concurrently with a small bounded window.
-            RequestQueue.setLimit(4);
-            const promises = State.test.groups.map((_, gIdx) =>
-                RequestQueue.schedule(() => loadGroup(gIdx))
-            );
-
-            await Promise.allSettled(promises);
-            if (loadCycleId === this.loadCycleId) {
-                console.log('All chunks loaded (V2 concurrent).');
+                return;
             }
+
+            candidates.forEach((entry) => {
+                this.queueSlotRequest(entry);
+            });
+        },
+
+        loadRemainingChunksV2() {
+            this.pumpSlotRequests();
         },
 
         isRetryableChunkError(err) {
             return err?.status === 503 || err?.status === 429 || err?.retryable === true;
         },
 
-        async fetchExamChunkWithRetry(instanceKey, groupId, wantCount = 3) {
+        async fetchExamChunkWithRetry(instanceKey, groupId, options = {}) {
             const maxAttempts = Math.max(1, CONFIG.chunkRetryAttempts || 1);
             let lastError = null;
+            const wantCount = typeof options === 'number' ? options : (options.wantCount ?? 3);
+            const slotIds = typeof options === 'object' ? options.slotIds : null;
 
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 try {
-                    return await Api.fetchExamChunk(instanceKey, groupId, wantCount);
+                    return await Api.fetchExamChunk(instanceKey, groupId, wantCount, slotIds);
                 } catch (err) {
                     lastError = err;
                     if (!this.isRetryableChunkError(err) || attempt >= maxAttempts) {
@@ -2795,29 +2822,15 @@
 
             const globalIndex = this.getGlobalMondaiIndex();
             const totalMondaiFromSpec = this.getTotalMondaiCount();
-            const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
+            const nextEntry = this.getSlotEntryAtGlobalIndex(globalIndex + 1);
+            const nextMondaiLoaded = this.isSlotReady(nextEntry);
+            const nextMondaiFailed = !!nextEntry?.slotId && this.failedSlotRequests.has(nextEntry.slotId);
 
             $('#btn-prev-mondai').disabled = globalIndex === 0;
 
             const btnNext = $('#btn-next-mondai');
             const isLast = globalIndex === totalMondaiFromSpec - 1;
-
-            let remainingTarget = globalIndex + 1;
-            let targetGroupId = null;
-            if (State.test.meta?.manifest?.groups) {
-                for (const g of State.test.meta.manifest.groups) {
-                    if (remainingTarget < g.expected_mondai_count) {
-                        targetGroupId = g.group_id;
-                        break;
-                    }
-                    remainingTarget -= g.expected_mondai_count;
-                }
-                if (!targetGroupId && State.test.meta.manifest.groups.length > 0) {
-                    targetGroupId = State.test.meta.manifest.groups[State.test.meta.manifest.groups.length - 1].group_id;
-                }
-            }
-
-            const canRequestMore = !!targetGroupId && !this.completedGroups.has(targetGroupId);
+            const canRequestMore = !!nextEntry && !this.completedGroups.has(nextEntry.group_id);
 
             if (isLast) {
                 btnNext.disabled = true;
@@ -2825,21 +2838,18 @@
                 btnNext.onclick = null;
                 if (this.nextLoadFailTimer) { clearTimeout(this.nextLoadFailTimer); this.nextLoadFailTimer = null; }
             } else if (!nextMondaiLoaded && canRequestMore) {
-                if (this.showNextButtonRetryState) {
+                if (nextMondaiFailed || this.showNextButtonRetryState) {
                     btnNext.disabled = false;
                     btnNext.innerHTML = '<span class="loading-spinner"><i class="fa-solid fa-rotate-right"></i></span> Lỗi tải tiếp';
                     btnNext.onclick = (e) => {
                         e.preventDefault();
-                        this.retryFetchNextMondai(targetGroupId);
+                        this.retryFetchNextMondai(nextEntry.group_id);
                     };
                 } else {
                     btnNext.disabled = true;
-                    btnNext.innerHTML = '> <span class="loading-spinner"><i class="fa-solid fa-spinner fa-spin"></i> Đang tải tiếp...</span>';
+                    btnNext.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
                     btnNext.onclick = null;
-
-                    if (!this.activeLoaders.has(targetGroupId)) {
-                        this.retryFetchNextMondai(targetGroupId);
-                    }
+                    this.pumpSlotRequests();
 
                     if (!this.nextLoadFailTimer) {
                         this.nextLoadFailTimer = setTimeout(() => {
@@ -2859,7 +2869,7 @@
 
             const loadingIndicator = $('#nav-loading-indicator');
             if (loadingIndicator) {
-                if (!nextMondaiLoaded && globalIndex < totalMondaiFromSpec - 1 && canRequestMore) {
+                if (!nextMondaiLoaded && !isLast && canRequestMore) {
                     loadingIndicator.classList.remove('hidden');
                 } else {
                     loadingIndicator.classList.add('hidden');
@@ -3080,11 +3090,7 @@
                     const content = document.querySelector('.test-content');
                     if (content) content.scrollTo({ top: 0, behavior: 'smooth' });
 
-                    // Pre-fetch next group's chunk unconditionally via deduplicator
-                    const targetGroup = State.test.groups[newGroupIndex];
-                    if (targetGroup && targetGroup.group_id && !this.activeLoaders.has(targetGroup.group_id) && !this.completedGroups.has(targetGroup.group_id)) {
-                        this.retryFetchNextMondai(targetGroup.group_id);
-                    }
+                    this.pumpSlotRequests();
                     return;
                 }
             }
@@ -3116,6 +3122,7 @@
                 if (content) {
                     content.scrollTo({ top: 0, behavior: 'smooth' });
                 }
+                this.pumpSlotRequests();
             }
         },
 
