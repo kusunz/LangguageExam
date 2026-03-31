@@ -12,6 +12,19 @@ const path = require('path');
 const crypto = require('crypto');
 const { createRemoteJWKSet, jwtVerify } = require('jose');
 const db = require('./db');
+const {
+  getTemporaryUnavailablePayload,
+  isTemporaryUnavailableError,
+  runJsonTask
+} = require('./providers/llm-router');
+const {
+  scheduleEmbeddingBackfill,
+  scheduleMondaiEmbedding
+} = require('./providers/embeddings');
+const {
+  recordServedMondaiHistory,
+  selectMondaiFromBucket
+} = require('./exam-history');
 // DB connection is managed via db.js exports.
 // We strictly use:
 // DB_MODE='neon' -> fail fast, no fallback
@@ -48,6 +61,7 @@ app.use((err, req, res, next) => {
   }
   next();
 });
+app.use(express.static(path.join(__dirname, '../web/public')));
 app.use(express.static(path.join(__dirname, '../web')));
 
 // Rate limiting
@@ -633,6 +647,7 @@ async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
   // NOTE: No preroll here - on-demand generation in buildExamBlueprint handles missing items
   // This ensures /api/exam/start returns quickly without blocking Gemini calls
 
+  scheduleEmbeddingBackfill(db);
   return snapshotId;
 }
 
@@ -640,48 +655,48 @@ async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
  * Batch generate mondai to fill a bucket
  */
 async function generateMondaiForBucket(params) {
-  const { examSpec, level, mode, group, mondaiDef, bucketKey, snapshotId, count, plan } = params;
+  const { examSpec, level, mode, group, mondaiDef, bucketKey, snapshotId, count } = params;
 
   let remaining = Math.max(0, Number(count) || 0);
   if (remaining === 0) return;
 
   while (remaining > 0) {
-    // Generate in batches to save LLM calls (up to 3 variants per call)
     const batchSize = Math.min(remaining, 3);
     const mondaiBatch = Array(batchSize).fill(mondaiDef);
-
     const prompt = buildMondaiChunkPrompt(examSpec, mode, group, 0, mondaiBatch, 0, []);
 
     try {
-      const result = await callGemini(prompt, { temperature: 0.8, proOnly: false, plan });
-      const mondaiList = Array.isArray(result?.mondai) ? result.mondai : [];
+      const generation = await runJsonTask({
+        task: 'generate',
+        prompt,
+        validateResult: validateMondaiChunkResult,
+        maxTokens: 8192,
+        temperature: 0.8
+      });
+      const mondaiList = Array.isArray(generation?.result?.mondai) ? generation.result.mondai : [];
 
       if (mondaiList.length === 0) {
-        // Prevent infinite loop if model structure fails
         remaining -= 1;
         continue;
       }
 
-      for (const m of mondaiList) {
+      for (const mondai of mondaiList) {
         if (remaining <= 0) break;
-        // Normalize and hash
-        m.mondai_id = mondaiDef.mondai_id; // Ensure ID matches
-        m.primary_type = mondaiDef.types[0];
 
-        const hash = generateMondaiHash(m);
+        mondai.mondai_id = mondaiDef.mondai_id;
+        mondai.primary_type = mondaiDef.types[0];
 
-        // Extract item_type and estimated cost
-        const itemType = m.mondai_type || mondaiDef.mondai_type || 'unknown';
+        const hash = generateMondaiHash(mondai);
+        const itemType = mondai.mondai_type || mondaiDef.mondai_type || mondaiDef.types?.[0] || 'unknown';
         const estimatedCost = mondaiDef.estimated_seconds || 60;
-
-        // Save to Bank with all required columns
-        await db.query(`
+        const insertRes = await db.query(`
             INSERT INTO mondai_bank (
-              hash, exam_id, level, group_id, mondai_id, 
+              hash, exam_id, level, group_id, mondai_id,
               primary_type, item_type, estimated_cost, content, meta
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
             ON CONFLICT (hash) DO NOTHING
+            RETURNING hash
           `, [
           hash,
           examSpec.exam_id,
@@ -691,21 +706,31 @@ async function generateMondaiForBucket(params) {
           mondaiDef.types[0],
           itemType,
           estimatedCost,
-          JSON.stringify(m),
-          JSON.stringify({ mode, generated_at: new Date().toISOString() })
+          JSON.stringify(mondai),
+          JSON.stringify({
+            mode,
+            generated_at: new Date().toISOString(),
+            llm_provider: formatLlmProviderLabel(generation.meta)
+          })
         ]);
 
-        // Link to Bucket with ON CONFLICT (more efficient than WHERE NOT EXISTS)
         await db.query(`
             INSERT INTO pool_snapshot_items (snapshot_id, bucket_key, mondai_hash, group_id)
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (snapshot_id, bucket_key, mondai_hash) DO NOTHING
           `, [snapshotId, bucketKey, hash, group.group_id]);
 
-        remaining--;
+        if (insertRes.rows?.length > 0) {
+          scheduleMondaiEmbedding(db, hash, mondai);
+        }
+
+        remaining -= 1;
       }
-    } catch (e) {
-      console.error('Pool generation error:', e?.message || e);
+    } catch (error) {
+      console.error('Pool generation error:', error?.message || error);
+      if (isTemporaryUnavailableError(error)) {
+        throw error;
+      }
       remaining -= 1;
     }
   }
@@ -788,6 +813,9 @@ async function warmPool(snapshotId, examSpec, level, mode, dateYmd, opts = {}) {
         generated += count;
       } catch (e) {
         console.error(`[Warmup] Error generating for ${bucketKey}:`, e?.message || e);
+        if (isTemporaryUnavailableError(e)) {
+          throw e;
+        }
         break;
       }
     }
@@ -801,8 +829,10 @@ async function warmPool(snapshotId, examSpec, level, mode, dateYmd, opts = {}) {
 /**
  * Build determinisic exam from pool
  */
-async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snapshotId) {
+async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snapshotId, selectionOptions = {}) {
   if (!snapshotId) throw new Error('Snapshot required');
+
+  const { userId = null, allowRepeat = false } = selectionOptions;
 
   // Seedable RNG
   const rngSeed = `${seed}-${setNo}`;
@@ -853,7 +883,7 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
       try {
         let hash;
         try {
-          hash = await sampleMondaiFromBucket(snapshotId, bucketKey, rng, Array.from(usedHashes));
+          hash = await sampleMondaiFromBucket(snapshotId, bucketKey, rng, Array.from(usedHashes), { userId, allowRepeat, level, primaryType: mondaiDef.types?.[0] || null });
         } catch (e) {
           // On-demand generation if bucket empty/exhausted
           // Log only important event
@@ -866,7 +896,7 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
           });
 
           // Retry sampling (if this fails, we skip this slot)
-          hash = await sampleMondaiFromBucket(snapshotId, bucketKey, rng, Array.from(usedHashes));
+          hash = await sampleMondaiFromBucket(snapshotId, bucketKey, rng, Array.from(usedHashes), { userId, allowRepeat, level, primaryType: mondaiDef.types?.[0] || null });
         }
 
         usedHashes.add(hash);
@@ -882,6 +912,10 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
           delivery_mode: isReading ? 'whole' : 'flexible'
         });
       } catch (e) {
+        if (isTemporaryUnavailableError(e)) {
+          throw e;
+        }
+
         // Soft fail for individual slots if generation fails
         console.warn(`Failed to fill slot for ${bucketKey} after retry:`, e.message);
       }
@@ -966,21 +1000,17 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
   return blueprint;
 }
 
-async function sampleMondaiFromBucket(snapshotId, bucketKey, rng, usedHashes) {
-  const used = Array.isArray(usedHashes) ? new Set(usedHashes) : new Set();
-
-  const res = await db.query(`
-    SELECT mondai_hash
-    FROM pool_snapshot_items
-    WHERE snapshot_id=$1 AND bucket_key=$2
-  `, [snapshotId, bucketKey]);
-
-  const available = (res.rows || []).filter((r) => r?.mondai_hash && !used.has(r.mondai_hash));
-  if (available.length === 0) throw new Error('Bucket empty or exhausted');
-
-  const x = rng();
-  const clamped = Math.max(0, Math.min(0.999999, Number.isFinite(x) ? x : 0));
-  return available[Math.floor(clamped * available.length)].mondai_hash;
+async function sampleMondaiFromBucket(snapshotId, bucketKey, rng, usedHashes, options = {}) {
+  return selectMondaiFromBucket(db, {
+    snapshotId,
+    bucketKey,
+    rng,
+    usedHashes,
+    userId: options.userId || null,
+    allowRepeat: !!options.allowRepeat,
+    level: options.level || null,
+    primaryType: options.primaryType || null
+  });
 }
 
 // ============ LLM Endpoints ============
@@ -1216,6 +1246,76 @@ function validateGroupResult(group) {
   return errors;
 }
 
+function validateGeneratedTestResult(testData) {
+  const errors = [];
+  if (!testData || typeof testData !== 'object') return ['test_not_object'];
+  if (!testData.meta || typeof testData.meta !== 'object') errors.push('missing_meta');
+  if (!Array.isArray(testData.groups) || testData.groups.length === 0) errors.push('missing_groups');
+  if (!Array.isArray(testData.groups)) return errors;
+
+  testData.groups.forEach((group, index) => {
+    const groupErrors = validateGroupResult(group);
+    groupErrors.forEach((error) => errors.push(`group_${index}:${error}`));
+  });
+
+  return errors;
+}
+
+function validateMondaiChunkResult(result) {
+  const errors = [];
+  if (!result || typeof result !== 'object') return ['chunk_not_object'];
+  if (!Array.isArray(result.mondai) || result.mondai.length === 0) errors.push('missing_mondai');
+  if (!Array.isArray(result.mondai)) return errors;
+
+  result.mondai.forEach((mondai, index) => {
+    if (!mondai || typeof mondai !== 'object') {
+      errors.push(`mondai_${index}_not_object`);
+      return;
+    }
+    if (!mondai.mondai_id || typeof mondai.mondai_id !== 'string') errors.push(`mondai_${index}_missing_mondai_id`);
+    if (!mondai.title_vi || typeof mondai.title_vi !== 'string') errors.push(`mondai_${index}_missing_title_vi`);
+    if (!Array.isArray(mondai.items) || mondai.items.length === 0) errors.push(`mondai_${index}_missing_items`);
+
+    if (Array.isArray(mondai.items)) {
+      mondai.items.forEach((item, itemIndex) => {
+        const itemErrors = validateQuestionItem(item);
+        if (itemErrors.length > 0) {
+          errors.push(`mondai_${index}_item_${itemIndex}:${itemErrors.join(',')}`);
+        }
+      });
+    }
+  });
+
+  return errors;
+}
+
+function validateExplanationResult(result) {
+  const errors = [];
+  if (!result || typeof result !== 'object') return ['result_not_object'];
+  if (!result.explanations || typeof result.explanations !== 'object') errors.push('missing_explanations');
+  if (result?.explanations && typeof result.explanations === 'object') {
+    Object.entries(result.explanations).forEach(([key, value]) => {
+      if (typeof value !== 'string' || value.trim() === '') {
+        errors.push(`invalid_explanation:${key}`);
+      }
+    });
+  }
+  return errors;
+}
+
+function formatLlmProviderLabel(meta) {
+  if (!meta?.provider) return 'llm-router';
+  return meta.model ? `${meta.provider}:${meta.model}` : meta.provider;
+}
+
+function handleLlmEndpointFailure(res, error, fallbackMessage) {
+  if (isTemporaryUnavailableError(error)) {
+    return res.status(503).json(getTemporaryUnavailablePayload(error));
+  }
+
+  return res.status(500).json({ error: fallbackMessage });
+}
+
 function buildFixGroupPrompt(examSpec, mode, group, groupIndex, errors) {
   return `You are fixing a JSON output for a ${examSpec.display_name_vi} practice test group.
 
@@ -1429,79 +1529,58 @@ async function callGemini(prompt, options = {}) {
 }
 
 async function generateGroupWithIntegrity(examSpec, mode, group, groupIndex, options = {}) {
-  const model = options.model || DEFAULT_GEMINI_MODEL;
   const maxTokens = options.maxTokens || 16384;
   const temperature = typeof options.temperature === 'number' ? options.temperature : 0.4;
-
   const prompt = buildGenerateGroupPrompt(examSpec, mode, group, groupIndex);
-  // Use Pro-only models for high-quality generation (no Flash fallback)
-  const first = await callGemini(prompt, { model, maxTokens, temperature, proOnly: true });
-  const errors1 = validateGroupResult(first);
-  if (errors1.length === 0) return first;
 
-  const fixPrompt = buildFixGroupPrompt(examSpec, mode, first, groupIndex, errors1);
-  const fixed = await callGemini(fixPrompt, { model, maxTokens: Math.min(8192, maxTokens), temperature: 0, proOnly: true });
-  const errors2 = validateGroupResult(fixed);
-  if (errors2.length === 0) return fixed;
-
-  const hardFail = new Error(`Group validation failed after fix: ${errors2.slice(0, 10).join(' | ')}`);
-  hardFail.validationErrors = errors2;
-  throw hardFail;
+  return runJsonTask({
+    task: 'generate',
+    prompt,
+    validateResult: validateGroupResult,
+    maxTokens,
+    temperature
+  });
 }
 
 // Generate test
 app.post('/api/generate-test', authMiddleware, async (req, res) => {
   try {
-    const { examSpec, mode, provider, userHistory, model } = req.body;
-    const llmProvider = provider || process.env.DEFAULT_LLM_PROVIDER || 'gemini';
-
+    const { examSpec, mode, userHistory } = req.body;
     const prompt = buildGenerateTestPrompt(examSpec, mode, userHistory);
+    const generation = await runJsonTask({
+      task: 'generate',
+      prompt,
+      validateResult: validateGeneratedTestResult,
+      maxTokens: 16384,
+      temperature: 0.4
+    });
 
-    let result;
-    if (llmProvider === 'openai') {
-      result = await callOpenAI([{ role: 'user', content: prompt }]);
-    } else {
-      result = await callGemini(prompt, { model: model || DEFAULT_GEMINI_MODEL, maxTokens: 16384, temperature: 0.4 });
-    }
-
-    // Async save generated questions to Knowledge Bank
-    saveQuestionsFromTest(result).catch(e => console.error('Bank save error:', e));
-
-    res.json(result);
+    saveQuestionsFromTest(generation.result).catch((error) => console.error('Bank save error:', error));
+    res.json(generation.result);
   } catch (err) {
     console.error('Generate test error:', err);
     log('ERROR', 'Generate test failed', { error: err.message, stack: err.stack?.substring(0, 500) });
-    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại sau.' });
+    return handleLlmEndpointFailure(res, err, 'Lỗi máy chủ. Vui lòng thử lại sau.');
   }
 });
 
 // Generate a single group (for progressive loading)
 app.post('/api/generate-group', authMiddleware, async (req, res) => {
   try {
-    const { examSpec, mode, groupIndex, provider, existingMeta, model } = req.body;
-    const llmProvider = provider || process.env.DEFAULT_LLM_PROVIDER || 'gemini';
-
+    const { examSpec, mode, groupIndex } = req.body;
     const group = examSpec.groups[groupIndex];
     if (!group) {
       return res.status(400).json({ error: 'Invalid group index' });
     }
 
-    let result;
-    if (llmProvider === 'openai') {
-      const prompt = buildGenerateGroupPrompt(examSpec, mode, group, groupIndex);
-      result = await callOpenAI([{ role: 'user', content: prompt }]);
-    } else {
-      result = await generateGroupWithIntegrity(examSpec, mode, group, groupIndex, {
-        model: model || DEFAULT_GEMINI_MODEL,
-        maxTokens: 16384,
-        temperature: 0.4
-      });
-    }
+    const generation = await generateGroupWithIntegrity(examSpec, mode, group, groupIndex, {
+      maxTokens: 16384,
+      temperature: 0.4
+    });
+    const result = generation.result;
 
-    // Async save generated questions (group) to Knowledge Bank
-    saveQuestionsFromTest({ groups: [result] }).catch(e => console.error('Bank save error group:', e));
+    saveQuestionsFromTest({ groups: [result] }).catch((error) => console.error('Bank save error group:', error));
 
-    // If this is the first group (groupIndex === 0), include metadata
     if (groupIndex === 0) {
       const modeConfig = examSpec.modes[mode];
       const timeScale = modeConfig.time_scale;
@@ -1510,15 +1589,15 @@ app.post('/api/generate-group', authMiddleware, async (req, res) => {
         exam_id: examSpec.exam_id,
         level: examSpec.level,
         language: examSpec.language,
-        mode: mode,
+        mode,
         seed: Math.random().toString(36).substring(7),
         generated_at: new Date().toISOString(),
-        providers: { llm: llmProvider, tts_mode: 'auto' },
+        providers: { llm: formatLlmProviderLabel(generation.meta), tts_mode: 'auto' },
         time_limits: {
           overall_sec: Math.round(examSpec.official_time_limits_sec.overall_time_sec * timeScale),
-          groups: examSpec.official_time_limits_sec.groups.map(g => ({
-            group_id: g.group_id,
-            time_sec: Math.round(g.time_sec * timeScale)
+          groups: examSpec.official_time_limits_sec.groups.map((entry) => ({
+            group_id: entry.group_id,
+            time_sec: Math.round(entry.time_sec * timeScale)
           }))
         }
       };
@@ -1528,7 +1607,7 @@ app.post('/api/generate-group', authMiddleware, async (req, res) => {
   } catch (err) {
     console.error('Generate group error:', err);
     log('ERROR', 'Generate group failed', { error: err.message, stack: err.stack?.substring(0, 500) });
-    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại sau.' });
+    return handleLlmEndpointFailure(res, err, 'Lỗi máy chủ. Vui lòng thử lại sau.');
   }
 });
 
@@ -1537,16 +1616,14 @@ app.post('/api/generate-mondai-chunk', authMiddleware, async (req, res) => {
   try {
     const {
       examSpec, mode, groupIndex, chunkIndex, chunkSize = 3,
-      previousMondai = [], provider, model
+      previousMondai = []
     } = req.body;
-    const llmProvider = provider || process.env.DEFAULT_LLM_PROVIDER || 'gemini';
 
     const group = examSpec.groups[groupIndex];
     if (!group) {
       return res.status(400).json({ error: 'Invalid group index' });
     }
 
-    // Calculate which mondai to generate in this chunk
     const startMondaiIndex = chunkIndex * chunkSize;
     const endMondaiIndex = Math.min(startMondaiIndex + chunkSize, group.mondai.length);
     const mondaiToGenerate = group.mondai.slice(startMondaiIndex, endMondaiIndex);
@@ -1557,39 +1634,24 @@ app.post('/api/generate-mondai-chunk', authMiddleware, async (req, res) => {
 
     const isLast = endMondaiIndex >= group.mondai.length;
     const isFirst = chunkIndex === 0;
+    const prompt = buildMondaiChunkPrompt(
+      examSpec,
+      mode,
+      group,
+      groupIndex,
+      mondaiToGenerate,
+      startMondaiIndex,
+      previousMondai
+    );
+    const generation = await runJsonTask({
+      task: 'generate',
+      prompt,
+      validateResult: validateMondaiChunkResult,
+      maxTokens: 8192,
+      temperature: 0.4
+    });
+    const validatedMondai = Array.isArray(generation?.result?.mondai) ? generation.result.mondai : [];
 
-    let result;
-    if (llmProvider === 'openai') {
-      const prompt = buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGenerate, startMondaiIndex, previousMondai);
-      result = await callOpenAI([{ role: 'user', content: prompt }]);
-    } else {
-      const prompt = buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGenerate, startMondaiIndex, previousMondai);
-      result = await callGemini(prompt, {
-        model: model || DEFAULT_GEMINI_MODEL,
-        maxTokens: 8192, // Smaller chunks need less tokens
-        temperature: 0.4,
-        proOnly: true
-      });
-    }
-
-    // Validate mondai items
-    const validatedMondai = [];
-    if (result.mondai && Array.isArray(result.mondai)) {
-      for (const m of result.mondai) {
-        const errors = [];
-        if (!m.mondai_id) errors.push('missing_mondai_id');
-        if (!m.title_vi) errors.push('missing_title_vi');
-        if (!Array.isArray(m.items) || m.items.length === 0) errors.push('missing_items');
-
-        if (errors.length === 0) {
-          validatedMondai.push(m);
-        } else {
-          log('WARN', `Mondai validation issues: ${errors.join(', ')}`);
-        }
-      }
-    }
-
-    // Response with chunk info
     const response = {
       mondai: validatedMondai,
       chunkIndex,
@@ -1599,7 +1661,6 @@ app.post('/api/generate-mondai-chunk', authMiddleware, async (req, res) => {
       generatedCount: validatedMondai.length
     };
 
-    // Include group metadata and meta on first chunk
     if (isFirst) {
       response.group_id = group.group_id;
       response.title_vi = group.title_vi;
@@ -1611,30 +1672,29 @@ app.post('/api/generate-mondai-chunk', authMiddleware, async (req, res) => {
           exam_id: examSpec.exam_id,
           level: examSpec.level,
           language: examSpec.language,
-          mode: mode,
+          mode,
           seed: Math.random().toString(36).substring(7),
           generated_at: new Date().toISOString(),
-          providers: { llm: llmProvider, tts_mode: 'auto' },
+          providers: { llm: formatLlmProviderLabel(generation.meta), tts_mode: 'auto' },
           time_limits: {
             overall_sec: Math.round(examSpec.official_time_limits_sec.overall_time_sec * timeScale),
-            groups: examSpec.official_time_limits_sec.groups.map(g => ({
-              group_id: g.group_id,
-              time_sec: Math.round(g.time_sec * timeScale)
+            groups: examSpec.official_time_limits_sec.groups.map((entry) => ({
+              group_id: entry.group_id,
+              time_sec: Math.round(entry.time_sec * timeScale)
             }))
           }
         };
       }
     }
 
-    // Async save generated questions to Knowledge Bank
-    saveQuestionsFromTest({ groups: [{ mondai: validatedMondai }] }).catch(e => console.error('Bank save error chunk:', e));
+    saveQuestionsFromTest({ groups: [{ mondai: validatedMondai }] }).catch((error) => console.error('Bank save error chunk:', error));
 
-    // SECURITY: Replace answer_index with answer_hash
     const hashedResponse = hashifyAnswers(response);
 
     log('INFO', `Generated mondai chunk ${chunkIndex + 1}`, {
       groupIndex: groupIndex + 1,
       mondaiCount: validatedMondai.length,
+      provider: formatLlmProviderLabel(generation.meta),
       security: 'answer_hash'
     });
 
@@ -1642,10 +1702,9 @@ app.post('/api/generate-mondai-chunk', authMiddleware, async (req, res) => {
   } catch (err) {
     console.error('Generate mondai chunk error:', err);
     log('ERROR', 'Generate mondai chunk failed', { error: err.message, stack: err.stack?.substring(0, 500) });
-    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại sau.' });
+    return handleLlmEndpointFailure(res, err, 'Lỗi máy chủ. Vui lòng thử lại sau.');
   }
 });
-
 
 // Answer Verification Endpoint (for client-side quick grading)
 app.post('/api/verify-answer', authMiddleware, verifyAnswerLimiter, (req, res) => {
@@ -1675,8 +1734,7 @@ app.post('/api/verify-answer', authMiddleware, verifyAnswerLimiter, (req, res) =
 
 app.post('/api/grade-test', authMiddleware, async (req, res) => {
   try {
-    const { test, answers, provider, instanceKey } = req.body;
-    const llmProvider = provider || process.env.DEFAULT_LLM_PROVIDER || 'gemini';
+    const { test, answers, instanceKey } = req.body;
 
     // ======== V2 Branch: instanceKey present ========
     if (instanceKey && await db.initDb()) {
@@ -1688,12 +1746,9 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
       if (inst.rows[0].user_id !== req.user.userId) return res.status(403).json({ error: 'Unauthorized' });
 
       const blueprint = parseJsonb(inst.rows[0].blueprint);
-
-      // Compute answers hash for caching (includes instanceKey for uniqueness)
       const sortedAnswers = JSON.stringify(Object.entries(answers || {}).sort());
       const answersHash = crypto.createHash('sha256').update(instanceKey + sortedAnswers).digest('hex');
 
-      // Check cache: if same answers were graded before, return cached result
       const cachedAttempt = await db.query(
         'SELECT summary FROM attempts WHERE instance_key=$1 AND user_id=$2 AND answers_hash=$3 AND summary IS NOT NULL',
         [instanceKey, req.user.userId, answersHash]
@@ -1707,20 +1762,18 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
         }
       }
 
-      // Batch fetch all mondai content
       const allHashes = [];
-      blueprint.groups.forEach(g => g.mondai_slots.forEach(s => allHashes.push(s.mondai_hash)));
+      blueprint.groups.forEach((group) => group.mondai_slots.forEach((slot) => allHashes.push(slot.mondai_hash)));
       const contentRes = await db.query(
         'SELECT hash, content FROM mondai_bank WHERE hash = ANY($1)',
         [allHashes]
       );
 
-      // Build question map: { qId: { correct_index, prompt, choices, tags, mondai_context } }
       const questionMap = {};
-      contentRes.rows.forEach(row => {
-        const m = parseJsonb(row.content);
-        if (m.items) {
-          m.items.forEach(item => {
+      contentRes.rows.forEach((row) => {
+        const mondai = parseJsonb(row.content);
+        if (mondai.items) {
+          mondai.items.forEach((item) => {
             if (item.id && item.answer_index !== undefined) {
               questionMap[item.id] = {
                 correct_index: item.answer_index,
@@ -1728,65 +1781,61 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
                 choices: item.choices,
                 tags: item.tags || [],
                 explain_brief: item.explain_brief || '',
-                passage: m.passage || ''
+                passage: mondai.passage || ''
               };
             }
           });
         }
       });
 
-      // Deterministic grade
       let correctCount = 0;
       let totalCount = 0;
       const byQuestion = [];
       const wrongQuestions = [];
-      // Validate all submitted questionIds belong to this exam instance
       const submittedIds = Object.keys(answers || {});
-      const invalidIds = submittedIds.filter(id => !questionMap[id]);
+      const invalidIds = submittedIds.filter((id) => !questionMap[id]);
       if (invalidIds.length > 0) {
         return res.status(400).json({
           error: 'Invalid question IDs',
-          invalid: invalidIds.slice(0, 10) // Cap to avoid data leak
+          invalid: invalidIds.slice(0, 10)
         });
       }
 
-      for (const [qId, userAns] of Object.entries(answers || {})) {
-        const q = questionMap[qId];
-        if (!q) continue; // Already validated above, but defensive
+      for (const [questionId, userAnswer] of Object.entries(answers || {})) {
+        const question = questionMap[questionId];
+        if (!question) continue;
 
-        totalCount++;
-        const isCorrect = userAns === q.correct_index;
-        if (isCorrect) correctCount++;
+        totalCount += 1;
+        const isCorrect = userAnswer === question.correct_index;
+        if (isCorrect) correctCount += 1;
 
-        const qResult = {
-          id: qId,
+        const questionResult = {
+          id: questionId,
           is_correct: isCorrect,
-          user_answer_index: userAns,
-          correct_index: q.correct_index,
-          prompt: q.prompt,
-          choices: q.choices,
-          tags: q.tags,
-          key_point_vi: q.explain_brief
+          user_answer_index: userAnswer,
+          correct_index: question.correct_index,
+          prompt: question.prompt,
+          choices: question.choices,
+          tags: question.tags,
+          key_point_vi: question.explain_brief
         };
 
-        byQuestion.push(qResult);
+        byQuestion.push(questionResult);
 
         if (!isCorrect) {
           wrongQuestions.push({
-            id: qId,
-            prompt: q.prompt,
-            choices: q.choices,
-            user_answer: userAns !== null && userAns !== undefined ? q.choices[userAns] : '(chưa trả lời)',
-            correct_answer: q.choices[q.correct_index],
-            passage_snippet: q.passage ? shortText(q.passage) : ''
+            id: questionId,
+            prompt: question.prompt,
+            choices: question.choices,
+            user_answer: userAnswer !== null && userAnswer !== undefined ? question.choices[userAnswer] : '(chưa trả lời)',
+            correct_answer: question.choices[question.correct_index],
+            passage_snippet: question.passage ? shortText(question.passage) : ''
           });
         }
       }
 
-      // AI explanation for wrong questions only (if any)
       if (wrongQuestions.length > 0) {
-        try {
-          const wrongPrompt = `Bạn là gia sư JLPT. Giải thích ngắn gọn bằng tiếng Việt cho ${wrongQuestions.length} câu sai.
+        const wrongPrompt = `Bạn là gia sư JLPT. Giải thích ngắn gọn bằng tiếng Việt cho ${wrongQuestions.length} câu sai.
 Trả lời JSON: { "explanations": { "<question_id>": "<giải thích 1-2 câu>" } }
 
 ${wrongQuestions.map((wq, idx) => `[Câu ${idx + 1}] id="${wq.id}"
@@ -1794,25 +1843,20 @@ ${wrongQuestions.map((wq, idx) => `[Câu ${idx + 1}] id="${wq.id}"
 Đáp án đúng: ${wq.correct_answer}
 Thí sinh chọn: ${wq.user_answer}
 ${wq.passage_snippet ? `Ngữ cảnh: ${wq.passage_snippet}...` : ''}`).join('\n\n')}`;
+        const explanationResult = await runJsonTask({
+          task: 'explain',
+          prompt: wrongPrompt,
+          validateResult: validateExplanationResult,
+          maxTokens: 4096,
+          temperature: 0.2
+        });
 
-          let aiResult;
-          if (llmProvider === 'openai') {
-            aiResult = await callOpenAI([{ role: 'user', content: wrongPrompt }]);
-          } else {
-            aiResult = await callGemini(wrongPrompt);
+        const explanations = explanationResult?.result?.explanations || {};
+        byQuestion.forEach((question) => {
+          if (explanations[question.id]) {
+            question.key_point_vi = explanations[question.id];
           }
-
-          // Merge explanations into byQuestion
-          const explanations = aiResult?.explanations || {};
-          byQuestion.forEach(q => {
-            if (explanations[q.id]) {
-              q.key_point_vi = explanations[q.id];
-            }
-          });
-        } catch (aiErr) {
-          console.error('[Grade V2] AI explanation failed (non-fatal):', aiErr.message);
-          // Continue without AI explanations - deterministic grade is the fallback
-        }
+        });
       }
 
       const result = {
@@ -1820,7 +1864,11 @@ ${wq.passage_snippet ? `Ngữ cảnh: ${wq.passage_snippet}...` : ''}`).join('\n
           total_score: correctCount,
           max_score: totalCount,
           percentage: totalCount ? Math.round(correctCount / totalCount * 100) : 0,
-          weak_tags: byQuestion.filter(q => !q.is_correct).flatMap(q => q.tags || []).filter((v, i, a) => a.indexOf(v) === i).slice(0, 10),
+          weak_tags: byQuestion
+            .filter((question) => !question.is_correct)
+            .flatMap((question) => question.tags || [])
+            .filter((value, index, array) => array.indexOf(value) === index)
+            .slice(0, 10),
           recommendation_vi: correctCount >= totalCount * 0.7
             ? 'Kết quả tốt! Tiếp tục luyện tập để cải thiện.'
             : 'Cần ôn tập thêm các phần còn yếu.'
@@ -1830,10 +1878,9 @@ ${wq.passage_snippet ? `Ngữ cảnh: ${wq.passage_snippet}...` : ''}`).join('\n
         cached: false
       };
 
-      // Persist to attempts with answers_hash + ai_grade for caching
       const summaryJson = JSON.stringify(result);
       await db.query(`
-        UPDATE attempts 
+        UPDATE attempts
         SET status='graded', summary=$3, answers_hash=$4, ai_grade=$5, submitted_at=NOW()
         WHERE user_id=$1 AND instance_key=$2
       `, [req.user.userId, instanceKey, summaryJson, answersHash, summaryJson]);
@@ -1843,15 +1890,14 @@ ${wq.passage_snippet ? `Ngữ cảnh: ${wq.passage_snippet}...` : ''}`).join('\n
 
     // ======== V1 Legacy: full test object ========
     const prompt = buildGradeTestPrompt(test, answers);
+    const grading = await runJsonTask({
+      task: 'explain',
+      prompt,
+      maxTokens: 16384,
+      temperature: 0.2
+    });
+    const result = grading.result;
 
-    let result;
-    if (llmProvider === 'openai') {
-      result = await callOpenAI([{ role: 'user', content: prompt }]);
-    } else {
-      result = await callGemini(prompt);
-    }
-
-    // Save to Exam Results Table
     try {
       await db.query(
         'INSERT INTO exam_results (user_id, exam_id, score, summary, data) VALUES ($1, $2, $3, $4, $5)',
@@ -1861,7 +1907,6 @@ ${wq.passage_snippet ? `Ngữ cảnh: ${wq.passage_snippet}...` : ''}`).join('\n
       console.error('Failed to save exam result to DB:', dbErr);
     }
 
-    // Update User History
     try {
       const userData = await loadUserData(req.user.userId, req.user.email);
       userData.history = userData.history || [];
@@ -1879,32 +1924,35 @@ ${wq.passage_snippet ? `Ngữ cảnh: ${wq.passage_snippet}...` : ''}`).join('\n
       console.error('Failed to update user history:', histErr);
     }
 
-    res.json(result);
+    return res.json(result);
   } catch (err) {
     console.error('Grade test error:', err);
-    res.status(500).json({ error: 'Failed to grade test: ' + err.message });
+    if (isTemporaryUnavailableError(err)) {
+      return res.status(503).json(getTemporaryUnavailablePayload(err));
+    }
+    return res.status(500).json({ error: 'Failed to grade test: ' + err.message });
   }
 });
 
 // Prepare TTS text
 app.post('/api/prepare-tts-text', authMiddleware, async (req, res) => {
   try {
-    const { text, language, provider } = req.body;
-    const llmProvider = provider || process.env.DEFAULT_LLM_PROVIDER || 'gemini';
-
+    const { text, language } = req.body;
     const prompt = buildTtsTextPrompt(text, language);
+    const prepared = await runJsonTask({
+      task: 'explain',
+      prompt,
+      maxTokens: 4096,
+      temperature: 0.2
+    });
 
-    let result;
-    if (llmProvider === 'openai') {
-      result = await callOpenAI([{ role: 'user', content: prompt }]);
-    } else {
-      result = await callGemini(prompt);
-    }
-
-    res.json(result);
+    res.json(prepared.result);
   } catch (err) {
     console.error('TTS text prep error:', err);
-    res.status(500).json({ error: 'Failed to prepare TTS text: ' + err.message }).catch(console.error);
+    if (isTemporaryUnavailableError(err)) {
+      return res.status(503).json(getTemporaryUnavailablePayload(err));
+    }
+    return res.status(500).json({ error: 'Failed to prepare TTS text: ' + err.message });
   }
 });
 
@@ -2908,6 +2956,9 @@ app.get(['/api/admin/warmup', '/api/admin/warmup/:levelParam/:modeParam'], async
 
   } catch (err) {
     console.error('[Warmup] Error:', err);
+    if (isTemporaryUnavailableError(err)) {
+      return res.status(503).json(getTemporaryUnavailablePayload(err));
+    }
     res.status(500).json({ error: err.message });
   }
 });
@@ -3012,6 +3063,9 @@ app.post('/api/admin/warm-pool', async (req, res) => {
         generatedCount += needed;
       } catch (e) {
         console.error(`[WarmPool] Error generating for ${bucketKey}:`, e?.message || e);
+        if (isTemporaryUnavailableError(e)) {
+          throw e;
+        }
       }
       bucketsProcessed++;
     };
@@ -3057,6 +3111,9 @@ app.post('/api/admin/warm-pool', async (req, res) => {
 
   } catch (err) {
     console.error('[WarmPool] Error:', err);
+    if (isTemporaryUnavailableError(err)) {
+      return res.status(503).json(getTemporaryUnavailablePayload(err));
+    }
     res.status(500).json({ error: err.message });
   }
 });
@@ -3239,10 +3296,20 @@ async function deliverNextChunk(instanceKey, want) {
 // POST /api/exam/start
 app.post('/api/exam/start', authMiddleware, async (req, res) => {
   try {
-    const { examSpec, mode, setNo, force_new, resume, daily } = req.body;
+    const {
+      examSpec,
+      mode,
+      setNo,
+      force_new,
+      resume,
+      daily,
+      allow_repeat,
+      allowRepeat,
+      force_retake,
+      forceRetake
+    } = req.body;
     const userId = req.user.userId;
 
-    // Wait for DB initialization
     if (!(await db.initDb())) {
       return res.status(503).json({ error: 'DB unavailable for V2' });
     }
@@ -3250,18 +3317,17 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
     const user = await loadUserData(userId, req.user.email);
     const plan = user.plan || 'free';
     const level = examSpec.level || examSpec.default_level;
+    const repeatAllowed = !!(allow_repeat ?? allowRepeat ?? false);
+    const explicitRetake = !!(force_retake ?? forceRetake ?? false);
 
-    // Normalize Exam Spec (prevent crashes)
     if (!examSpec.modes) examSpec.modes = DEFAULT_MODES;
 
-    // Set No logic with backward-compatible options
     let finalSetNo = setNo;
-    let forceCreateNew = !!force_new;
+    let forceCreateNew = !!force_new || explicitRetake;
 
-    if (resume) {
-      // RESUME: Find latest unexpired instance
+    if (!explicitRetake && resume) {
       const latestRes = await db.query(
-        `SELECT set_no FROM exam_instances_cache 
+        `SELECT set_no FROM exam_instances_cache
          WHERE user_id=$1 AND exam_id=$2 AND level=$3 AND mode=$4 AND expires_at > NOW()
          ORDER BY created_at DESC LIMIT 1`,
         [userId, examSpec.exam_id, level, mode]
@@ -3273,7 +3339,6 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
     }
 
     if (finalSetNo === undefined && daily) {
-      // DAILY: Deterministic by date
       const today = new Date().toISOString().split('T')[0];
       const hash = crypto.createHash('sha256')
         .update(`${userId}-${level}-${mode}-${today}`)
@@ -3283,28 +3348,25 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
     }
 
     if (finalSetNo === undefined) {
-      // DEFAULT (no resume, no daily, no explicit setNo): always create new
       forceCreateNew = true;
     }
 
-    let instanceKey, blueprint;
+    let instanceKey;
+    let blueprint;
 
-    // Helper to fetch existing
     const fetchExisting = async (sn) => {
-      const res = await db.query(
+      const result = await db.query(
         'SELECT instance_key, blueprint FROM exam_instances_cache WHERE user_id=$1 AND exam_id=$2 AND level=$3 AND mode=$4 AND set_no=$5',
         [userId, examSpec.exam_id, level, mode, sn]
       );
-      return res.rows[0];
+      return result.rows[0];
     };
 
     if (forceCreateNew) {
-      // CREATE NEW with retry loop (concurrency-safe)
       const MAX_ATTEMPTS = 5;
       let created = false;
 
       for (let attempt = 0; attempt < MAX_ATTEMPTS && !created; attempt++) {
-        // Compute next set_no each iteration (handles 23505 retries)
         const maxRes = await db.query(
           'SELECT COALESCE(MAX(set_no), 0) + 1 AS next_set FROM exam_instances_cache WHERE user_id=$1 AND exam_id=$2 AND level=$3 AND mode=$4',
           [userId, examSpec.exam_id, level, mode]
@@ -3312,18 +3374,24 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
         finalSetNo = maxRes.rows[0].next_set;
         console.log(`[Exam] New set_no: ${finalSetNo} (attempt ${attempt + 1})`);
 
-        // Ensure Pool (fast/lazy)
         const today = new Date().toISOString().split('T')[0];
         const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
-
-        // Build Blueprint
         const seed = crypto.randomUUID();
-        const newBlueprint = await buildExamBlueprint(examSpec, level, mode, seed, finalSetNo, plan, snapshotId);
+        const newBlueprint = await buildExamBlueprint(
+          examSpec,
+          level,
+          mode,
+          seed,
+          finalSetNo,
+          plan,
+          snapshotId,
+          { userId, allowRepeat: repeatAllowed || explicitRetake }
+        );
         const newInstanceKey = crypto.randomUUID();
 
         try {
           await db.query(`
-            INSERT INTO exam_instances_cache 
+            INSERT INTO exam_instances_cache
             (instance_key, user_id, exam_id, level, mode, plan, seed, set_no, blueprint, delivery_state, answer_keys)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
           `, [
@@ -3332,6 +3400,12 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
             JSON.stringify({ cursors: {} }),
             JSON.stringify({})
           ]);
+
+          await recordServedMondaiHistory(db, {
+            userId,
+            instanceKey: newInstanceKey,
+            blueprint: newBlueprint
+          });
 
           instanceKey = newInstanceKey;
           blueprint = newBlueprint;
@@ -3348,15 +3422,12 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
 
       if (!created) throw new Error('Failed to create exam instance after max retries');
 
-      // Ensure attempt record exists
       await db.query(`
         INSERT INTO attempts (instance_key, user_id, status)
         VALUES ($1, $2, 'active')
         ON CONFLICT DO NOTHING
       `, [instanceKey, userId]);
-
     } else {
-      // REUSE or CREATE for resume/daily/explicit setNo
       const existingRow = await fetchExisting(finalSetNo);
 
       if (existingRow) {
@@ -3364,24 +3435,31 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
         instanceKey = existingRow.instance_key;
         blueprint = parseJsonb(existingRow.blueprint);
 
-        // Extend expiry AND RESET delivery state
         await db.query(`
-          UPDATE exam_instances_cache 
+          UPDATE exam_instances_cache
           SET expires_at = (CURRENT_TIMESTAMP + INTERVAL '3 days'),
               delivery_state = $2
           WHERE instance_key = $1
         `, [instanceKey, JSON.stringify({ cursors: {} })]);
       } else {
-        // Create new for this specific setNo (daily/explicit)
         const today = new Date().toISOString().split('T')[0];
         const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
         const seed = crypto.randomUUID();
-        const newBlueprint = await buildExamBlueprint(examSpec, level, mode, seed, finalSetNo, plan, snapshotId);
+        const newBlueprint = await buildExamBlueprint(
+          examSpec,
+          level,
+          mode,
+          seed,
+          finalSetNo,
+          plan,
+          snapshotId,
+          { userId, allowRepeat: repeatAllowed || explicitRetake }
+        );
         const newInstanceKey = crypto.randomUUID();
 
         try {
           await db.query(`
-            INSERT INTO exam_instances_cache 
+            INSERT INTO exam_instances_cache
             (instance_key, user_id, exam_id, level, mode, plan, seed, set_no, blueprint, delivery_state, answer_keys)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
           `, [
@@ -3391,17 +3469,24 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
             JSON.stringify({})
           ]);
 
+          await recordServedMondaiHistory(db, {
+            userId,
+            instanceKey: newInstanceKey,
+            blueprint: newBlueprint
+          });
+
           instanceKey = newInstanceKey;
           blueprint = newBlueprint;
         } catch (e) {
           if (e.code === '23505') {
-            // Race: someone else created it, reuse
             const winnerRow = await fetchExisting(finalSetNo);
             if (winnerRow) {
               instanceKey = winnerRow.instance_key;
               blueprint = parseJsonb(winnerRow.blueprint);
-              await db.query(`UPDATE exam_instances_cache SET delivery_state = $2 WHERE instance_key = $1`,
-                [instanceKey, JSON.stringify({ cursors: {} })]);
+              await db.query(
+                'UPDATE exam_instances_cache SET delivery_state = $2 WHERE instance_key = $1',
+                [instanceKey, JSON.stringify({ cursors: {} })]
+              );
             } else {
               throw e;
             }
@@ -3410,7 +3495,6 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
           }
         }
 
-        // Ensure attempt record
         await db.query(`
           INSERT INTO attempts (instance_key, user_id, status)
           VALUES ($1, $2, 'active')
@@ -3419,7 +3503,10 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
       }
     }
 
-    // First chunk (first 2 items of first group)
+    if (!blueprint?.groups?.[0]) {
+      throw new Error('Failed to build exam blueprint');
+    }
+
     const firstGroup = blueprint.groups[0];
     const firstChunk = await deliverNextChunk(instanceKey, {
       group_id: firstGroup.group_id,
@@ -3429,22 +3516,22 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
     res.json({
       instanceKey,
       manifest: {
-        groups: blueprint.groups.map(g => ({
-          group_id: g.group_id,
-          title_vi: g.title_vi,
-          expected_mondai_count: g.mondai_slots.length
+        groups: blueprint.groups.map((group) => ({
+          group_id: group.group_id,
+          title_vi: group.title_vi,
+          expected_mondai_count: group.mondai_slots.length
         }))
       },
       firstChunk: sanitizeMondaiForClient(firstChunk),
-      // Note: sanitizeMondaiForClient expects {mondai: []} or array. deliverNextChunk returns object with .mondai array
-      // wrapper needed:
       mondai: sanitizeMondaiForClient({ mondai: firstChunk.mondai }).mondai,
-      prefetchHints: [] // TODO: Add hints
+      prefetchHints: []
     });
-
   } catch (err) {
     console.error('Start exam V2 error:', err);
-    res.status(500).json({ error: err.message });
+    if (isTemporaryUnavailableError(err)) {
+      return res.status(503).json(getTemporaryUnavailablePayload(err));
+    }
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -3669,6 +3756,10 @@ app.get('/api/published-exams', authMiddleware, async (req, res) => {
   res.json({ exams: [] });
 });
 
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'API endpoint not found' });
+});
+
 // ============ Serve SPA ============
 
 app.get('*', (req, res) => {
@@ -3688,6 +3779,8 @@ if (require.main === module) {
       }
     }
 
+    scheduleEmbeddingBackfill(db);
+
     app.listen(PORT, () => {
       console.log(`Language Exam Server running on http://localhost:${PORT}`);
       console.log(`DB Mode: ${DB_MODE} (Strict: ${IS_NEON_MODE})`);
@@ -3697,3 +3790,19 @@ if (require.main === module) {
 }
 
 module.exports = app;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -4138,7 +4138,9 @@
 
                 // Show section selector when exam is selected
                 const sectionSelector = $('#exam-section-selector');
-                // Ensure section selector is visible (though strictly already removed hidden)
+                if (sectionSelector) {
+                    sectionSelector.classList.remove('hidden');
+                }
             });
         });
 

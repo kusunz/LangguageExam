@@ -35,10 +35,14 @@
   /* Main Color 2: Sky (Highlight) */
   --accent-secondary: #0369a1;
   /* Darker Sky */
+  --accent: #1e40af;
+  --accent-hover: #60a5fa;
 
   /* Deep Blue Gradient for Dark Mode */
   --accent-gradient: linear-gradient(135deg, #1e40af 0%, #1e3a8a 100%);
   --accent-text: #bfdbfe;
+  --bg-hover: #444c67;
+  --focus-ring: rgba(96, 165, 250, 0.35);
 
   /* Status colors */
   --success: #10b981;
@@ -124,10 +128,14 @@
   /* Blue 500 */
   --accent-secondary: #0ea5e9;
   /* Sky 500 */
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
   /* Bright/Light Gradient for Light Mode */
   --accent-gradient: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%);
   --accent-text: #1e40af;
   /* Dark Blue for readability on light bg */
+  --bg-hover: #dce7f7;
+  --focus-ring: rgba(37, 99, 235, 0.2);
 
   /* Status colors - Darker for readability */
   --success: #16a34a;
@@ -336,6 +344,14 @@ body::before {
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+.question-dot:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 /* Loading Spinner */
@@ -1926,7 +1942,7 @@ body::before {
 .audio-seek {
   width: 100%;
   cursor: pointer;
-  accent-color: var(--primary-color);
+  accent-color: var(--accent-primary);
 }
 
 .audio-controls {

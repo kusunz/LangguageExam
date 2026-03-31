@@ -62,6 +62,39 @@ async function query(text, params = []) {
 
 let initPromise = null;
 
+async function ensureCriticalSchema() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS user_mondai_history (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id TEXT NOT NULL,
+      mondai_hash TEXT NOT NULL REFERENCES mondai_bank(hash) ON DELETE CASCADE,
+      first_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+      last_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+      serve_count INTEGER DEFAULT 1,
+      last_instance_key TEXT,
+      UNIQUE(user_id, mondai_hash)
+    )
+  `);
+
+  await query(`
+    ALTER TABLE user_mondai_history
+      ADD COLUMN IF NOT EXISTS first_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS last_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS serve_count INTEGER DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS last_instance_key TEXT
+  `);
+
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_user_mondai_history_user
+    ON user_mondai_history(user_id, last_served_at)
+  `);
+
+  await query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_user_mondai_history_unique
+    ON user_mondai_history(user_id, mondai_hash)
+  `);
+}
+
 async function initDb() {
   if (initPromise) return initPromise;
 
@@ -75,6 +108,7 @@ async function initDb() {
       // Fast connectivity check using wrapper
       await query('SELECT 1 AS test');
       console.log('[DB] Connection OK');
+      await ensureCriticalSchema();
 
       // Only run migrations if explicitly requested via env var
       // Default: DO NOT run migrations (assume manual SQL or production setup)
@@ -228,6 +262,8 @@ async function initDb() {
           exam_id TEXT NOT NULL,
           level TEXT NOT NULL,
           mode TEXT NOT NULL,
+          plan TEXT,
+          seed TEXT,
           set_no INTEGER NOT NULL,
           blueprint JSONB NOT NULL,
           delivery_state JSONB,
@@ -256,6 +292,22 @@ async function initDb() {
         )`,
         `CREATE INDEX IF NOT EXISTS idx_attempts_user ON attempts(user_id)`,
         `CREATE INDEX IF NOT EXISTS idx_attempts_instance ON attempts(instance_key)`,
+
+        // User mondai history table (anti-repeat)
+        `CREATE TABLE IF NOT EXISTS user_mondai_history (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id TEXT NOT NULL,
+          mondai_hash TEXT NOT NULL REFERENCES mondai_bank(hash) ON DELETE CASCADE,
+          first_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+          last_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+          serve_count INTEGER DEFAULT 1,
+          last_instance_key TEXT,
+          UNIQUE(user_id, mondai_hash)
+        )`,
+        `CREATE INDEX IF NOT EXISTS idx_user_mondai_history_user
+          ON user_mondai_history(user_id, last_served_at)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_user_mondai_history_unique
+          ON user_mondai_history(user_id, mondai_hash)`,
 
         // Coupons table
         `CREATE TABLE IF NOT EXISTS coupons (
@@ -330,9 +382,11 @@ async function initDb() {
             ALTER TABLE mondai_bank ADD COLUMN IF NOT EXISTS base_type TEXT;
           EXCEPTION WHEN others THEN NULL; END;
 
-          -- exam_instances_cache: ensure answer_keys
+          -- exam_instances_cache: ensure answer_keys + runtime columns
           BEGIN
             ALTER TABLE exam_instances_cache ADD COLUMN IF NOT EXISTS answer_keys JSONB;
+            ALTER TABLE exam_instances_cache ADD COLUMN IF NOT EXISTS plan TEXT;
+            ALTER TABLE exam_instances_cache ADD COLUMN IF NOT EXISTS seed TEXT;
           EXCEPTION WHEN others THEN NULL; END;
 
           -- attempts: ensure status, summary, answers_hash, ai_grade columns for V2 grading
@@ -347,6 +401,26 @@ async function initDb() {
           BEGIN
             ALTER TABLE attempts ADD CONSTRAINT attempts_user_instance_unique UNIQUE (user_id, instance_key);
           EXCEPTION WHEN duplicate_object THEN NULL; WHEN others THEN NULL; END;
+
+          -- user_mondai_history: ensure anti-repeat columns and constraint
+          BEGIN
+            CREATE TABLE IF NOT EXISTS user_mondai_history (
+              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              user_id TEXT NOT NULL,
+              mondai_hash TEXT NOT NULL REFERENCES mondai_bank(hash) ON DELETE CASCADE,
+              first_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+              last_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+              serve_count INTEGER DEFAULT 1,
+              last_instance_key TEXT,
+              UNIQUE(user_id, mondai_hash)
+            );
+            ALTER TABLE user_mondai_history ADD COLUMN IF NOT EXISTS first_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+            ALTER TABLE user_mondai_history ADD COLUMN IF NOT EXISTS last_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+            ALTER TABLE user_mondai_history ADD COLUMN IF NOT EXISTS serve_count INTEGER DEFAULT 1;
+            ALTER TABLE user_mondai_history ADD COLUMN IF NOT EXISTS last_instance_key TEXT;
+            CREATE INDEX IF NOT EXISTS idx_user_mondai_history_user ON user_mondai_history(user_id, last_served_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_user_mondai_history_unique ON user_mondai_history(user_id, mondai_hash);
+          EXCEPTION WHEN others THEN NULL; END;
           
         END $$;`
       ];
@@ -387,4 +461,5 @@ module.exports = {
   IS_VERCEL,
   driverType
 };
+
 

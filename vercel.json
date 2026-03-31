@@ -1,5 +1,10 @@
 {
     "version": 2,
+    "functions": {
+        "api/index.js": {
+            "includeFiles": "web/**"
+        }
+    },
     "crons": [
         {
             "path": "/api/admin/warmup/n2/basic",
@@ -17,6 +22,10 @@
     "rewrites": [
         {
             "source": "/api/(.*)",
+            "destination": "/api/index.js"
+        },
+        {
+            "source": "/(.*)",
             "destination": "/api/index.js"
         }
     ]
