@@ -29,6 +29,26 @@ function extractMessageText(message) {
     .join('');
 }
 
+function isRetryableOpenRouterFailure(status, errorText) {
+  const normalized = String(errorText || '').toLowerCase();
+
+  if (status === 401 || status === 402 || status === 403 || status === 404 || status === 429) {
+    return true;
+  }
+
+  if (typeof status === 'number' && status >= 500) {
+    return true;
+  }
+
+  return [
+    'temporarily rate-limited upstream',
+    'provider returned error',
+    'no endpoints available matching your guardrail restrictions',
+    'run out of credit',
+    'err_ngrok_4026'
+  ].some((pattern) => normalized.includes(pattern));
+}
+
 async function callOpenRouter(options) {
   const {
     prompt,
@@ -97,7 +117,7 @@ async function callOpenRouter(options) {
       provider: 'openrouter',
       model,
       status: response.status,
-      retryable: response.status === 402 || response.status === 429 || response.status >= 500
+      retryable: isRetryableOpenRouterFailure(response.status, errorText)
     });
   }
 
@@ -134,5 +154,6 @@ async function callOpenRouter(options) {
 module.exports = {
   callOpenRouter,
   createProviderError,
-  getOpenRouterBaseUrl
+  getOpenRouterBaseUrl,
+  isRetryableOpenRouterFailure
 };

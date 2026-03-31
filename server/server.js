@@ -14,6 +14,7 @@ const { createRemoteJWKSet, jwtVerify } = require('jose');
 const db = require('./db');
 const {
   buildProviderStages,
+  createTemporaryUnavailableError,
   getTemporaryUnavailablePayload,
   isTemporaryUnavailableError,
   runJsonTask
@@ -739,7 +740,7 @@ async function generateMondaiForBucket(params) {
       if (isTemporaryUnavailableError(error)) {
         throw error;
       }
-      remaining -= 1;
+      throw createTemporaryUnavailableError(error);
     }
   }
 }
@@ -909,10 +910,9 @@ async function hydratePendingBlueprintSlots(params) {
     }
 
     console.warn(`Failed to generate bucket ${result?.slot?.bucket_key}:`, result?.error?.message || result?.error);
-    if (result?.slot) {
-      result.slot._failed = true;
-      result.slot._error = result?.error?.message || 'generation_failed';
-    }
+    throw createTemporaryUnavailableError(
+      result?.error || new Error(`Failed to generate bucket ${result?.slot?.bucket_key || 'unknown'}`)
+    );
   }
 
   for (const pending of pendingSlots) {
@@ -942,8 +942,7 @@ async function hydratePendingBlueprintSlots(params) {
       }
 
       console.warn(`Failed to hydrate slot ${slot.slot_id} after generation:`, error.message);
-      slot._failed = true;
-      slot._error = error.message;
+      throw createTemporaryUnavailableError(error);
     }
   }
 }
@@ -1038,9 +1037,15 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
     allowRepeat
   });
 
-  blueprint.groups.forEach((group) => {
-    group.mondai_slots = group.mondai_slots.filter((slot) => !slot._failed && slot.mondai_hash);
-  });
+  const missingSlots = blueprint.groups.flatMap((group) =>
+    (group.mondai_slots || []).filter((slot) => !slot.mondai_hash)
+  );
+
+  if (missingSlots.length > 0) {
+    throw createTemporaryUnavailableError(
+      new Error(`Blueprint incomplete: ${missingSlots.map((slot) => slot.slot_id || slot.bucket_key || 'unknown').join(', ')}`)
+    );
+  }
 
   // READING SECTION TIME BUDGET OPTIMIZATION
   // Re-process reading slots if this is a full exam or has reading section
