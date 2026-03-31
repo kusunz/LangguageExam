@@ -431,8 +431,9 @@ async function initDb() {
         END $$;`
       ];
 
-      const combined = migrations.join(';\n');
-      await query(combined);
+      for (const statement of migrations) {
+        await query(statement);
+      }
 
       console.log('[DB] Migrations complete');
       return true;
