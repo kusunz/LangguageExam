@@ -1493,7 +1493,11 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
   });
 
   const missingSlots = blueprint.groups.flatMap((group) =>
-    (group.mondai_slots || []).filter((slot) => !slot.mondai_hash && slot.status !== 'deferred')
+    (group.mondai_slots || []).filter((slot) =>
+      !slot.mondai_hash &&
+      slot.status !== 'deferred' &&
+      slot.status !== 'prefetching'
+    )
   );
 
   if (missingSlots.length > 0) {
