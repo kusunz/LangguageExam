@@ -69,6 +69,7 @@
         currentExam: 'jlpt',
         currentMode: 'official',
         currentSection: 'full',
+        currentSections: ['full'],
         examSpec: null,
         test: null,
         answers: {},
@@ -117,15 +118,28 @@
             TestUI.isStartingTest = false;
             TestUI.pendingGroups = [];
             TestUI.loadingGroupIndex = 0;
+            TestUI.activeLoaders?.clear?.();
+            TestUI.completedGroups?.clear?.();
+            TestUI.showNextButtonRetryState = false;
+            if (TestUI.nextLoadFailTimer) {
+                clearTimeout(TestUI.nextLoadFailTimer);
+                TestUI.nextLoadFailTimer = null;
+            }
             if (TestUI.progressInterval) {
                 clearInterval(TestUI.progressInterval);
                 TestUI.progressInterval = null;
             }
         }
 
+        if (State.currentInstanceKey && State.test) {
+            try { Api.abandonExamKeepalive(State.currentInstanceKey, 'reset'); } catch (_) { }
+        }
+
         // 4. Reset State to initial values (safe null checks)
         State.user = null;
         State.userData = null;
+        State.currentSection = 'full';
+        State.currentSections = ['full'];
         State.examSpec = null;
         State.test = null;
         State.answers = {};
@@ -139,7 +153,7 @@
         State.ttsAudio = null;
 
         // 5. Clear runtime localStorage (NOT settings/preferences)
-        const sessionKeys = ['user', 'app_session_id', 'demo_userData'];
+        const sessionKeys = ['user', 'app_session_id', 'demo_userData', 'demo_session_started_at'];
         sessionKeys.forEach(key => {
             try { localStorage.removeItem(key); } catch (_) { }
         });
@@ -207,6 +221,29 @@
         return 'ja-JP'; // fallback
     }
 
+    function getOrCreateDemoBrowserId() {
+        const storageKey = 'demo_browser_id';
+        let browserId = localStorage.getItem(storageKey);
+        if (!browserId) {
+            browserId = (window.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)).replace(/[^a-zA-Z0-9_-]/g, '');
+            localStorage.setItem(storageKey, browserId);
+        }
+        return browserId;
+    }
+
+    function clearExpiredDemoSessionIfNeeded() {
+        const startedAt = localStorage.getItem('demo_session_started_at');
+        if (!startedAt) return;
+
+        const startedMs = new Date(startedAt).getTime();
+        const maxAgeMs = 24 * 60 * 60 * 1000;
+        if (!startedMs || Number.isNaN(startedMs) || (Date.now() - startedMs) < maxAgeMs) return;
+
+        ['user', 'app_session_id', 'demo_userData', 'demo_notebook', 'demo_session_started_at', 'demo_browser_id'].forEach((key) => {
+            try { localStorage.removeItem(key); } catch (_) { }
+        });
+    }
+
     // ============================================
     // API Client
     // ============================================
@@ -214,6 +251,7 @@
         async request(endpoint, options = {}) {
             const headers = {
                 'Content-Type': 'application/json',
+                'x-demo-session-id': getOrCreateDemoBrowserId(),
                 ...(State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
             };
 
@@ -233,7 +271,9 @@
 
                 if (!response.ok) {
                     const error = await response.json().catch(() => ({ error: response.statusText }));
-                    throw new Error(error.error || 'Request failed');
+                    const requestError = new Error(error.error || 'Request failed');
+                    requestError.status = response.status;
+                    throw requestError;
                 }
 
                 if (response.headers.get('content-type')?.includes('application/json')) {
@@ -387,6 +427,30 @@
             });
         },
 
+        async abandonExam(instanceKey, reason = 'abandoned') {
+            if (!instanceKey) return { success: true, skipped: true };
+            return this.request('/exam/abandon', {
+                method: 'POST',
+                body: { instanceKey, reason }
+            });
+        },
+
+        abandonExamKeepalive(instanceKey, reason = 'tab-close') {
+            if (!instanceKey) return;
+            try {
+                fetch(`${CONFIG.apiBase}/exam/abandon`, {
+                    method: 'POST',
+                    keepalive: true,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-demo-session-id': getOrCreateDemoBrowserId(),
+                        ...(State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
+                    },
+                    body: JSON.stringify({ instanceKey, reason })
+                }).catch(() => { });
+            } catch (_) { }
+        },
+
         async quickGradeV2(instanceKey, answers) {
             return this.request('/exam/quickgrade', {
                 method: 'POST',
@@ -520,6 +584,8 @@
             } else {
                 console.log('Privy not configured, using demo mode');
             }
+
+            clearExpiredDemoSessionIfNeeded();
 
             // Check for saved demo session
             const savedUser = localStorage.getItem('user');
@@ -691,6 +757,9 @@
                 };
 
                 localStorage.setItem('user', JSON.stringify(State.user));
+                if (State.user.token === 'demo-token') {
+                    localStorage.setItem('demo_session_started_at', new Date().toISOString());
+                }
 
                 await this.loadUserData();
                 this.updateUI();
@@ -838,73 +907,96 @@
             return scaledSpec;
         },
 
-        filterBySection(spec, section, mode = 'standard') {
-            if (section === 'full') return spec;
+        pickReadingMondaiIds(mode = 'standard') {
+            const readingMondai = ['M8', 'M9', 'M10', 'M11', 'M12'];
+            let mondaiCount;
+
+            switch (mode) {
+                case 'basic':
+                    mondaiCount = Math.floor(Math.random() * 2) + 1;
+                    break;
+                case 'standard':
+                    mondaiCount = Math.floor(Math.random() * 2) + 3;
+                    break;
+                case 'official':
+                default:
+                    mondaiCount = readingMondai.length;
+                    break;
+            }
+
+            const shuffled = [...readingMondai].sort(() => Math.random() - 0.5);
+            const selected = new Set(shuffled.slice(0, mondaiCount));
+            return readingMondai.filter(id => selected.has(id));
+        },
+
+        filterBySections(spec, sections, mode = 'standard') {
+            const normalizedSections = Array.isArray(sections)
+                ? sections.filter(Boolean)
+                : [sections].filter(Boolean);
+
+            if (normalizedSections.length === 0 || normalizedSections.includes('full')) return spec;
 
             const filteredSpec = JSON.parse(JSON.stringify(spec));
-
-            // Define section to mondai mapping
             const sectionMondaiMap = {
                 'vocab-grammar': ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7'],
                 'reading': ['M8', 'M9', 'M10', 'M11', 'M12'],
                 'listening': ['L1', 'L2', 'L3', 'L4', 'L5']
             };
 
-            let allowedMondai = sectionMondaiMap[section] || [];
+            const allowedMainMondai = new Set();
+            const allowedGroupIds = new Set();
 
-            // For reading section: randomly select mondai based on mode
-            if (section === 'reading') {
-                const readingMondai = ['M8', 'M9', 'M10', 'M11', 'M12'];
-                let mondaiCount;
-
-                switch (mode) {
-                    case 'basic':
-                        mondaiCount = Math.floor(Math.random() * 2) + 1; // 1-2
-                        break;
-                    case 'standard':
-                        mondaiCount = Math.floor(Math.random() * 2) + 3; // 3-4
-                        break;
-                    case 'official':
-                    default:
-                        mondaiCount = readingMondai.length; // All 5
-                        break;
+            normalizedSections.forEach((section) => {
+                if (section === 'reading') {
+                    this.pickReadingMondaiIds(mode).forEach(id => allowedMainMondai.add(id));
+                    allowedGroupIds.add('main');
+                    return;
                 }
 
-                // Shuffle and pick random mondai
-                const shuffled = [...readingMondai].sort(() => Math.random() - 0.5);
-                allowedMondai = shuffled.slice(0, mondaiCount);
-                console.log(`Reading mode ${mode}: selected ${mondaiCount} mondai:`, allowedMondai);
-            }
-
-            // Filter groups based on section
-            if (section === 'listening') {
-                // Only keep listening group
-                filteredSpec.groups = filteredSpec.groups.filter(g => g.group_id === 'listening');
-                // Recalculate time limits
-                const listeningTime = spec.official_time_limits_sec.groups.find(g => g.group_id === 'listening');
-                if (filteredSpec.scaled_time_limits) {
-                    filteredSpec.scaled_time_limits.overall_sec = filteredSpec.scaled_time_limits.groups.find(g => g.group_id === 'listening')?.time_sec || 3000;
-                    filteredSpec.scaled_time_limits.groups = filteredSpec.scaled_time_limits.groups.filter(g => g.group_id === 'listening');
+                if (section === 'listening') {
+                    allowedGroupIds.add('listening');
+                    return;
                 }
-            } else {
-                // Only keep main group for vocab-grammar and reading
-                filteredSpec.groups = filteredSpec.groups.filter(g => g.group_id === 'main');
-                // Filter mondai within main group
-                filteredSpec.groups.forEach(group => {
-                    group.mondai = group.mondai.filter(m => allowedMondai.includes(m.mondai_id));
+
+                (sectionMondaiMap[section] || []).forEach(id => allowedMainMondai.add(id));
+                if ((sectionMondaiMap[section] || []).some(id => id.startsWith('M'))) {
+                    allowedGroupIds.add('main');
+                }
+            });
+
+            filteredSpec.groups = filteredSpec.groups.filter(group => {
+                if (group.group_id === 'main') {
+                    if (!allowedGroupIds.has('main')) return false;
+                    group.mondai = group.mondai.filter(m => allowedMainMondai.has(m.mondai_id));
+                    return group.mondai.length > 0;
+                }
+
+                if (group.group_id === 'listening') {
+                    return allowedGroupIds.has('listening');
+                }
+
+                return false;
+            });
+
+            const baseTimeLimits = filteredSpec.scaled_time_limits || filteredSpec.official_time_limits_sec;
+            if (baseTimeLimits?.groups) {
+                const recalculatedGroups = filteredSpec.groups.map(group => {
+                    const originalGroup = spec.groups.find(g => g.group_id === group.group_id);
+                    const sourceTime = baseTimeLimits.groups.find(g => g.group_id === group.group_id)?.time_sec
+                        || spec.official_time_limits_sec?.groups?.find(g => g.group_id === group.group_id)?.time_sec
+                        || 0;
+                    const originalCount = originalGroup?.mondai?.length || group.mondai.length || 1;
+                    const ratio = group.mondai.length / originalCount;
+                    return {
+                        group_id: group.group_id,
+                        time_sec: Math.max(1, Math.round(sourceTime * ratio))
+                    };
                 });
-                // Recalculate time limits based on remaining mondai
-                if (filteredSpec.scaled_time_limits) {
-                    const totalMondai = filteredSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
-                    const originalMainMondai = spec.groups.find(g => g.group_id === 'main')?.mondai.length || 12;
-                    const ratio = totalMondai / originalMainMondai;
-                    const mainTime = filteredSpec.scaled_time_limits.groups.find(g => g.group_id === 'main');
-                    if (mainTime) {
-                        mainTime.time_sec = Math.round(mainTime.time_sec * ratio);
-                        filteredSpec.scaled_time_limits.overall_sec = mainTime.time_sec;
-                    }
-                    filteredSpec.scaled_time_limits.groups = filteredSpec.scaled_time_limits.groups.filter(g => g.group_id === 'main');
-                }
+
+                filteredSpec.scaled_time_limits = {
+                    groups: recalculatedGroups,
+                    overall_sec: recalculatedGroups.reduce((sum, group) => sum + (group.time_sec || 0), 0)
+                };
             }
 
             return filteredSpec;
@@ -1833,6 +1925,8 @@
         isSubmitting: false, // Prevent duplicate submissions
         isStartingTest: false, // Prevent duplicate test starts
         activeLoaders: new Set(),
+        completedGroups: new Set(),
+        loadCycleId: 0,
         nextLoadFailTimer: null,
         showNextButtonRetryState: false,
 
@@ -1870,6 +1964,76 @@
             return mondai?.slot_id || mondai?.meta?.slot_id || mondai?.mondai_id || null;
         },
 
+        extractOfficialMondaiNumber(mondaiId) {
+            const match = String(mondaiId || '').match(/[A-Z]+(\d+)/i);
+            return match?.[1] || null;
+        },
+
+        findMondaiDefinition(mondaiId) {
+            if (!State.examSpec?.groups) return null;
+            for (const group of State.examSpec.groups) {
+                const found = group.mondai?.find(m => m.mondai_id === mondaiId);
+                if (found) return found;
+            }
+            return null;
+        },
+
+        markGroupCompleteIfSatisfied(groupOrId) {
+            const group = typeof groupOrId === 'string'
+                ? State.test?.groups?.find(g => g.group_id === groupOrId)
+                : groupOrId;
+            if (!group) return false;
+
+            const expected = State.test?.meta?.manifest?.groups?.find(g => g.group_id === group.group_id)?.expected_mondai_count
+                ?? this.getGroupMondaiCount(group);
+
+            if (expected > 0 && this.getLoadedMondaiCount(group) >= expected) {
+                this.completedGroups.add(group.group_id);
+                return true;
+            }
+            return false;
+        },
+
+        resetChunkLoadingState() {
+            this.loadCycleId += 1;
+            this.activeLoaders.clear();
+            this.completedGroups.clear();
+            this.showNextButtonRetryState = false;
+            if (this.nextLoadFailTimer) {
+                clearTimeout(this.nextLoadFailTimer);
+                this.nextLoadFailTimer = null;
+            }
+            if (typeof RequestQueue !== 'undefined' && RequestQueue.clear) {
+                RequestQueue.clear();
+            }
+        },
+
+        buildCanonicalMondaiDisplayTitle(mondai, fallbackIsListening = false) {
+            const rawId = mondai?.mondai_id || '';
+            const officialNum = this.extractOfficialMondaiNumber(rawId) || String(State.currentMondaiIndex + 1);
+            const specMondai = this.findMondaiDefinition(rawId);
+            const isListening = rawId.startsWith('L') || fallbackIsListening;
+            const prefix = isListening ? 'Listen' : 'Mondai';
+            const candidateTitle = (mondai?.meta?.display_title || mondai?.title_vi || '').trim();
+            const normalizedCandidate = candidateTitle.replace(/^(Mondai|Listen)\s+\d+/i, `${prefix} ${officialNum}`).trim();
+            const officialTitle = specMondai?.title_vi?.trim();
+            const jpSuffix = candidateTitle.match(/\s(\([^)]*\))\s*$/)?.[1] || '';
+
+            if (officialTitle) {
+                return jpSuffix && !officialTitle.includes(jpSuffix)
+                    ? `${prefix} ${officialNum}: ${officialTitle} ${jpSuffix}`.trim()
+                    : `${prefix} ${officialNum}: ${officialTitle}`;
+            }
+
+            if (normalizedCandidate) {
+                return /^(Mondai|Listen)\s+\d+/i.test(normalizedCandidate)
+                    ? normalizedCandidate
+                    : `${prefix} ${officialNum}: ${normalizedCandidate}`;
+            }
+
+            return `${prefix} ${officialNum}`;
+        },
+
         getGroupExpectedCount(groupIndex) {
             const manifestGroup = State.test?.meta?.manifest?.groups?.[groupIndex];
             if (manifestGroup?.expected_mondai_count) {
@@ -1894,6 +2058,7 @@
             if (!key) return false;
             if (!group._mondaiById) group._mondaiById = {};
             group._mondaiById[key] = mondai;
+            this.markGroupCompleteIfSatisfied(group);
             return true;
         },
 
@@ -1918,6 +2083,16 @@
             const targetModel = null;
 
             try {
+                if (State.currentInstanceKey) {
+                    try {
+                        await Api.abandonExam(State.currentInstanceKey, 'restart');
+                    } catch (abandonErr) {
+                        console.warn('Failed to abandon previous exam before restart:', abandonErr.message);
+                    }
+                }
+
+                this.resetChunkLoadingState();
+
                 // 1. Extract UI selections
                 const activeExamTab = $('.exam-tab-wrapper.active');
                 if (!activeExamTab) throw new Error('Vui lòng chọn kỳ thi');
@@ -1930,15 +2105,18 @@
                 if (!activeModeCard) throw new Error('Vui lòng chọn chế độ thi');
                 const mode = activeModeCard.dataset.mode || 'official';
 
-                const activeSectionOption = $('.section-option.selected');
-                const section = activeSectionOption?.dataset.section || 'full';
+                const selectedSectionOptions = Array.from($$(".section-option.selected"));
+                const sections = selectedSectionOptions.length > 0
+                    ? selectedSectionOptions.map(option => option.dataset.section)
+                    : ['full'];
 
                 // Update global state
                 State.currentExam = examType;
                 State.currentMode = mode;
-                State.currentSection = section;
+                State.currentSection = sections.includes('full') ? 'full' : sections.join(',');
+                State.currentSections = sections;
 
-                console.log(`Starting test V2: ${examType} ${level}, mode: ${mode}, section: ${section}`);
+                console.log(`Starting test V2: ${examType} ${level}, mode: ${mode}, sections: ${sections.join(', ')}`);
 
                 // 2. Load exam spec
                 let baseSpec = await ExamLoader.loadSpec(examType, level);
@@ -1950,7 +2128,7 @@
                 // Let's rely on frontend filtering to keep consistent behavior with existing "Section" logic.
 
                 let scaledSpec = ExamLoader.applyModeScaling(baseSpec, mode);
-                State.examSpec = ExamLoader.filterBySection(scaledSpec, section, mode);
+                State.examSpec = ExamLoader.filterBySections(scaledSpec, sections, mode);
 
                 if (!State.examSpec) throw new Error('Không thể tải cấu hình đề thi');
 
@@ -2035,27 +2213,46 @@
         },
 
         async retryFetchNextMondai(targetGroupId) {
-            if (this.activeLoaders.has(targetGroupId)) return;
+            if (!targetGroupId || this.activeLoaders.has(targetGroupId) || this.completedGroups.has(targetGroupId)) return;
 
             this.showNextButtonRetryState = false;
             this.updateNavigationButtons();
 
+            const loadCycleId = this.loadCycleId;
+            const instanceKey = State.currentInstanceKey;
             this.activeLoaders.add(targetGroupId);
             try {
-                const res = await Api.fetchExamChunk(State.currentInstanceKey, targetGroupId, 3);
                 const group = State.test.groups.find(g => g.group_id === targetGroupId);
+                const lastCursor = group?._cursor ?? 0;
+                const res = await Api.fetchExamChunk(instanceKey, targetGroupId, 3);
+                if (loadCycleId !== this.loadCycleId || !State.test || State.currentInstanceKey !== instanceKey) {
+                    return;
+                }
                 if (group && res.chunk && res.chunk.length > 0) {
                     res.chunk.forEach(m => {
                         this.assignMondaiToGroup(group, m);
                     });
                     this.updateProgressUI();
                 }
+                if (group) {
+                    group._cursor = typeof res.nextCursor === 'number' ? res.nextCursor : lastCursor;
+                }
+                const noProgress = !res.chunk?.length && (res.done || (typeof res.nextCursor === 'number' && res.nextCursor <= lastCursor));
+                if (noProgress || res.done || this.markGroupCompleteIfSatisfied(group)) {
+                    this.completedGroups.add(targetGroupId);
+                }
             } catch (err) {
                 console.error('Retry fetch chunk error:', err);
-                this.showNextButtonRetryState = true;
+                if (err.status === 404 || err.status === 409) {
+                    this.completedGroups.add(targetGroupId);
+                } else {
+                    this.showNextButtonRetryState = true;
+                }
             } finally {
-                this.activeLoaders.delete(targetGroupId);
-                this.updateNavigationButtons();
+                if (loadCycleId === this.loadCycleId) {
+                    this.activeLoaders.delete(targetGroupId);
+                    this.updateNavigationButtons();
+                }
             }
         },
 
@@ -2089,9 +2286,11 @@
             if (!State.currentInstanceKey) return;
 
             const instanceKey = State.currentInstanceKey;
+            const loadCycleId = this.loadCycleId;
 
             // Load all groups concurrently with bounded concurrency
             const loadGroup = async (gIdx) => {
+                if (loadCycleId !== this.loadCycleId || !State.test || State.currentInstanceKey !== instanceKey) return;
                 const group = State.test.groups[gIdx];
                 const group_id = group.group_id;
 
@@ -2101,6 +2300,7 @@
 
                 const currentCount = this.getLoadedMondaiCount(group);
                 if (currentCount >= expected) {
+                    this.completedGroups.add(group_id);
                     console.log(`Group ${group_id} already has ${currentCount}/${expected} items.`);
                     return;
                 }
@@ -2108,8 +2308,18 @@
                 this.activeLoaders.add(group_id);
                 let done = false;
                 while (!done) {
+                    if (loadCycleId !== this.loadCycleId || !State.test || State.currentInstanceKey !== instanceKey) {
+                        done = true;
+                        break;
+                    }
                     try {
+                        const lastCursor = group._cursor ?? 0;
                         const res = await Api.fetchExamChunk(instanceKey, group_id, 3);
+                        if (loadCycleId !== this.loadCycleId || !State.test || State.currentInstanceKey !== instanceKey) {
+                            done = true;
+                            break;
+                        }
+                        group._cursor = typeof res.nextCursor === 'number' ? res.nextCursor : lastCursor;
 
                         if (res.chunk && res.chunk.length > 0) {
                             res.chunk.forEach(m => {
@@ -2122,17 +2332,26 @@
                             this.updateProgressUI();
                         }
 
-                        done = res.done;
-                        if (done) console.log(`Group ${group_id} fully loaded.`);
+                        const noProgress = !res.chunk?.length && (res.done || group._cursor <= lastCursor);
+                        done = res.done || noProgress;
+                        if (done || this.markGroupCompleteIfSatisfied(group)) {
+                            this.completedGroups.add(group_id);
+                            console.log(`Group ${group_id} fully loaded.`);
+                        }
                         await new Promise(r => setTimeout(r, 300)); // Reduced delay for faster loading
 
                     } catch (e) {
                         console.error(`Error loading chunk for ${group_id}:`, e);
+                        if (e.status === 404 || e.status === 409) {
+                            this.completedGroups.add(group_id);
+                        }
                         done = true; // Stop loop on error to avoid infinite retry
                     }
                 }
-                this.activeLoaders.delete(group_id);
-                this.updateNavigationButtons();
+                if (loadCycleId === this.loadCycleId) {
+                    this.activeLoaders.delete(group_id);
+                    this.updateNavigationButtons();
+                }
             };
 
             // Schedule all groups concurrently with a small bounded window.
@@ -2141,8 +2360,10 @@
                 RequestQueue.schedule(() => loadGroup(gIdx))
             );
 
-            await Promise.all(promises);
-            console.log('All chunks loaded (V2 concurrent).');
+            await Promise.allSettled(promises);
+            if (loadCycleId === this.loadCycleId) {
+                console.log('All chunks loaded (V2 concurrent).');
+            }
         },
 
 
@@ -2255,34 +2476,15 @@
             // Update navigation buttons (prev/next state based on loaded mondai)
             this.updateNavigationButtons();
 
-            // Update header - prioritize meta.display_title, then title_vi, then fallback
-            // Detect if listening type for proper prefix
-            const isListening = mondai.items?.some(item =>
+            // Update header using canonical exam numbering/title
+            const isListening = mondai.mondai_id?.startsWith('L') || mondai.items?.some(item =>
                 item.type?.includes('listen') || item.type?.includes('dialogue') || item.type?.includes('mono')
             ) || !!mondai.media?.script_text;
-
-            // Extract mondai number from mondai_id (M1->1, L2->2, etc.)
-            const rawId = mondai.mondai_id || '';
-            const mondaiNum = rawId.match(/[ML](\d+)/)?.[1] || String(State.currentMondaiIndex + 1);
-            const prefix = isListening ? 'Listen' : 'Mondai';
-
-            let displayTitle;
-            if (mondai.meta?.display_title) {
-                // Use generated display_title directly
-                displayTitle = mondai.meta.display_title;
-            } else if (mondai.title_vi && !mondai.title_vi.match(/^(Mondai|Listen)\s+\d+/)) {
-                // Has title_vi but no prefix - add prefix
-                displayTitle = `${prefix} ${mondaiNum}: ${mondai.title_vi}`;
-            } else if (mondai.title_vi) {
-                // title_vi already has proper format
-                displayTitle = mondai.title_vi;
-            } else {
-                // Fallback to simple prefix + number
-                displayTitle = `${prefix} ${mondaiNum}`;
-            }
+            const specMondai = this.findMondaiDefinition(mondai.mondai_id);
+            const displayTitle = this.buildCanonicalMondaiDisplayTitle(mondai, isListening);
 
             $('#mondai-title').textContent = displayTitle;
-            $('#mondai-instructions').textContent = mondai.instructions_vi || '';
+            $('#mondai-instructions').textContent = specMondai?.instructions_vi || mondai.instructions_vi || '';
 
             // Render passage if exists (with zoom controls)
             const passageContainer = $('#passage-container');
@@ -2541,47 +2743,47 @@
             const totalMondaiFromSpec = this.getTotalMondaiCount();
             const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
 
-            // Update Previous button
             $('#btn-prev-mondai').disabled = globalIndex === 0;
 
-            // Update Next button
             const btnNext = $('#btn-next-mondai');
             const isLast = globalIndex === totalMondaiFromSpec - 1;
+
+            let remainingTarget = globalIndex + 1;
+            let targetGroupId = null;
+            if (State.test.meta?.manifest?.groups) {
+                for (const g of State.test.meta.manifest.groups) {
+                    if (remainingTarget < g.expected_mondai_count) {
+                        targetGroupId = g.group_id;
+                        break;
+                    }
+                    remainingTarget -= g.expected_mondai_count;
+                }
+                if (!targetGroupId && State.test.meta.manifest.groups.length > 0) {
+                    targetGroupId = State.test.meta.manifest.groups[State.test.meta.manifest.groups.length - 1].group_id;
+                }
+            }
+
+            const canRequestMore = !!targetGroupId && !this.completedGroups.has(targetGroupId);
 
             if (isLast) {
                 btnNext.disabled = true;
                 btnNext.innerHTML = '>';
                 btnNext.onclick = null;
                 if (this.nextLoadFailTimer) { clearTimeout(this.nextLoadFailTimer); this.nextLoadFailTimer = null; }
-            } else if (!nextMondaiLoaded) {
-                let remainingTarget = globalIndex + 1; // 0-indexed needs +1 
-                let targetGroupId = null;
-                if (State.test.meta?.manifest?.groups) {
-                    for (const g of State.test.meta.manifest.groups) {
-                        if (remainingTarget < g.expected_mondai_count) {
-                            targetGroupId = g.group_id;
-                            break;
-                        }
-                        remainingTarget -= g.expected_mondai_count;
-                    }
-                    if (!targetGroupId && State.test.meta.manifest.groups.length > 0) {
-                        targetGroupId = State.test.meta.manifest.groups[State.test.meta.manifest.groups.length - 1].group_id;
-                    }
-                }
-
+            } else if (!nextMondaiLoaded && canRequestMore) {
                 if (this.showNextButtonRetryState) {
                     btnNext.disabled = false;
                     btnNext.innerHTML = '<span class="loading-spinner"><i class="fa-solid fa-rotate-right"></i></span> Lỗi tải tiếp';
                     btnNext.onclick = (e) => {
                         e.preventDefault();
-                        if (targetGroupId) this.retryFetchNextMondai(targetGroupId);
+                        this.retryFetchNextMondai(targetGroupId);
                     };
                 } else {
                     btnNext.disabled = true;
                     btnNext.innerHTML = '> <span class="loading-spinner"><i class="fa-solid fa-spinner fa-spin"></i> Đang tải tiếp...</span>';
                     btnNext.onclick = null;
 
-                    if (targetGroupId && !this.activeLoaders.has(targetGroupId)) {
+                    if (!this.activeLoaders.has(targetGroupId)) {
                         this.retryFetchNextMondai(targetGroupId);
                     }
 
@@ -2590,21 +2792,20 @@
                             this.showNextButtonRetryState = true;
                             this.nextLoadFailTimer = null;
                             this.updateNavigationButtons();
-                        }, 10000); // 10s timeout
+                        }, 10000);
                     }
                 }
             } else {
-                btnNext.disabled = false;
+                btnNext.disabled = !nextMondaiLoaded;
                 btnNext.innerHTML = '>';
                 btnNext.onclick = null;
                 this.showNextButtonRetryState = false;
                 if (this.nextLoadFailTimer) { clearTimeout(this.nextLoadFailTimer); this.nextLoadFailTimer = null; }
             }
 
-            // Update loading indicator
             const loadingIndicator = $('#nav-loading-indicator');
             if (loadingIndicator) {
-                if (!nextMondaiLoaded && globalIndex < totalMondaiFromSpec - 1) {
+                if (!nextMondaiLoaded && globalIndex < totalMondaiFromSpec - 1 && canRequestMore) {
                     loadingIndicator.classList.remove('hidden');
                 } else {
                     loadingIndicator.classList.add('hidden');
@@ -2621,18 +2822,21 @@
             if (!State.test || !State.examSpec) return;
             const currentGroupIdx = State.currentGroupIndex;
             const expected = this.getGroupExpectedCount(currentGroupIdx);
-            const group = State.test.groups[currentGroupIdx];
 
-            let loaded = 0;
-            if (group) {
-                loaded = this.getLoadedMondaiCount(group);
+            let groupStartIndex = 0;
+            for (let i = 0; i < currentGroupIdx; i++) {
+                groupStartIndex += this.getGroupExpectedCount(i);
             }
+
+            const currentPosition = expected > 0
+                ? Math.min(expected, Math.max(1, State.currentMondaiIndex - groupStartIndex + 1))
+                : 0;
 
             const progressCurrent = $('#mondai-current');
             const progressTotal = $('#mondai-total');
 
             if (progressCurrent && progressTotal) {
-                progressCurrent.textContent = Math.min(loaded, expected);
+                progressCurrent.textContent = currentPosition;
                 progressTotal.textContent = expected;
             }
         },
@@ -2812,7 +3016,7 @@
 
                     // Pre-fetch next group's chunk unconditionally via deduplicator
                     const targetGroup = State.test.groups[newGroupIndex];
-                    if (targetGroup && targetGroup.group_id && !this.activeLoaders.has(targetGroup.group_id)) {
+                    if (targetGroup && targetGroup.group_id && !this.activeLoaders.has(targetGroup.group_id) && !this.completedGroups.has(targetGroup.group_id)) {
                         this.retryFetchNextMondai(targetGroup.group_id);
                     }
                     return;
@@ -3078,6 +3282,8 @@
 
                     State.feedback = feedback;
                     await this.saveToHistory(feedback);
+                    this.resetChunkLoadingState();
+                    State.currentInstanceKey = null;
 
                     ReviewUI.render();
                     showScreen('review-screen');
@@ -3180,6 +3386,8 @@
                 );
                 feedback.grading_mode = 'ai';
                 State.feedback = feedback;
+                this.resetChunkLoadingState();
+                State.currentInstanceKey = null;
 
                 // Stop progress and complete to 100%
                 clearInterval(progressInterval);
@@ -3209,15 +3417,25 @@
             if (confirmed) {
                 Timer.stopAll();
                 TTSManager.stop();
+                const instanceKey = State.currentInstanceKey;
 
                 // Reset all flags
                 this.isStartingTest = false;
                 this.isSubmitting = false;
+                this.resetChunkLoadingState();
+                State.currentInstanceKey = null;
 
                 State.test = null;
                 State.answers = {};
                 State.currentMondaiIndex = 0;
                 State.currentGroupIndex = 0;
+                if (instanceKey) {
+                    try {
+                        await Api.abandonExam(instanceKey, 'quit');
+                    } catch (err) {
+                        console.warn('Failed to abandon exam on quit:', err.message);
+                    }
+                }
                 showScreen('home-screen');
                 showToast('Đã thoát bài thi', 'info');
             }
@@ -4163,11 +4381,40 @@
         });
 
         // Section selection
-        $$('.section-option').forEach(option => {
+        const syncSelectedSections = () => {
+            const options = Array.from($$(".section-option"));
+            const selected = options
+                .filter(option => option.classList.contains('selected'))
+                .map(option => option.dataset.section);
+            const normalized = selected.length > 0 ? selected : ['full'];
+            State.currentSection = normalized.includes('full') ? 'full' : normalized.join(',');
+            State.currentSections = normalized;
+            options.forEach(option => {
+                option.setAttribute('aria-pressed', option.classList.contains('selected') ? 'true' : 'false');
+            });
+        };
+
+        syncSelectedSections();
+        $$(".section-option").forEach(option => {
             option.addEventListener('click', () => {
-                $$('.section-option').forEach(o => o.classList.remove('selected'));
-                option.classList.add('selected');
-                State.currentSection = option.dataset.section;
+                const options = Array.from($$(".section-option"));
+                const section = option.dataset.section;
+
+                if (section === 'full') {
+                    options.forEach(o => o.classList.toggle('selected', o === option));
+                    syncSelectedSections();
+                    return;
+                }
+
+                option.classList.toggle('selected');
+                options.find(o => o.dataset.section === 'full')?.classList.remove('selected');
+
+                const hasSpecificSelection = options.some(o => o.dataset.section !== 'full' && o.classList.contains('selected'));
+                if (!hasSpecificSelection) {
+                    options.find(o => o.dataset.section === 'full')?.classList.add('selected');
+                }
+
+                syncSelectedSections();
             });
         });
 
@@ -4284,6 +4531,12 @@
     async function init() {
         console.log('Language Exam Practice App initializing...');
 
+        window.addEventListener('pagehide', () => {
+            if (State.currentInstanceKey && State.test) {
+                Api.abandonExamKeepalive(State.currentInstanceKey, 'pagehide');
+            }
+        });
+
         Theme.init();
         AdminUI.init();
         initEventHandlers();
@@ -4304,3 +4557,26 @@
         init();
     }
 })();
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -103,6 +103,9 @@ const DATA_DIR = IS_VERCEL ? '/tmp/data' : path.join(__dirname, 'data');
 const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
 const IS_DEMO_MODE = !PRIVY_APP_ID || PRIVY_APP_ID === 'demo-app-id' || PRIVY_APP_ID === '';
 let privyJWKS = null;
+const DEMO_SESSION_HEADER = 'x-demo-session-id';
+const DEMO_USER_PREFIX = 'demo:';
+let lastDemoCleanupAt = 0;
 
 // Logging
 // Logging
@@ -117,6 +120,41 @@ function log(level, message, data = null) {
   }
 }
 
+
+function isDemoUserId(userId) {
+  return userId === 'demo-user' || String(userId || '').startsWith(DEMO_USER_PREFIX);
+}
+
+function getDemoUserFromRequest(req) {
+  const providedSessionId = req.get(DEMO_SESSION_HEADER);
+  if (!providedSessionId) {
+    return { userId: 'demo-user', email: 'demo@example.com' };
+  }
+
+  const rawSessionId = String(providedSessionId).trim();
+  const normalized = rawSessionId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'legacy-demo';
+  const suffix = crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 16);
+  return {
+    userId: `${DEMO_USER_PREFIX}${suffix}`,
+    email: `demo+${suffix}@example.com`
+  };
+}
+
+async function cleanupExpiredDemoArtifacts(force = false) {
+  if (!force && (Date.now() - lastDemoCleanupAt) < 10 * 60 * 1000) return;
+  lastDemoCleanupAt = Date.now();
+
+  if (!(await db.initDb())) return;
+
+  try {
+    await db.query(`DELETE FROM attempts WHERE (user_id = 'demo-user' OR user_id LIKE 'demo:%') AND started_at < NOW() - INTERVAL '1 day'`);
+    await db.query(`DELETE FROM exam_instances_cache WHERE (user_id = 'demo-user' OR user_id LIKE 'demo:%') AND created_at < NOW() - INTERVAL '1 day'`);
+    await db.query(`DELETE FROM sessions WHERE (user_id = 'demo-user' OR user_id LIKE 'demo:%') AND created_at < NOW() - INTERVAL '1 day'`);
+    await db.query(`DELETE FROM users WHERE (id = 'demo-user' OR id LIKE 'demo:%') AND COALESCE(last_login_at, created_at, NOW()) < NOW() - INTERVAL '1 day'`);
+  } catch (error) {
+    console.warn('[DemoCleanup] Failed:', error.message);
+  }
+}
 async function getPrivyJWKS() {
   if (!privyJWKS && !IS_DEMO_MODE) {
     privyJWKS = createRemoteJWKSet(
@@ -130,7 +168,7 @@ async function getPrivyJWKS() {
 async function authMiddleware(req, res, next) {
   // Full demo mode - no auth required at all
   if (IS_DEMO_MODE) {
-    req.user = { userId: 'demo-user', email: 'demo@example.com' };
+    req.user = getDemoUserFromRequest(req);
     return next();
   }
 
@@ -147,7 +185,7 @@ async function authMiddleware(req, res, next) {
   // Allow demo-token as fallback (useful when Privy is configured but user is in demo mode)
   if (token === 'demo-token') {
     log('INFO', 'Demo token accepted', { path: req.path });
-    req.user = { userId: 'demo-user', email: 'demo@example.com' };
+    req.user = getDemoUserFromRequest(req);
     return next();
   }
 
@@ -226,7 +264,7 @@ async function loadUserData(userId, email) {
   }
 
   // Standard Demo Mode (when DB is available but user is demo)
-  if (IS_DEMO_MODE || userId === 'demo-user') {
+  if (IS_DEMO_MODE || isDemoUserId(userId)) {
     return {
       history: [],
       mistakeBook: [],
@@ -273,7 +311,7 @@ async function saveUserData(userId, data) {
     return;
   }
 
-  if (IS_DEMO_MODE || userId === 'demo-user') return;
+  if (IS_DEMO_MODE || isDemoUserId(userId)) return;
 
   // Filter out heavy objects like ttsCache to prevent DB bloat
   const { nickname, ttsCache, ...jsonData } = data;
@@ -292,6 +330,67 @@ async function saveUserData(userId, data) {
 }
 
 // Helper: Manage Sessions (Max 1 session per user - new login forces logout of previous)
+async function abandonOtherActiveAttempts(userId, keepInstanceKey = null) {
+  const params = [userId];
+  let query = `
+    UPDATE attempts
+    SET status='abandoned', submitted_at=COALESCE(submitted_at, NOW())
+    WHERE user_id=$1 AND status='active'
+  `;
+
+  if (keepInstanceKey) {
+    params.push(keepInstanceKey);
+    query += ' AND instance_key <> $2';
+  }
+
+  await db.query(query, params);
+}
+
+async function ensureActiveAttempt(userId, instanceKey) {
+  await db.query(`
+    INSERT INTO attempts (instance_key, user_id, status)
+    VALUES ($1, $2, 'active')
+    ON CONFLICT (user_id, instance_key)
+    DO UPDATE SET status='active', submitted_at=NULL
+  `, [instanceKey, userId]);
+}
+
+async function abandonAttempt(userId, instanceKey) {
+  return db.query(`
+    UPDATE attempts
+    SET status='abandoned', submitted_at=COALESCE(submitted_at, NOW())
+    WHERE user_id=$1 AND instance_key=$2 AND status='active'
+  `, [userId, instanceKey]);
+}
+
+async function getExamInstanceAccess(userId, instanceKey) {
+  const inst = await db.query(
+    'SELECT user_id FROM exam_instances_cache WHERE instance_key=$1',
+    [instanceKey]
+  );
+
+  if (inst.rows.length === 0) {
+    return { ok: false, status: 404, error: 'Instance not found' };
+  }
+
+  if (inst.rows[0].user_id !== userId) {
+    return { ok: false, status: 404, error: 'Instance not found' };
+  }
+
+  const attempt = await db.query(
+    `SELECT status
+     FROM attempts
+     WHERE user_id=$1 AND instance_key=$2
+     ORDER BY started_at DESC
+     LIMIT 1`,
+    [userId, instanceKey]
+  );
+
+  return {
+    ok: true,
+    attemptStatus: attempt.rows[0]?.status || null
+  };
+}
 async function manageSession(userId, existingSessionId, email = '') {
   try {
     // Use transaction to ensure atomicity
@@ -347,9 +446,13 @@ app.post('/api/user-data', authMiddleware, async (req, res) => {
     // Check DB status
     const dbOk = await db.initDb();
 
+    if (dbOk && isDemoUserId(req.user.userId)) {
+      await cleanupExpiredDemoArtifacts();
+    }
+
     // Manage Session (only if DB available and not demo user)
     let activeSessionId = null;
-    if (dbOk && req.user.userId !== 'demo-user') {
+    if (dbOk && !isDemoUserId(req.user.userId)) {
       try {
         activeSessionId = await manageSession(req.user.userId, sessionId, req.user.email);
       } catch (e) {
@@ -362,7 +465,7 @@ app.post('/api/user-data', authMiddleware, async (req, res) => {
     const data = await loadUserData(req.user.userId, req.user.email);
 
     // Update last login (only if DB available and not demo)
-    if (dbOk && req.user.userId !== 'demo-user') {
+    if (dbOk && !isDemoUserId(req.user.userId)) {
       try {
         await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [req.user.userId]);
       } catch (e) {
@@ -408,7 +511,7 @@ app.post('/api/notebook', authMiddleware, async (req, res) => {
     const { question, note, tags, action } = req.body;
     const userId = req.user.userId;
 
-    if (IS_DEMO_MODE || userId === 'demo-user') return res.json({ success: true, demo: true });
+    if (IS_DEMO_MODE || isDemoUserId(userId)) return res.json({ success: true, demo: true });
 
     // 1. Ensure question exists in questions bank
     const hash = generateQuestionHash(question);
@@ -448,7 +551,7 @@ app.post('/api/notebook', authMiddleware, async (req, res) => {
 app.get('/api/notebook', authMiddleware, async (req, res) => {
   try {
     const userId = req.user.userId;
-    if (IS_DEMO_MODE || userId === 'demo-user') return res.json({ items: [] });
+    if (IS_DEMO_MODE || isDemoUserId(userId)) return res.json({ items: [] });
 
     const result = await db.query(`
       SELECT n.*, q.content, q.hash
@@ -1249,6 +1352,14 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
 
     // ======== V2 Branch: instanceKey present ========
     if (instanceKey && await db.initDb()) {
+      const access = await getExamInstanceAccess(req.user.userId, instanceKey);
+      if (!access.ok) {
+        return res.status(access.status).json({ error: access.error });
+      }
+      if (access.attemptStatus && access.attemptStatus !== 'active') {
+        return res.status(409).json({ error: 'Exam session has ended' });
+      }
+
       const inst = await db.query(
         'SELECT blueprint, user_id FROM exam_instances_cache WHERE instance_key=$1',
         [instanceKey]
@@ -1896,21 +2007,24 @@ function buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGener
     const totalQuestions = Math.max(1, Math.round(m.count_official * questionScale));
     const isReading = m.types.some(t => readingTypes.includes(t));
     const isListening = m.types.some(t => listeningTypes.includes(t));
-    const mondaiNum = startMondaiIndex + idx + 1;
+    const promptSlot = startMondaiIndex + idx + 1;
+    const officialNum = String(m.mondai_id || '').match(/[A-Z]+(\d+)/i)?.[1] || String(promptSlot);
+    const officialLabel = `${isListening || String(m.mondai_id || '').startsWith('L') ? 'Listen' : 'Mondai'} ${officialNum}`;
 
     if (isReading) {
-      // Use configured passage targets
       const targets = PASSAGE_LENGTH_TARGETS[mode] || PASSAGE_LENGTH_TARGETS['official'];
       const type = m.types.find(t => targets[t]) || 'reading_mid';
       const targetLength = targets[type] || 'medium length';
 
-      return `  ${mondaiNum}. ${m.mondai_id} (${m.title_vi}): ONE passage (${targetLength}) with ${totalQuestions} questions, types: ${m.types.join(', ')}
+      return `  Slot ${promptSlot}: ${m.mondai_id} (${m.title_vi}) | official label: ${officialLabel}
+    ONE passage (${targetLength}) with ${totalQuestions} questions, types: ${m.types.join(', ')}
     *** Create exactly ONE passage with ALL ${totalQuestions} questions included ***
     *** Passage may include subheadings if appropriate ***`;
     }
 
     if (isListening) {
-      return `  ${mondaiNum}. ${m.mondai_id} (${m.title_vi}): ${totalQuestions} questions, types: ${m.types.join(', ')}
+      return `  Slot ${promptSlot}: ${m.mondai_id} (${m.title_vi}) | official label: ${officialLabel}
+    ${totalQuestions} questions, types: ${m.types.join(', ')}
     ★★★ LISTENING AUDIO RULES ★★★
     - Put script_text at MONDAI level: mondai.media.script_text (NOT in items)
     - Use dialogue format: "A: こんにちは\nB: はい、こんにちは" (preferred for multi-voice TTS)
@@ -1918,7 +2032,8 @@ function buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGener
     - items[].media MUST be null or omitted`;
     }
 
-    return `  ${mondaiNum}. ${m.mondai_id} (${m.title_vi}): ${totalQuestions} questions, types: ${m.types.join(', ')}`;
+    return `  Slot ${promptSlot}: ${m.mondai_id} (${m.title_vi}) | official label: ${officialLabel}
+    ${totalQuestions} questions, types: ${m.types.join(', ')}`;
   }).join('\n');
 
   // Build detailed anti-duplication context from previously generated mondai
@@ -1988,7 +2103,7 @@ EXAM: ${examSpec.display_name_vi}
 LANGUAGE: ${examSpec.language}
 MODE: ${mode} (question_scale: ${questionScale})
 GROUP: ${group.group_id} (${group.title_vi})
-CHUNK: Mondai ${startMondaiIndex + 1} to ${startMondaiIndex + mondaiToGenerate.length} of ${group.mondai.length}
+CHUNK SLOTS: ${startMondaiIndex + 1} to ${startMondaiIndex + mondaiToGenerate.length} of ${group.mondai.length}
 ${contextInfo}
 GENERATE THESE MONDAI:
 ${mondaiInfo}
@@ -2075,10 +2190,12 @@ TITLE RULES (meta.display_title)
 For each mondai, optionally include "meta.display_title" with format:
 - Listening mondai: "Listen X" or "Listen X: {localizedTitle} ({日本語タイトル})"
 - Non-listening: "Mondai X" or "Mondai X: {localizedTitle} ({日本語タイトル})"
-Where X is the mondai number (1, 2, 3...).
-{localizedTitle} should be in Vietnamese (target user language).
+Where X MUST come from mondai_id / official exam structure, never from local chunk order.
+If mondai_id is M8, display_title must use Mondai 8.
+If mondai_id is L3, display_title must use Listen 3.
+{localizedTitle} should be in Vietnamese (target user language) and stay semantically aligned with the requested mondai title.
 {日本語タイトル} is optional Japanese title in parentheses.
-If omitted, UI will fallback to "Mondai X" / "Listen X".
+If omitted, UI will fallback to the canonical official label.
 DO NOT include titles/headers inside passage.text or script_text.
 
 {
@@ -2928,6 +3045,10 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
       return res.status(503).json({ error: 'DB unavailable for V2' });
     }
 
+    if (isDemoUserId(userId)) {
+      await cleanupExpiredDemoArtifacts();
+    }
+
     const user = await loadUserData(userId, req.user.email);
     const plan = user.plan || 'free';
     const level = examSpec.level || examSpec.default_level;
@@ -3035,12 +3156,6 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
       }
 
       if (!created) throw new Error('Failed to create exam instance after max retries');
-
-      await db.query(`
-        INSERT INTO attempts (instance_key, user_id, status)
-        VALUES ($1, $2, 'active')
-        ON CONFLICT DO NOTHING
-      `, [instanceKey, userId]);
     } else {
       const existingRow = await fetchExisting(finalSetNo);
 
@@ -3108,18 +3223,15 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
             throw e;
           }
         }
-
-        await db.query(`
-          INSERT INTO attempts (instance_key, user_id, status)
-          VALUES ($1, $2, 'active')
-          ON CONFLICT DO NOTHING
-        `, [instanceKey, userId]);
       }
     }
 
     if (!blueprint?.groups?.[0]) {
       throw new Error('Failed to build exam blueprint');
     }
+
+    await abandonOtherActiveAttempts(userId, instanceKey);
+    await ensureActiveAttempt(userId, instanceKey);
 
     const firstGroup = blueprint.groups[0];
     const firstChunk = await deliverNextChunk(instanceKey, {
@@ -3148,14 +3260,46 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
   }
 });
 
+// POST /api/exam/abandon
+app.post('/api/exam/abandon', authMiddleware, async (req, res) => {
+  try {
+    const { instanceKey } = req.body || {};
+
+    if (!instanceKey) {
+      return res.status(400).json({ error: 'instanceKey is required' });
+    }
+
+    if (!(await db.initDb())) {
+      return res.status(503).json({ error: 'DB unavailable for abandon' });
+    }
+
+    const result = await abandonAttempt(req.user.userId, instanceKey);
+    res.json({ success: true, abandoned: result.rowCount || 0 });
+  } catch (err) {
+    console.error('Abandon exam error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 // POST /api/exam/chunk
 app.post('/api/exam/chunk', authMiddleware, async (req, res) => {
   try {
     const { instanceKey, want } = req.body;
 
+    if (!instanceKey || !want?.group_id) {
+      return res.status(400).json({ error: 'instanceKey and want.group_id are required' });
+    }
+
     // Wait for DB initialization
     if (!(await db.initDb())) {
       return res.status(503).json({ error: 'DB unavailable' });
+    }
+
+    const access = await getExamInstanceAccess(req.user.userId, instanceKey);
+    if (!access.ok) {
+      return res.status(access.status).json({ error: access.error });
+    }
+    if (access.attemptStatus && access.attemptStatus !== 'active') {
+      return res.status(409).json({ error: 'Exam session has ended' });
     }
 
     const chunk = await deliverNextChunk(instanceKey, want);
@@ -3179,6 +3323,14 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
     // Wait for DB initialization
     if (!(await db.initDb())) {
       return res.status(503).json({ error: 'DB unavailable' });
+    }
+
+    const access = await getExamInstanceAccess(req.user.userId, instanceKey);
+    if (!access.ok) {
+      return res.status(access.status).json({ error: access.error });
+    }
+    if (access.attemptStatus && access.attemptStatus !== 'active') {
+      return res.status(409).json({ error: 'Exam session has ended' });
     }
 
     const inst = await db.query(
@@ -3401,6 +3553,14 @@ if (require.main === module) {
 }
 
 module.exports = app;
+
+
+
+
+
+
+
+
 
 
 
