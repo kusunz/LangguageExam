@@ -347,12 +347,32 @@ async function abandonOtherActiveAttempts(userId, keepInstanceKey = null) {
 }
 
 async function ensureActiveAttempt(userId, instanceKey) {
-  await db.query(`
-    INSERT INTO attempts (instance_key, user_id, status)
-    VALUES ($1, $2, 'active')
-    ON CONFLICT (user_id, instance_key)
-    DO UPDATE SET status='active', submitted_at=NULL
-  `, [instanceKey, userId]);
+  const updateRes = await db.query(`
+    UPDATE attempts
+    SET status='active', submitted_at=NULL
+    WHERE user_id=$1 AND instance_key=$2
+  `, [userId, instanceKey]);
+
+  if (updateRes.rowCount > 0) {
+    return;
+  }
+
+  try {
+    await db.query(`
+      INSERT INTO attempts (instance_key, user_id, status)
+      VALUES ($1, $2, 'active')
+    `, [instanceKey, userId]);
+  } catch (err) {
+    if (err.code === '23505') {
+      await db.query(`
+        UPDATE attempts
+        SET status='active', submitted_at=NULL
+        WHERE user_id=$1 AND instance_key=$2
+      `, [userId, instanceKey]);
+      return;
+    }
+    throw err;
+  }
 }
 
 async function abandonAttempt(userId, instanceKey) {
