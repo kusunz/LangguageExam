@@ -28,6 +28,7 @@ async function selectMondaiFromBucket(db, options) {
     usedHashes = [],
     userId = null,
     allowRepeat = false,
+    strictFresh = false,
     level = null,
     primaryType = null,
     rng = Math.random
@@ -54,7 +55,7 @@ async function selectMondaiFromBucket(db, options) {
     if (selected) return selected;
   }
 
-  if (allowRepeat || !userId) {
+  if (strictFresh || allowRepeat || !userId) {
     throw new Error('Bucket empty or exhausted');
   }
 

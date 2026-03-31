@@ -1272,6 +1272,7 @@ async function hydratePendingBlueprintSlots(params) {
         {
           userId,
           allowRepeat,
+          strictFresh: !allowRepeat && !!userId,
           level,
           primaryType: mondaiDef.types?.[0] || null
         }
@@ -1368,7 +1369,13 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
           bucketKey,
           rng,
           Array.from(usedHashes),
-          { userId, allowRepeat, level, primaryType: mondaiDef.types?.[0] || null }
+          {
+            userId,
+            allowRepeat,
+            strictFresh: !allowRepeat && !!userId,
+            level,
+            primaryType: mondaiDef.types?.[0] || null
+          }
         );
         usedHashes.add(hash);
         slot.mondai_hash = hash;
@@ -1498,6 +1505,7 @@ async function sampleMondaiFromBucket(snapshotId, bucketKey, rng, usedHashes, op
     usedHashes,
     userId: options.userId || null,
     allowRepeat: !!options.allowRepeat,
+    strictFresh: !!options.strictFresh,
     level: options.level || null,
     primaryType: options.primaryType || null
   });

@@ -2438,26 +2438,8 @@
             throw lastError || new Error('Chunk retry failed');
         },
 
-
         isGroupReady(groupIndex) {
             return State.test.groups[groupIndex] !== undefined;
-        },
-
-        simulateProgress(bar, text) {
-            let progress = 0;
-            const startTime = Date.now();
-            const targetDuration = 25000; // 25 seconds to reach 98%
-
-            return setInterval(() => {
-                const elapsed = Date.now() - startTime;
-                // Ease-out curve: fast at start, slow near end
-                // Reaches 98% at ~25 seconds, then stops
-                const targetProgress = 98 * (1 - Math.pow(1 - Math.min(elapsed / targetDuration, 1), 2));
-                progress = Math.min(Math.round(targetProgress), 98);
-
-                bar.style.width = `${progress}%`;
-                text.textContent = `${progress}%`;
-            }, 200);
         },
 
         collectUserHistory() {
@@ -3510,7 +3492,12 @@
                 clearInterval(progressInterval);
                 console.error('Grade test error:', err);
                 showToast('Không thể chấm điểm: ' + err.message, 'error');
-                showScreen('home-screen');
+                if (State.test) {
+                    showScreen('test-screen');
+                    this.renderCurrentMondai();
+                } else {
+                    showScreen('home-screen');
+                }
             }
         },
 
@@ -4619,6 +4606,8 @@
 
         // Review back
         $('#btn-back-home').addEventListener('click', () => {
+            TestUI.resetChunkLoadingState();
+            State.currentInstanceKey = null;
             State.test = null;
             State.feedback = null;
             State.answers = {};
