@@ -2,7 +2,7 @@ const DEFAULT_OPENROUTER_BASE =
   process.env.OPENROUTER_API_BASE ||
   process.env.OPENROUTER_BASE_URL ||
   'https://openrouter.ai/api/v1';
-const DEFAULT_TIMEOUT_MS = Number.parseInt(process.env.LLM_TIMEOUT_MS || '45000', 10);
+const DEFAULT_TIMEOUT_MS = Number.parseInt(process.env.LLM_TIMEOUT_MS || '180000', 10);
 
 function createProviderError(message, extra = {}) {
   const error = new Error(message);

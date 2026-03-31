@@ -48,6 +48,10 @@ const { createClient } = require('@deepgram/sdk');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const GENERATE_MAX_TOKENS = Math.max(
+  4096,
+  Number.parseInt(process.env.LLM_GENERATE_MAX_TOKENS || '16384', 10)
+);
 
 // Trust proxy for Vercel/Cloud deployments (enables correct IP detection for rate limiting)
 app.set('trust proxy', 1);
@@ -906,7 +910,7 @@ async function generateMondaiForSlotBatch(params) {
     task: 'generate',
     prompt,
     validateResult: validateMondaiChunkResult,
-    maxTokens: 8192,
+    maxTokens: GENERATE_MAX_TOKENS,
     temperature: 0.8
   });
 
@@ -1022,7 +1026,7 @@ async function generateMondaiForBucket(params) {
         task: 'generate',
         prompt,
         validateResult: validateMondaiChunkResult,
-        maxTokens: 8192,
+        maxTokens: GENERATE_MAX_TOKENS,
         temperature: 0.8
       });
       const mondaiList = Array.isArray(generation?.result?.mondai) ? generation.result.mondai : [];

@@ -2,7 +2,8 @@
     "version": 2,
     "functions": {
         "api/index.js": {
-            "includeFiles": "web/**"
+            "includeFiles": "web/**",
+            "maxDuration": 300
         }
     },
     "crons": [
