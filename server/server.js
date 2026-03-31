@@ -633,6 +633,64 @@ function generateAnswerHash(questionId, answerIndex) {
   return crypto.createHash('sha256').update(hashInput).digest('hex');
 }
 
+function normalizeMondaiIdToken(mondaiId) {
+  return String(mondaiId || 'm')
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, '')
+    .toLowerCase() || 'm';
+}
+
+function buildCanonicalQuestionId(mondaiId, itemIndex) {
+  return `${normalizeMondaiIdToken(mondaiId)}_q${String(itemIndex + 1).padStart(2, '0')}`;
+}
+
+function buildQuestionReviewLabel(mondaiId, itemIndex) {
+  const normalized = String(mondaiId || '').toUpperCase();
+  const match = normalized.match(/^([A-Z]+)(\d+)$/);
+  if (!match) return `Câu ${itemIndex + 1}`;
+
+  const [, prefix, numericPart] = match;
+  const sectionLabel = prefix === 'L'
+    ? `Listen ${numericPart}`
+    : `Mondai ${numericPart}`;
+
+  return `${sectionLabel} - Câu ${itemIndex + 1}`;
+}
+
+function canonicalizeMondaiQuestionIds(mondai, options = {}) {
+  if (!mondai || typeof mondai !== 'object') return mondai;
+
+  const canonicalMondaiId = options.mondaiId || mondai.mondai_id || 'M';
+  mondai.mondai_id = canonicalMondaiId;
+
+  if (!Array.isArray(mondai.items)) return mondai;
+
+  mondai.items = mondai.items.map((rawItem, itemIndex) => {
+    const item = rawItem && typeof rawItem === 'object' ? rawItem : {};
+    const canonicalId = buildCanonicalQuestionId(canonicalMondaiId, itemIndex);
+    const reviewLabel = buildQuestionReviewLabel(canonicalMondaiId, itemIndex);
+
+    if (!item.meta || typeof item.meta !== 'object') {
+      item.meta = {};
+    }
+
+    if (item.id && item.id !== canonicalId) {
+      item.meta.generated_id = item.id;
+    }
+
+    item.id = canonicalId;
+    item.review_label = reviewLabel;
+    item.meta.canonical_id = canonicalId;
+    item.meta.review_label = reviewLabel;
+    item.meta.question_index = itemIndex;
+    item.meta.mondai_id = canonicalMondaiId;
+
+    return item;
+  });
+
+  return mondai;
+}
+
 /**
  * Sanitize mondai for client: remove answer_index/keys, add answer_hash
  * Ensures NO server-only data leaks to client
@@ -801,6 +859,7 @@ async function generateMondaiForBucket(params) {
 
         mondai.mondai_id = mondaiDef.mondai_id;
         mondai.primary_type = mondaiDef.types[0];
+        canonicalizeMondaiQuestionIds(mondai, { mondaiId: mondaiDef.mondai_id });
 
         const hash = generateMondaiHash(mondai);
         const itemType = mondai.mondai_type || mondaiDef.mondai_type || mondaiDef.types?.[0] || 'unknown';
@@ -1251,7 +1310,7 @@ const GEMINI_TTS_MODELS = [
 function validateQuestionItem(item) {
   const errors = [];
   if (!item || typeof item !== 'object') return ['item_not_object'];
-  if (!item.id || typeof item.id !== 'string') errors.push('missing_id');
+  if (item.id !== undefined && typeof item.id !== 'string') errors.push('id_invalid');
   if (!item.type || typeof item.type !== 'string') errors.push('missing_type');
   if (!item.prompt || typeof item.prompt !== 'string') errors.push('missing_prompt');
   if (!Array.isArray(item.choices) || item.choices.length !== 4) errors.push('choices_not_4');
@@ -1394,6 +1453,7 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
       const questionMap = {};
       contentRes.rows.forEach((row) => {
         const mondai = parseJsonb(row.content);
+        canonicalizeMondaiQuestionIds(mondai, { mondaiId: mondai?.mondai_id });
         if (mondai.items) {
           mondai.items.forEach((item) => {
             if (item.id && item.answer_index !== undefined) {
@@ -2198,6 +2258,16 @@ If mondai_id is L3, display_title must use Listen 3.
 If omitted, UI will fallback to the canonical official label.
 DO NOT include titles/headers inside passage.text or script_text.
 
+-------------------------
+QUESTION ID RULES
+-------------------------
+- items[].id SHOULD follow the canonical format: "<mondai_id_lowercase>_qNN"
+- Example for M2: "m2_q01", "m2_q02"
+- Example for L3: "l3_q01"
+- Keep numbering sequential inside each mondai
+- NEVER use generic/random ids like "item1", "question_1", "mondai1-q1", "N5_M2_001_Q1"
+- If omitted, the server will normalize them, but following this format is strongly preferred
+
 {
   "mondai": [
     {
@@ -2209,7 +2279,7 @@ DO NOT include titles/headers inside passage.text or script_text.
       "media": { "script_text": "<for listening mondai ONLY - dialogue format A: ... B: ... preferred>" },
       "items": [
         {
-          "id": "<unique_id>",
+          "id": "<example: m2_q01>",
           "type": "<question_type>",
           "prompt": "<question in ${examSpec.language}>",
           "choices": ["<A text>", "<B text>", "<C text>", "<D text>"],
@@ -2900,6 +2970,8 @@ function attachSlotMetaToMondai(content, slot, groupId, slotIndex) {
     cloned.mondai_id = expectedMondaiId;
   }
 
+  canonicalizeMondaiQuestionIds(cloned, { mondaiId: expectedMondaiId || cloned.mondai_id });
+
   cloned.meta.slot_id = slotId;
   cloned.meta.group_id = groupId;
   cloned.meta.expected_mondai_id = expectedMondaiId;
@@ -3384,6 +3456,7 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
     const answerMap = {};
     contentRes.rows.forEach(row => {
       const m = parseJsonb(row.content);
+      canonicalizeMondaiQuestionIds(m, { mondaiId: m?.mondai_id });
       if (m.items) {
         m.items.forEach(item => {
           if (item.id && item.answer_index !== undefined) {

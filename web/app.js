@@ -3777,6 +3777,7 @@
 
                 const userAnswer = State.answers[item.id];
                 const correctAnswer = item.correct_index !== undefined ? item.correct_index : questionData.answer_index;
+                const reviewLabel = questionData.meta?.review_label || questionData.review_label || item.review_label || item.id;
 
                 // Bilingual extractors
                 const whyWrongVi = item.why_wrong?.vi || item.why_wrong_vi;
@@ -3790,7 +3791,7 @@
                 return `
           <div class="review-item ${item.is_correct ? '' : 'incorrect'}">
             <div class="review-item-header">
-              <span class="review-item-id">${item.id}</span>
+              <span class="review-item-id">${TestUI.escapeHtml(reviewLabel)}</span>
               <div style="display: flex; gap: 8px; align-items: center;">
                 <span class="review-status ${item.is_correct ? 'correct' : 'incorrect'}">
                     ${item.is_correct ? '✓ Đúng' : '✗ Sai'}
