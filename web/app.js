@@ -124,6 +124,7 @@
             TestUI.failedSlotRequests?.clear?.();
             TestUI.completedGroups?.clear?.();
             TestUI.showNextButtonRetryState = false;
+            TestUI.lastNavLoadNoticeAt = 0;
             if (TestUI.nextLoadFailTimer) {
                 clearTimeout(TestUI.nextLoadFailTimer);
                 TestUI.nextLoadFailTimer = null;
@@ -1971,6 +1972,7 @@
         loadCycleId: 0,
         nextLoadFailTimer: null,
         showNextButtonRetryState: false,
+        lastNavLoadNoticeAt: 0,
 
         simulateProgress(bar, text) {
             if (!bar) bar = $('#loading-progress');
@@ -2054,6 +2056,7 @@
             this.failedSlotRequests.clear();
             this.completedGroups.clear();
             this.showNextButtonRetryState = false;
+            this.lastNavLoadNoticeAt = 0;
             if (this.nextLoadFailTimer) {
                 clearTimeout(this.nextLoadFailTimer);
                 this.nextLoadFailTimer = null;
@@ -2061,6 +2064,13 @@
             if (typeof RequestQueue !== 'undefined' && RequestQueue.clear) {
                 RequestQueue.clear();
             }
+        },
+
+        notifySlowNextLoad(message = 'Tải câu tiếp theo lâu hơn bình thường, hệ thống đang thử lại...') {
+            const now = Date.now();
+            if (now - this.lastNavLoadNoticeAt < 8000) return;
+            this.lastNavLoadNoticeAt = now;
+            showToast(message, 'info');
         },
 
         buildCanonicalMondaiDisplayTitle(mondai, fallbackIsListening = false) {
@@ -2366,7 +2376,8 @@
 
         async queueSlotRequest(entry, options = {}) {
             if (!entry?.group_id || !entry?.slotId || !State.currentInstanceKey) return;
-            if (!options.force && this.activeSlotRequests.has(entry.slotId)) return;
+            if (this.activeSlotRequests.has(entry.slotId)) return;
+            if (!options.force && this.isSlotReady(entry)) return;
 
             const loadCycleId = this.loadCycleId;
             const instanceKey = State.currentInstanceKey;
@@ -2838,26 +2849,23 @@
                 btnNext.onclick = null;
                 if (this.nextLoadFailTimer) { clearTimeout(this.nextLoadFailTimer); this.nextLoadFailTimer = null; }
             } else if (!nextMondaiLoaded && canRequestMore) {
-                if (nextMondaiFailed || this.showNextButtonRetryState) {
-                    btnNext.disabled = false;
-                    btnNext.innerHTML = '<span class="loading-spinner"><i class="fa-solid fa-rotate-right"></i></span> Lỗi tải tiếp';
-                    btnNext.onclick = (e) => {
-                        e.preventDefault();
-                        this.retryFetchNextMondai(nextEntry.group_id);
-                    };
-                } else {
-                    btnNext.disabled = true;
-                    btnNext.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
-                    btnNext.onclick = null;
-                    this.pumpSlotRequests();
+                btnNext.disabled = true;
+                btnNext.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+                btnNext.onclick = null;
+                this.pumpSlotRequests();
 
-                    if (!this.nextLoadFailTimer) {
-                        this.nextLoadFailTimer = setTimeout(() => {
-                            this.showNextButtonRetryState = true;
-                            this.nextLoadFailTimer = null;
-                            this.updateNavigationButtons();
-                        }, 10000);
-                    }
+                if (!this.nextLoadFailTimer) {
+                    const retryDelayMs = nextMondaiFailed ? 1500 : 10000;
+                    this.nextLoadFailTimer = setTimeout(() => {
+                        this.nextLoadFailTimer = null;
+
+                        const latestEntry = this.getSlotEntryAtGlobalIndex(this.getGlobalMondaiIndex() + 1);
+                        if (!latestEntry || this.isSlotReady(latestEntry)) return;
+
+                        this.notifySlowNextLoad();
+                        this.retryFetchNextMondai(latestEntry.group_id);
+                        this.updateNavigationButtons();
+                    }, retryDelayMs);
                 }
             } else {
                 btnNext.disabled = !nextMondaiLoaded;
@@ -2869,11 +2877,7 @@
 
             const loadingIndicator = $('#nav-loading-indicator');
             if (loadingIndicator) {
-                if (!nextMondaiLoaded && !isLast && canRequestMore) {
-                    loadingIndicator.classList.remove('hidden');
-                } else {
-                    loadingIndicator.classList.add('hidden');
-                }
+                loadingIndicator.classList.add('hidden');
             }
 
         },

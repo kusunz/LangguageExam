@@ -879,7 +879,7 @@ async function generateMondaiForSlotBatch(params) {
     batchEntries
   } = params;
 
-  if (!Array.isArray(batchEntries) || batchEntries.length === 0) return;
+  if (!Array.isArray(batchEntries) || batchEntries.length === 0) return [];
 
   const promptGroup = group?.mondai
     ? group
@@ -890,6 +890,7 @@ async function generateMondaiForSlotBatch(params) {
     };
   const startMondaiIndex = batchEntries[0]?.slot?.slot_ordinal || 0;
   const mondaiBatch = batchEntries.map((entry) => entry.mondaiDef);
+  const validateMondaiChunkResult = buildMondaiChunkValidator(mondaiBatch, examSpec, mode);
 
   const prompt = buildMondaiChunkPrompt(
     examSpec,
@@ -915,6 +916,7 @@ async function generateMondaiForSlotBatch(params) {
   }
 
   const unusedMondai = mondaiList.slice();
+  const generatedAssignments = [];
 
   for (const entry of batchEntries) {
     const expectedMondaiId = String(entry?.mondaiDef?.mondai_id || '').toUpperCase();
@@ -964,7 +966,14 @@ async function generateMondaiForSlotBatch(params) {
       VALUES ($1, $2, $3, $4)
       ON CONFLICT (snapshot_id, bucket_key, mondai_hash) DO NOTHING
     `, [entry.snapshotId, entry.slot.bucket_key, hash, group.group_id]);
+
+    generatedAssignments.push({
+      entry,
+      hash
+    });
   }
+
+  return generatedAssignments;
 }
 
 /**
@@ -1006,6 +1015,7 @@ async function generateMondaiForBucket(params) {
     const batchSize = Math.min(remaining, 3);
     const mondaiBatch = Array(batchSize).fill(mondaiDef);
     const prompt = buildMondaiChunkPrompt(examSpec, mode, group, 0, mondaiBatch, 0, []);
+    const validateMondaiChunkResult = buildMondaiChunkValidator(mondaiBatch, examSpec, mode);
 
     try {
       const generation = await runJsonTask({
@@ -1198,6 +1208,20 @@ function getInitialMondaiBufferCount(group) {
   return 3;
 }
 
+function getInitialReadySlotIds(group) {
+  const targetCount = getInitialMondaiBufferCount(group);
+  const slots = Array.isArray(group?.mondai_slots) ? group.mondai_slots : [];
+  const readyPrefix = [];
+
+  for (const slot of slots) {
+    if (!slot?.slot_id || !slot?.mondai_hash) break;
+    readyPrefix.push(slot.slot_id);
+    if (readyPrefix.length >= targetCount) break;
+  }
+
+  return readyPrefix;
+}
+
 async function hydratePendingBlueprintSlots(params) {
   const {
     pendingSlots,
@@ -1231,14 +1255,14 @@ async function hydratePendingBlueprintSlots(params) {
         try {
           const batchLabel = batchEntries.map((entry) => entry.slot?.mondai_id || entry.slot?.slot_id).join(', ');
           console.log(`[Blueprint] Triggering on-demand generation batch (${batchEntries.length} mondai): ${batchLabel}`);
-          await generateMondaiForSlotBatch({
+          const generatedAssignments = await generateMondaiForSlotBatch({
             examSpec,
             level,
             mode,
             group: batchEntries[0].group,
             batchEntries
           });
-          return { ok: true, batchEntries };
+          return { ok: true, batchEntries, generatedAssignments };
         } catch (error) {
           return { ok: false, batchEntries, error };
         }
@@ -1250,6 +1274,20 @@ async function hydratePendingBlueprintSlots(params) {
     generationTasks,
     getEffectiveOnDemandRequestConcurrency()
   );
+
+  for (const result of generationResults) {
+    if (!result?.ok || !Array.isArray(result.generatedAssignments)) continue;
+
+    for (const assignment of result.generatedAssignments) {
+      const hash = assignment?.hash;
+      const slot = assignment?.entry?.slot;
+      if (!hash || !slot || usedHashes.has(hash)) continue;
+
+      usedHashes.add(hash);
+      slot.mondai_hash = hash;
+      slot.status = 'ready';
+    }
+  }
 
   for (const result of generationResults) {
     if (result?.ok) continue;
@@ -1398,7 +1436,44 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
   }
 
   const eagerPendingSlots = pendingSlots.slice(0, BLUEPRINT_EAGER_SLOT_COUNT);
-  const deferredPendingSlots = pendingSlots.slice(BLUEPRINT_EAGER_SLOT_COUNT);
+  const prefetchPendingSlots = pendingSlots.slice(
+    BLUEPRINT_EAGER_SLOT_COUNT,
+    BLUEPRINT_EAGER_SLOT_COUNT + BLUEPRINT_ON_DEMAND_BATCH_SIZE
+  );
+  const deferredPendingSlots = pendingSlots.slice(
+    BLUEPRINT_EAGER_SLOT_COUNT + BLUEPRINT_ON_DEMAND_BATCH_SIZE
+  );
+
+  let startPrefetchPromise = null;
+  if (prefetchPendingSlots.length > 0) {
+    prefetchPendingSlots.forEach(({ slot }) => {
+      slot.status = 'prefetching';
+    });
+
+    startPrefetchPromise = hydratePendingBlueprintSlots({
+      pendingSlots: prefetchPendingSlots,
+      examSpec,
+      level,
+      mode,
+      snapshotId,
+      plan,
+      rng,
+      usedHashes,
+      userId,
+      allowRepeat
+    }).then(() => {
+      prefetchPendingSlots.forEach(({ slot }) => {
+        if (!slot?.mondai_hash) slot.status = 'deferred';
+      });
+      return true;
+    }).catch((error) => {
+      console.warn('[Blueprint] Start prefetch wave failed:', error?.message || error);
+      prefetchPendingSlots.forEach(({ slot }) => {
+        if (!slot?.mondai_hash) slot.status = 'deferred';
+      });
+      return false;
+    });
+  }
 
   await hydratePendingBlueprintSlots({
     pendingSlots: eagerPendingSlots,
@@ -1501,7 +1576,7 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
   // The provided snippet in view_file ends at 752. 
   // I will replace the pushing logic.
 
-  return blueprint;
+  return { blueprint, startPrefetchPromise };
 }
 
 async function sampleMondaiFromBucket(snapshotId, bucketKey, rng, usedHashes, options = {}) {
@@ -1526,14 +1601,37 @@ const GEMINI_TTS_MODELS = [
   'gemini-2.5-flash-tts'
 ];
 
-function validateQuestionItem(item) {
+const READING_TYPE_SET = new Set(['reading_short', 'reading_mid', 'reading_long', 'reading_compare', 'reading_info']);
+const LISTENING_TYPE_SET = new Set(['listening_dialogue', 'listening_mono', 'listen_respond', 'listen_integration', 'listen_task']);
+const PASSAGE_REQUIRED_TYPE_SET = new Set(['grammar_passage', ...READING_TYPE_SET]);
+const PASSAGE_FORBIDDEN_TYPE_SET = new Set(['kanji', 'vocab_context', 'vocab_synonym', 'vocab_usage', 'grammar_select', 'grammar_order']);
+const ORDER_PATTERN_RE = /^\s*(?:[1-4][\-\s,>]{1,3}){3}[1-4]\s*$/;
+
+function containsForbiddenPromptMarkup(text) {
+  const value = String(text || '');
+  return /<\/?[a-z][^>]*>/i.test(value) || /\*\*|__/.test(value);
+}
+
+function looksJapaneseHeavyText(text) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  const japaneseChars = (value.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/g) || []).length;
+  return japaneseChars >= 6 && (japaneseChars / Math.max(value.length, 1)) >= 0.2;
+}
+
+function validateQuestionItem(item, options = {}) {
   const errors = [];
+  const expectedTypes = Array.isArray(options.expectedTypes) ? options.expectedTypes : [];
+  const expectedPrimaryType = options.expectedPrimaryType || expectedTypes[0] || null;
   if (!item || typeof item !== 'object') return ['item_not_object'];
   if (item.id !== undefined && typeof item.id !== 'string') errors.push('id_invalid');
   if (!item.type || typeof item.type !== 'string') errors.push('missing_type');
+  if (item.type && expectedTypes.length > 0 && !expectedTypes.includes(item.type)) errors.push('type_mismatch');
   if (!item.prompt || typeof item.prompt !== 'string') errors.push('missing_prompt');
+  if (item.prompt && containsForbiddenPromptMarkup(item.prompt)) errors.push('prompt_has_forbidden_markup');
   if (!Array.isArray(item.choices) || item.choices.length !== 4) errors.push('choices_not_4');
   if (Array.isArray(item.choices)) {
+    const normalizedChoices = item.choices.map((choice) => String(choice || '').trim().toLowerCase());
     for (let i = 0; i < item.choices.length; i++) {
       if (typeof item.choices[i] !== 'string' || item.choices[i].trim() === '') {
         errors.push(`choice_${i}_invalid`);
@@ -1542,41 +1640,99 @@ function validateQuestionItem(item) {
         errors.push('choices_are_letters');
         break;
       }
+      if (containsForbiddenPromptMarkup(item.choices[i])) {
+        errors.push(`choice_${i}_forbidden_markup`);
+      }
     }
+    if (new Set(normalizedChoices).size !== normalizedChoices.length) errors.push('choices_duplicate');
   }
   if (typeof item.answer_index !== 'number' || item.answer_index < 0 || item.answer_index > 3) errors.push('answer_index_invalid');
   if (!item.explain_brief || typeof item.explain_brief !== 'string') errors.push('missing_explain_brief');
+  if (item.explain_brief && looksJapaneseHeavyText(item.explain_brief)) errors.push('explain_not_vietnamese');
   if (!Array.isArray(item.tags) || item.tags.length === 0) errors.push('missing_tags');
   if (item.media && typeof item.media !== 'object') errors.push('media_invalid');
+  if (expectedPrimaryType === 'kanji' && item.prompt && !/\[\[[^\]]+\]\]/.test(item.prompt)) errors.push('kanji_missing_highlight');
+  if (expectedPrimaryType === 'grammar_order') {
+    if (item.prompt && !(/[1-4][\.\)]/.test(item.prompt) || /①|②|③|④/.test(item.prompt))) errors.push('grammar_order_missing_fragments');
+    if (Array.isArray(item.choices) && item.choices.some((choice) => !ORDER_PATTERN_RE.test(choice))) errors.push('grammar_order_choices_invalid');
+  }
+  if ((expectedPrimaryType === 'vocab_synonym' || expectedPrimaryType === 'vocab_usage') && item.prompt && !/\[\[[^\]]+\]\]/.test(item.prompt)) {
+    errors.push('vocab_target_missing_highlight');
+  }
   return errors;
 }
 
-function validateMondaiChunkResult(result) {
-  const errors = [];
-  if (!result || typeof result !== 'object') return ['chunk_not_object'];
-  if (!Array.isArray(result.mondai) || result.mondai.length === 0) errors.push('missing_mondai');
-  if (!Array.isArray(result.mondai)) return errors;
+function buildMondaiChunkValidator(mondaiToGenerate, examSpec, mode) {
+  const expectedDefs = Array.isArray(mondaiToGenerate) ? mondaiToGenerate : [];
 
-  result.mondai.forEach((mondai, index) => {
-    if (!mondai || typeof mondai !== 'object') {
-      errors.push(`mondai_${index}_not_object`);
-      return;
+  return function validateMondaiChunkResult(result) {
+    const errors = [];
+    if (!result || typeof result !== 'object') return ['chunk_not_object'];
+    if (!Array.isArray(result.mondai) || result.mondai.length === 0) errors.push('missing_mondai');
+    if (!Array.isArray(result.mondai)) return errors;
+    if (expectedDefs.length > 0 && result.mondai.length < expectedDefs.length) {
+      errors.push('mondai_count_too_small');
     }
-    if (!mondai.mondai_id || typeof mondai.mondai_id !== 'string') errors.push(`mondai_${index}_missing_mondai_id`);
-    if (!mondai.title_vi || typeof mondai.title_vi !== 'string') errors.push(`mondai_${index}_missing_title_vi`);
-    if (!Array.isArray(mondai.items) || mondai.items.length === 0) errors.push(`mondai_${index}_missing_items`);
 
-    if (Array.isArray(mondai.items)) {
-      mondai.items.forEach((item, itemIndex) => {
-        const itemErrors = validateQuestionItem(item);
-        if (itemErrors.length > 0) {
-          errors.push(`mondai_${index}_item_${itemIndex}:${itemErrors.join(',')}`);
-        }
-      });
-    }
-  });
+    const modeConfig = examSpec?.modes?.[mode] || DEFAULT_MODES[mode] || DEFAULT_MODES.official || { question_scale: 1 };
 
-  return errors;
+    expectedDefs.forEach((expectedDef, expectedIndex) => {
+      const mondai = result.mondai.find((entry) =>
+        String(entry?.mondai_id || '').toUpperCase() === String(expectedDef?.mondai_id || '').toUpperCase()
+      ) || result.mondai[expectedIndex];
+
+      if (!mondai || typeof mondai !== 'object') {
+        errors.push(`mondai_${expectedIndex}_missing`);
+        return;
+      }
+
+      const primaryType = expectedDef?.types?.[0] || null;
+      const expectedQuestionCount = Math.max(1, Math.round((expectedDef?.count_official || 1) * (modeConfig.question_scale || 1)));
+      const isReading = expectedDef?.types?.some((type) => READING_TYPE_SET.has(type));
+      const isListening = expectedDef?.types?.some((type) => LISTENING_TYPE_SET.has(type));
+      const requiresPassage = expectedDef?.types?.some((type) => PASSAGE_REQUIRED_TYPE_SET.has(type));
+      const forbidsPassage = expectedDef?.types?.every((type) => PASSAGE_FORBIDDEN_TYPE_SET.has(type));
+
+      if (!mondai.mondai_id || typeof mondai.mondai_id !== 'string') errors.push(`mondai_${expectedIndex}_missing_mondai_id`);
+      if (!mondai.title_vi || typeof mondai.title_vi !== 'string') errors.push(`mondai_${expectedIndex}_missing_title_vi`);
+      if (mondai.title_vi && looksJapaneseHeavyText(mondai.title_vi)) errors.push(`mondai_${expectedIndex}_title_not_vietnamese`);
+      if (!mondai.instructions_vi || typeof mondai.instructions_vi !== 'string') errors.push(`mondai_${expectedIndex}_missing_instructions_vi`);
+      if (mondai.instructions_vi && looksJapaneseHeavyText(mondai.instructions_vi)) errors.push(`mondai_${expectedIndex}_instructions_not_vietnamese`);
+      if (!Array.isArray(mondai.items) || mondai.items.length === 0) errors.push(`mondai_${expectedIndex}_missing_items`);
+      if (Array.isArray(mondai.items) && mondai.items.length !== expectedQuestionCount) {
+        errors.push(`mondai_${expectedIndex}_question_count_mismatch`);
+      }
+
+      const hasPassageText = !!String(mondai?.passage?.text || '').trim();
+      const hasScriptText = !!String(mondai?.media?.script_text || '').trim();
+
+      if (requiresPassage && !hasPassageText) errors.push(`mondai_${expectedIndex}_missing_passage`);
+      if (forbidsPassage && hasPassageText) errors.push(`mondai_${expectedIndex}_unexpected_passage`);
+      if (isListening && !hasScriptText) errors.push(`mondai_${expectedIndex}_missing_script_text`);
+      if (!isListening && hasScriptText) errors.push(`mondai_${expectedIndex}_unexpected_script_text`);
+      if (hasPassageText && containsForbiddenPromptMarkup(mondai.passage.text)) errors.push(`mondai_${expectedIndex}_passage_forbidden_markup`);
+      if (hasScriptText && containsForbiddenPromptMarkup(mondai.media.script_text)) errors.push(`mondai_${expectedIndex}_script_forbidden_markup`);
+
+      if (Array.isArray(mondai.items)) {
+        mondai.items.forEach((item, itemIndex) => {
+          const itemErrors = validateQuestionItem(item, {
+            expectedTypes: expectedDef?.types || [],
+            expectedPrimaryType: primaryType
+          });
+          if (isListening && item?.media) itemErrors.push('listening_item_media_forbidden');
+          if (itemErrors.length > 0) {
+            errors.push(`mondai_${expectedIndex}_item_${itemIndex}:${itemErrors.join(',')}`);
+          }
+        });
+      }
+
+      if (isReading && Array.isArray(mondai.items) && mondai.items.some((item) => item?.type && !READING_TYPE_SET.has(item.type))) {
+        errors.push(`mondai_${expectedIndex}_reading_type_mismatch`);
+      }
+    });
+
+    return errors;
+  };
 }
 
 function validateExplanationResult(result) {
@@ -2401,6 +2557,41 @@ ${usedVocabulary.length > 0 ? `Sample Vocabulary: ${usedVocabulary.slice(0, 6).j
   }
 
   const levelInfo = promptProfile.levelProfiles[examSpec.level] || promptProfile.fallbackLevel;
+  const typeSpecificRules = mondaiToGenerate.map((m) => {
+    const primaryType = m.types?.[0] || 'unknown';
+    const isReading = m.types?.some((type) => readingTypes.includes(type));
+    const isListening = m.types?.some((type) => listeningTypes.includes(type));
+    const totalQuestions = Math.max(1, Math.round(m.count_official * questionScale));
+
+    if (isReading) {
+      return `- ${m.mondai_id}: exactly ${totalQuestions} questions sharing ONE passage.text only; every item must test information from that passage; no unrelated standalone items.`;
+    }
+    if (primaryType === 'grammar_passage') {
+      return `- ${m.mondai_id}: include a short passage.text and make all ${totalQuestions} questions depend on that passage context; do not generate isolated grammar questions here.`;
+    }
+    if (isListening) {
+      return `- ${m.mondai_id}: put all audio script in mondai.media.script_text only; items must not contain item.media; no passage.text for listening mondai.`;
+    }
+    if (primaryType === 'grammar_order') {
+      return `- ${m.mondai_id}: each prompt must show 4 numbered fragments (1.-4. or ①-④) and all choices must be order patterns such as "1-3-2-4", not full sentences.`;
+    }
+    if (primaryType === 'kanji') {
+      return `- ${m.mondai_id}: each prompt must highlight exactly one target with [[...]] and answer choices should be plausible readings, not letters or duplicate kana strings.`;
+    }
+    if (primaryType === 'vocab_synonym') {
+      return `- ${m.mondai_id}: highlight the target expression with [[...]] and make choices short synonym candidates, not full explanatory sentences.`;
+    }
+    if (primaryType === 'vocab_context') {
+      return `- ${m.mondai_id}: make each item a natural sentence with one clear blank/context target; choices must fit the same grammatical slot.`;
+    }
+    if (primaryType === 'vocab_usage') {
+      return `- ${m.mondai_id}: all choices should be full example sentences using the target word; only one sentence may sound natural and semantically correct.`;
+    }
+    if (primaryType === 'grammar_select') {
+      return `- ${m.mondai_id}: each item tests one grammar point in one sentence; choices must be grammatically comparable and differ for a clear reason.`;
+    }
+    return `- ${m.mondai_id}: obey the requested type "${primaryType}" exactly and keep all ${totalQuestions} items aligned with that type.`;
+  }).join('\n');
 
   return `${promptProfile.systemRole}
 All output MUST conform to official standards defined by ${promptProfile.authority}.
@@ -2479,6 +2670,13 @@ ${usedThemes.length > 0 ? `Themes: ${usedThemes.slice(0, 10).join(', ')}` : ''}
 ${usedGrammar.length > 0 ? `Grammar: ${usedGrammar.slice(0, 8).join(', ')}` : ''}
 ${usedVocabulary.length > 0 ? `Vocab: ${usedVocabulary.slice(0, 6).join(' | ')}` : ''}
 REPEAT = FAILURE.` : 'First chunk - establish diverse foundation.'}
+
+-------------------------
+TYPE-SPECIFIC INTEGRITY RULES
+-------------------------
+${typeSpecificRules}
+
+If any mondai mixes structures from another type, the output is INVALID and must be rewritten.
 
 -------------------------
 OUTPUT RULE
@@ -3326,6 +3524,31 @@ function getSlotEntriesByIds(group, slotIds) {
   return { entries, missing };
 }
 
+function attachStartPrefetchPersistence(instanceKey, userId, blueprint, startPrefetchPromise) {
+  if (!instanceKey || !blueprint || typeof startPrefetchPromise?.then !== 'function') return;
+
+  Promise.resolve(startPrefetchPromise)
+    .then(async (prefetchReady) => {
+      if (!prefetchReady) return;
+
+      await db.query(
+        'UPDATE exam_instances_cache SET blueprint=$1 WHERE instance_key=$2',
+        [JSON.stringify(blueprint), instanceKey]
+      );
+
+      await recordServedMondaiHistory(db, {
+        userId: userId || null,
+        instanceKey,
+        blueprint
+      });
+
+      console.log(`[Blueprint] Prefetch wave persisted for instance ${instanceKey.substring(0, 8)}...`);
+    })
+    .catch((error) => {
+      console.warn('[Blueprint] Persisting start prefetch wave failed:', error?.message || error);
+    });
+}
+
 async function prepareSlotContentsForDelivery({ blueprint, group, groupIdx, slotsToConsider, userId }) {
   let blueprintModified = false;
 
@@ -3668,7 +3891,7 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
         const today = new Date().toISOString().split('T')[0];
         const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
         const seed = crypto.randomUUID();
-        const newBlueprint = await buildExamBlueprint(
+        const { blueprint: newBlueprint, startPrefetchPromise } = await buildExamBlueprint(
           examSpec,
           level,
           mode,
@@ -3700,6 +3923,7 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
 
           instanceKey = newInstanceKey;
           blueprint = newBlueprint;
+          attachStartPrefetchPersistence(instanceKey, userId, blueprint, startPrefetchPromise);
           created = true;
           console.log(`[Exam] Created new instance ${instanceKey.substring(0, 8)}... set_no=${finalSetNo}`);
         } catch (e) {
@@ -3730,7 +3954,7 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
         const today = new Date().toISOString().split('T')[0];
         const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
         const seed = crypto.randomUUID();
-        const newBlueprint = await buildExamBlueprint(
+        const { blueprint: newBlueprint, startPrefetchPromise } = await buildExamBlueprint(
           examSpec,
           level,
           mode,
@@ -3762,6 +3986,7 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
 
           instanceKey = newInstanceKey;
           blueprint = newBlueprint;
+          attachStartPrefetchPersistence(instanceKey, userId, blueprint, startPrefetchPromise);
         } catch (e) {
           if (e.code === '23505') {
             const winnerRow = await fetchExisting(finalSetNo);
@@ -3790,11 +4015,10 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
     await ensureActiveAttempt(userId, instanceKey);
 
     const firstGroup = blueprint.groups[0];
-    const initialWantCount = getInitialMondaiBufferCount(firstGroup);
-    const initialSlotIds = (firstGroup.mondai_slots || [])
-      .slice(0, initialWantCount)
-      .map((slot) => slot?.slot_id)
-      .filter(Boolean);
+    const initialSlotIds = getInitialReadySlotIds(firstGroup);
+    if (initialSlotIds.length === 0) {
+      throw createTemporaryUnavailableError(new Error('Initial slots not ready'));
+    }
     const firstChunk = await deliverRequestedSlots(instanceKey, {
       group_id: firstGroup.group_id,
       slot_ids: initialSlotIds
