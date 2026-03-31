@@ -1306,7 +1306,7 @@ async function hydratePendingBlueprintSlots(params) {
 
   for (const pending of pendingSlots) {
     const { mondaiDef, slot } = pending;
-    if (slot._failed) continue;
+    if (slot._failed || slot?.mondai_hash) continue;
 
     try {
       const hash = await sampleMondaiFromBucket(
@@ -2610,7 +2610,7 @@ LANGUAGE: ${examSpec.language}
 MODE: ${mode} (question_scale: ${questionScale})
 GROUP: ${group.group_id} (${group.title_vi})
 CHUNK SLOTS: ${startMondaiIndex + 1} to ${startMondaiIndex + mondaiToGenerate.length} of ${group.mondai.length}
-${contextInfo}
+
 GENERATE THESE MONDAI:
 ${mondaiInfo}
 
@@ -2665,11 +2665,7 @@ Before finalizing, verify:
 -------------------------
 COHERENCE & ANTI-DUPLICATION
 -------------------------
-${previousMondai.length > 0 ? `★★★ ALREADY USED - DO NOT REPEAT ★★★
-${usedThemes.length > 0 ? `Themes: ${usedThemes.slice(0, 10).join(', ')}` : ''}
-${usedGrammar.length > 0 ? `Grammar: ${usedGrammar.slice(0, 8).join(', ')}` : ''}
-${usedVocabulary.length > 0 ? `Vocab: ${usedVocabulary.slice(0, 6).join(' | ')}` : ''}
-REPEAT = FAILURE.` : 'First chunk - establish diverse foundation.'}
+Use the previous context above to keep variety, avoid repeating the same target words, grammar points, or passage themes, and keep the full exam balanced.
 
 -------------------------
 TYPE-SPECIFIC INTEGRITY RULES
@@ -2686,16 +2682,6 @@ Return RAW JSON ONLY.
 - DO NOT start with "Here is the JSON...".
 - DO NOT end with explanations.
 - The output must start clearly with '{' and end with '}'.
-
--------------------------
-EMPHASIS MARKERS (CRITICAL)
--------------------------
-When highlighting kanji/vocabulary in prompts:
-- Use [[word]] markers (double brackets) for emphasis
-- Example: "Choose the correct reading for [[漢字]] in the sentence."
-- DO NOT use HTML tags like <u> or <b>
-- DO NOT use markdown ** or __
-- ONLY use [[...]] for emphasized/target words
 
 -------------------------
 SUPPORT TEXT LANGUAGE RULES

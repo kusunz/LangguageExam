@@ -55,6 +55,7 @@ async function callOpenRouter(options) {
     model,
     maxTokens = 16384,
     temperature = 0.4,
+    reasoning,
     apiKey = process.env.OPENROUTER_API_KEY,
     baseUrl = getOpenRouterBaseUrl(),
     timeoutMs = DEFAULT_TIMEOUT_MS,
@@ -87,7 +88,8 @@ async function callOpenRouter(options) {
         messages: [{ role: 'user', content: prompt }],
         temperature,
         max_tokens: maxTokens,
-        response_format: { type: 'json_object' }
+        response_format: { type: 'json_object' },
+        ...(reasoning && typeof reasoning === 'object' ? { reasoning } : {})
       })
     });
   } catch (error) {

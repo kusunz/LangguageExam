@@ -233,6 +233,22 @@ function parseAndValidateJson(text, validateResult) {
   };
 }
 
+function buildTaskReasoningOptions(task, options = {}) {
+  const explicitReasoning = options.reasoning;
+  if (explicitReasoning === null) return undefined;
+  if (explicitReasoning && typeof explicitReasoning === 'object') return explicitReasoning;
+
+  if (task !== 'generate') return undefined;
+
+  const budget = Number.parseInt(process.env.OPENROUTER_GENERATE_REASONING_MAX_TOKENS || '1024', 10);
+  if (!Number.isFinite(budget) || budget <= 0) return undefined;
+
+  return {
+    max_tokens: budget,
+    exclude: true
+  };
+}
+
 function buildDefaultRepairPrompt(context) {
   const {
     originalPrompt,
@@ -275,6 +291,7 @@ async function invokeStage(stage, prompt, options) {
     maxTokens: options.maxTokens,
     temperature: options.temperature,
     timeoutMs: options.timeoutMs,
+    reasoning: options.reasoning,
     fetchImpl: options.fetchImpl
   };
 
@@ -313,6 +330,7 @@ async function runJsonTask(options) {
     fetchImpl = fetch
   } = options || {};
 
+  const taskReasoning = buildTaskReasoningOptions(task, options);
   const stages = buildProviderStages(task);
   if (stages.length === 0) {
     throw createTemporaryUnavailableError(
@@ -336,6 +354,7 @@ async function runJsonTask(options) {
         maxTokens,
         temperature,
         timeoutMs,
+        reasoning: taskReasoning,
         fetchImpl
       });
     } catch (error) {
