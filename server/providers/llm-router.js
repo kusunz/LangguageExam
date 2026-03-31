@@ -49,21 +49,21 @@ function getTaskModels() {
   return {
     generate: {
       openrouterPrimary:
-        process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || 'stepfun/step-3.5-flash:free',
+        process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || 'qwen/qwen3.6-plus-preview:free',
       openrouterSecondary:
-        process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || 'openai/gpt-oss-20b:free'
+        process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || 'nvidia/nemotron-3-super-120b-a12b:free'
     },
     repair: {
       openrouterPrimary:
-        process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || 'openai/gpt-oss-20b:free',
+        process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || 'nvidia/nemotron-3-nano-30b-a3b:free',
       openrouterSecondary:
-        process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || 'openai/gpt-oss-120b:free'
+        process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || 'arcee-ai/trinity-large-preview:free'
     },
     explain: {
       openrouterPrimary:
-        process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || 'openai/gpt-oss-20b:free',
+        process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || 'qwen/qwen3.6-plus-preview:free',
       openrouterSecondary:
-        process.env.OPENROUTER_MODEL_EXPLAIN_SECONDARY || 'stepfun/step-3.5-flash:free'
+        process.env.OPENROUTER_MODEL_EXPLAIN_SECONDARY || 'nvidia/nemotron-3-super-120b-a12b:free'
     }
   };
 }

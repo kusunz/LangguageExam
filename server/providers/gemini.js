@@ -8,7 +8,11 @@ const DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT =
     ? process.env.GEMINI_MODEL_FALLBACK_COMPAT
     : '';
 const DEFAULT_GEMINI_EMBEDDING_MODEL =
-  process.env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001';
+  process.env.GEMINI_EMBEDDING_MODEL_PRIMARY ||
+  process.env.GEMINI_EMBEDDING_MODEL ||
+  'gemini-embedding-001';
+const DEFAULT_GEMINI_EMBEDDING_MODEL_SECONDARY =
+  process.env.GEMINI_EMBEDDING_MODEL_SECONDARY || '';
 const DEFAULT_GEMINI_EMBEDDING_OUTPUT_DIM = Number.parseInt(
   process.env.GEMINI_EMBEDDING_OUTPUT_DIM || '768',
   10
@@ -51,6 +55,20 @@ function getGeminiEmbeddingKeyStages() {
     { name: 'gemini-embedding-key-a', apiKey: stageAKey },
     { name: 'gemini-embedding-key-b', apiKey: stageBKey }
   ]);
+}
+
+function getGeminiEmbeddingModels() {
+  const seen = new Set();
+
+  return [
+    DEFAULT_GEMINI_EMBEDDING_MODEL,
+    DEFAULT_GEMINI_EMBEDDING_MODEL_SECONDARY
+  ].filter((model) => {
+    const normalized = String(model || '').trim();
+    if (!normalized || seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
 }
 
 function extractGeminiText(data) {
@@ -267,13 +285,138 @@ async function callGeminiEmbedding(options) {
   };
 }
 
+async function callGeminiBatchEmbedding(options) {
+  const {
+    texts,
+    apiKey,
+    model = DEFAULT_GEMINI_EMBEDDING_MODEL,
+    outputDimensionality = DEFAULT_GEMINI_EMBEDDING_OUTPUT_DIM,
+    taskType = 'RETRIEVAL_DOCUMENT',
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    fetchImpl = fetch
+  } = options || {};
+
+  if (!apiKey) {
+    throw createProviderError('Missing Gemini embedding API key', {
+      provider: 'gemini-embedding',
+      model,
+      retryable: false,
+      status: 500
+    });
+  }
+
+  const normalizedTexts = Array.isArray(texts)
+    ? texts.map((text) => String(text || '')).filter((text) => text.trim().length > 0)
+    : [];
+
+  if (normalizedTexts.length === 0) {
+    return {
+      provider: 'gemini-embedding',
+      model,
+      valuesList: []
+    };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:batchEmbedContents?key=${apiKey}`;
+
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        requests: normalizedTexts.map((text) => ({
+          model: `models/${model}`,
+          content: {
+            role: 'user',
+            parts: [{ text }]
+          },
+          taskType,
+          outputDimensionality
+        }))
+      })
+    });
+  } catch (error) {
+    clearTimeout(timeout);
+    if (error?.name === 'AbortError') {
+      throw createProviderError(`Gemini embedding ${model} timed out`, {
+        provider: 'gemini-embedding',
+        model,
+        retryable: true,
+        code: 'timeout'
+      });
+    }
+
+    throw createProviderError(`Gemini embedding ${model} request failed: ${error?.message || error}`, {
+      provider: 'gemini-embedding',
+      model,
+      retryable: true,
+      code: 'network_error'
+    });
+  }
+
+  clearTimeout(timeout);
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw createProviderError(`Gemini embedding ${model} failed with ${response.status}: ${errorText}`, {
+      provider: 'gemini-embedding',
+      model,
+      status: response.status,
+      retryable: response.status === 402 || response.status === 429 || response.status >= 500
+    });
+  }
+
+  let data;
+  try {
+    data = await response.json();
+  } catch (error) {
+    throw createProviderError(`Gemini embedding ${model} returned invalid JSON envelope`, {
+      provider: 'gemini-embedding',
+      model,
+      retryable: true,
+      code: 'invalid_provider_response'
+    });
+  }
+
+  const valuesList = Array.isArray(data?.embeddings)
+    ? data.embeddings.map((entry) => entry?.values || entry?.embedding?.values)
+    : [];
+
+  if (
+    valuesList.length !== normalizedTexts.length ||
+    valuesList.some((values) => !Array.isArray(values) || values.length === 0)
+  ) {
+    throw createProviderError(`Gemini embedding ${model} returned empty batch vector`, {
+      provider: 'gemini-embedding',
+      model,
+      retryable: true,
+      code: 'empty_response'
+    });
+  }
+
+  return {
+    provider: 'gemini-embedding',
+    model,
+    valuesList
+  };
+}
+
 module.exports = {
   DEFAULT_GEMINI_EMBEDDING_MODEL,
+  DEFAULT_GEMINI_EMBEDDING_MODEL_SECONDARY,
   DEFAULT_GEMINI_EMBEDDING_OUTPUT_DIM,
   DEFAULT_GEMINI_MODEL_FALLBACK,
   DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
+  callGeminiBatchEmbedding,
   callGeminiEmbedding,
   callGeminiText,
+  getGeminiEmbeddingModels,
   getGeminiEmbeddingKeyStages,
   getGeminiTextKeyStages
 };

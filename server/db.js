@@ -274,6 +274,10 @@ async function initDb() {
         )`,
         `CREATE INDEX IF NOT EXISTS idx_instances_user ON exam_instances_cache(user_id)`,
         `CREATE INDEX IF NOT EXISTS idx_instances_expires ON exam_instances_cache(expires_at)`,
+        `CREATE INDEX IF NOT EXISTS idx_instances_lookup
+          ON exam_instances_cache(user_id, exam_id, level, mode, set_no)`,
+        `CREATE INDEX IF NOT EXISTS idx_instances_resume
+          ON exam_instances_cache(user_id, exam_id, level, mode, created_at DESC)`,
 
         // Attempts table (V2: added status, summary for quickgrade)
         `CREATE TABLE IF NOT EXISTS attempts (
@@ -387,6 +391,8 @@ async function initDb() {
             ALTER TABLE exam_instances_cache ADD COLUMN IF NOT EXISTS answer_keys JSONB;
             ALTER TABLE exam_instances_cache ADD COLUMN IF NOT EXISTS plan TEXT;
             ALTER TABLE exam_instances_cache ADD COLUMN IF NOT EXISTS seed TEXT;
+            CREATE INDEX IF NOT EXISTS idx_instances_lookup ON exam_instances_cache(user_id, exam_id, level, mode, set_no);
+            CREATE INDEX IF NOT EXISTS idx_instances_resume ON exam_instances_cache(user_id, exam_id, level, mode, created_at DESC);
           EXCEPTION WHEN others THEN NULL; END;
 
           -- attempts: ensure status, summary, answers_hash, ai_grade columns for V2 grading

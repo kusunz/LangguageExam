@@ -171,6 +171,28 @@
                 <option value="browser">Trình duyệt</option>
               </select>
             </div>
+            <div class="admin-panel">
+              <div class="admin-panel-header">
+                <div>
+                  <h4>AI Admin</h4>
+                  <p>Xem model đang chạy và probe nhanh trước khi deploy Vercel.</p>
+                </div>
+                <span id="admin-health-badge" class="status-badge neutral">Chưa kiểm tra</span>
+              </div>
+              <div class="setting-group">
+                <label>Admin Secret</label>
+                <input id="admin-secret" type="password" placeholder="WARMUP_SECRET" autocomplete="off" />
+              </div>
+              <div class="admin-actions">
+                <button id="btn-admin-load" class="btn btn-secondary btn-sm" type="button">Tải cấu hình</button>
+                <button id="btn-admin-healthcheck" class="btn btn-secondary btn-sm" type="button">Probe models</button>
+              </div>
+              <div id="admin-config-summary" class="admin-summary">
+                <p>Nhập secret để xem model effective của backend.</p>
+              </div>
+              <pre id="admin-env-output" class="admin-code-block"># Env block sẽ hiện ở đây</pre>
+              <div id="admin-health-results" class="admin-health-results"></div>
+            </div>
           </div>
         </div>
 

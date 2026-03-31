@@ -13,13 +13,15 @@ const crypto = require('crypto');
 const { createRemoteJWKSet, jwtVerify } = require('jose');
 const db = require('./db');
 const {
+  buildProviderStages,
   getTemporaryUnavailablePayload,
   isTemporaryUnavailableError,
   runJsonTask
 } = require('./providers/llm-router');
+const { callOpenRouter } = require('./providers/openrouter');
+const { callGeminiText } = require('./providers/gemini');
 const {
-  scheduleEmbeddingBackfill,
-  scheduleMondaiEmbedding
+  runEmbeddingBackfill
 } = require('./providers/embeddings');
 const {
   recordServedMondaiHistory,
@@ -39,7 +41,6 @@ const {
   TYPE_TITLES
 } = require('./jlpt_config');
 const { createClient } = require('@deepgram/sdk');
-const DEFAULT_GEMINI_MODEL = process.env.DEFAULT_GEMINI_MODEL || 'gemini-3-pro-preview';
 
 // DB availability is now checked via db.initDb() at usage points
 // In Neon mode, server fails fast at boot (see bottom of file)
@@ -622,7 +623,19 @@ function generateMondaiHash(mondai) {
 
 const ON_DEMAND_BATCH = 1;
 const WARM_TARGET_PER_BUCKET = 50;
-const MAX_GEMINI_CALLS_PER_REQUEST = 3; // Cap LLM calls per user request (start/chunk/warm)
+const BLUEPRINT_GENERATION_CONCURRENCY = Math.max(
+  1,
+  Number.parseInt(process.env.BLUEPRINT_GENERATION_CONCURRENCY || '4', 10)
+);
+const OPENROUTER_RPM = Math.max(
+  1,
+  Number.parseInt(process.env.OPENROUTER_RPM || '5', 10)
+);
+
+function getEffectiveBlueprintGenerationConcurrency() {
+  const rpmBound = Math.max(1, Math.min(OPENROUTER_RPM, 5));
+  return Math.max(1, Math.min(BLUEPRINT_GENERATION_CONCURRENCY, rpmBound));
+}
 
 /**
  * Ensure pool snapshot exists (Meta only)
@@ -647,7 +660,6 @@ async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
   // NOTE: No preroll here - on-demand generation in buildExamBlueprint handles missing items
   // This ensures /api/exam/start returns quickly without blocking Gemini calls
 
-  scheduleEmbeddingBackfill(db);
   return snapshotId;
 }
 
@@ -719,10 +731,6 @@ async function generateMondaiForBucket(params) {
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (snapshot_id, bucket_key, mondai_hash) DO NOTHING
           `, [snapshotId, bucketKey, hash, group.group_id]);
-
-        if (insertRes.rows?.length > 0) {
-          scheduleMondaiEmbedding(db, hash, mondai);
-        }
 
         remaining -= 1;
       }
@@ -826,6 +834,120 @@ async function warmPool(snapshotId, examSpec, level, mode, dateYmd, opts = {}) {
   return { bucketsProcessed, generated, skipped };
 }
 
+async function runTasksWithConcurrency(taskFactories, limit) {
+  const tasks = Array.isArray(taskFactories) ? taskFactories : [];
+  if (tasks.length === 0) return [];
+
+  const concurrency = Math.max(1, Number(limit) || 1);
+  const results = new Array(tasks.length);
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < tasks.length) {
+      const currentIndex = cursor;
+      cursor += 1;
+      results[currentIndex] = await tasks[currentIndex]();
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
+function buildBlueprintSlotId(groupId, mondaiId, ordinal) {
+  return `${groupId}:${mondaiId}:${ordinal + 1}`;
+}
+
+async function hydratePendingBlueprintSlots(params) {
+  const {
+    pendingSlots,
+    examSpec,
+    level,
+    mode,
+    snapshotId,
+    plan,
+    rng,
+    usedHashes,
+    userId,
+    allowRepeat
+  } = params;
+
+  if (!Array.isArray(pendingSlots) || pendingSlots.length === 0) {
+    return;
+  }
+
+  const generationTasks = pendingSlots.map(({ group, mondaiDef, slot }) => async () => {
+    try {
+      console.log(`[Blueprint] Bucket empty/exhausted: ${slot.bucket_key}. Triggering on-demand generation.`);
+      await generateMondaiForBucket({
+        examSpec,
+        level,
+        mode,
+        group,
+        mondaiDef,
+        bucketKey: slot.bucket_key,
+        snapshotId,
+        count: ON_DEMAND_BATCH,
+        plan
+      });
+      return { ok: true, slot, mondaiDef };
+    } catch (error) {
+      return { ok: false, slot, mondaiDef, error };
+    }
+  });
+
+  const generationResults = await runTasksWithConcurrency(
+    generationTasks,
+    getEffectiveBlueprintGenerationConcurrency()
+  );
+
+  for (const result of generationResults) {
+    if (result?.ok) continue;
+    if (isTemporaryUnavailableError(result?.error)) {
+      throw result.error;
+    }
+
+    console.warn(`Failed to generate bucket ${result?.slot?.bucket_key}:`, result?.error?.message || result?.error);
+    if (result?.slot) {
+      result.slot._failed = true;
+      result.slot._error = result?.error?.message || 'generation_failed';
+    }
+  }
+
+  for (const pending of pendingSlots) {
+    const { mondaiDef, slot } = pending;
+    if (slot._failed) continue;
+
+    try {
+      const hash = await sampleMondaiFromBucket(
+        snapshotId,
+        slot.bucket_key,
+        rng,
+        Array.from(usedHashes),
+        {
+          userId,
+          allowRepeat,
+          level,
+          primaryType: mondaiDef.types?.[0] || null
+        }
+      );
+
+      usedHashes.add(hash);
+      slot.mondai_hash = hash;
+      slot.status = 'ready';
+    } catch (error) {
+      if (isTemporaryUnavailableError(error)) {
+        throw error;
+      }
+
+      console.warn(`Failed to hydrate slot ${slot.slot_id} after generation:`, error.message);
+      slot._failed = true;
+      slot._error = error.message;
+    }
+  }
+}
+
 /**
  * Build determinisic exam from pool
  */
@@ -859,6 +981,7 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
 
   // Track used hashes to avoid duplicates across exam
   const usedHashes = new Set();
+  const pendingSlots = [];
 
   for (const group of examSpec.groups) {
     const groupBlueprint = {
@@ -870,58 +993,54 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
       const targetCount = Math.max(1, Math.round(mondaiDef.count_official * qScale));
 
       const bucketKey = getBucketKey(group.group_id, mondaiDef.mondai_id, mondaiDef.types[0]);
+      const slot = {
+        slot_id: buildBlueprintSlotId(group.group_id, mondaiDef.mondai_id, groupBlueprint.mondai_slots.length),
+        bucket_key: bucketKey,
+        mondai_id: mondaiDef.mondai_id,
+        type: mondaiDef.types[0],
+        question_count: targetCount,
+        delivery_mode: isReading ? 'whole' : 'flexible',
+        status: 'pending'
+      };
 
-      // Sample from bucket
-      // We need ONE mondai instance that fits requirements?
-      // Reading: 1 mondai = 1 passage + questions.
-      // Vocab: 1 mondai instance (micro chunk) usually has 1-5 questions.
-      // If targetCount > mondaiInstance.questions, we might need multiple instances?
-      // "Option 1" implies assembling based on Mondai Units.
-      // For Reading: 1 mondai slot = 1 passage.
-      // For Vocab: 1 mondai slot = 1 set of questions (micro chunk).
-
+      groupBlueprint.mondai_slots.push(slot);
       try {
-        let hash;
-        try {
-          hash = await sampleMondaiFromBucket(snapshotId, bucketKey, rng, Array.from(usedHashes), { userId, allowRepeat, level, primaryType: mondaiDef.types?.[0] || null });
-        } catch (e) {
-          // On-demand generation if bucket empty/exhausted
-          // Log only important event
-          console.log(`[Blueprint] Bucket empty/exhausted: ${bucketKey}. Triggering on-demand generation.`);
-
-          await generateMondaiForBucket({
-            examSpec, level, mode, group, mondaiDef, bucketKey, snapshotId,
-            count: ON_DEMAND_BATCH,
-            plan
-          });
-
-          // Retry sampling (if this fails, we skip this slot)
-          hash = await sampleMondaiFromBucket(snapshotId, bucketKey, rng, Array.from(usedHashes), { userId, allowRepeat, level, primaryType: mondaiDef.types?.[0] || null });
-        }
-
+        const hash = await sampleMondaiFromBucket(
+          snapshotId,
+          bucketKey,
+          rng,
+          Array.from(usedHashes),
+          { userId, allowRepeat, level, primaryType: mondaiDef.types?.[0] || null }
+        );
         usedHashes.add(hash);
-
-        // Determine item type for reading
-        let itemType = mondaiDef.types[0];
-
-        groupBlueprint.mondai_slots.push({
-          mondai_id: mondaiDef.mondai_id,
-          type: itemType,
-          mondai_hash: hash,
-          question_count: targetCount,
-          delivery_mode: isReading ? 'whole' : 'flexible'
-        });
-      } catch (e) {
-        if (isTemporaryUnavailableError(e)) {
-          throw e;
+        slot.mondai_hash = hash;
+        slot.status = 'ready';
+      } catch (error) {
+        if (isTemporaryUnavailableError(error)) {
+          throw error;
         }
-
-        // Soft fail for individual slots if generation fails
-        console.warn(`Failed to fill slot for ${bucketKey} after retry:`, e.message);
+        pendingSlots.push({ group, mondaiDef, slot });
       }
     }
     blueprint.groups.push(groupBlueprint);
   }
+
+  await hydratePendingBlueprintSlots({
+    pendingSlots,
+    examSpec,
+    level,
+    mode,
+    snapshotId,
+    plan,
+    rng,
+    usedHashes,
+    userId,
+    allowRepeat
+  });
+
+  blueprint.groups.forEach((group) => {
+    group.mondai_slots = group.mondai_slots.filter((slot) => !slot._failed && slot.mondai_hash);
+  });
 
   // READING SECTION TIME BUDGET OPTIMIZATION
   // Re-process reading slots if this is a full exam or has reading section
@@ -1015,150 +1134,11 @@ async function sampleMondaiFromBucket(snapshotId, bucketKey, rng, usedHashes, op
 
 // ============ LLM Endpoints ============
 
-async function callOpenAI(messages, options = {}) {
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
-    },
-    body: JSON.stringify({
-      model: options.model || 'gpt-4o',
-      messages,
-      temperature: options.temperature || 0.7,
-      max_tokens: options.maxTokens || 8000,
-      response_format: { type: 'json_object' }
-    })
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`OpenAI error: ${err}`);
-  }
-
-  const data = await response.json();
-  return JSON.parse(data.choices[0].message.content);
-}
-
-// Gemini model fallback order (full list)
-const GEMINI_MODELS = [
-  'gemini-3-pro-preview',
-  'gemini-3-flash-preview',
-  'gemini-2.5-pro',
-  'gemini-2.5-flash'
-];
-
-// Pro-only models for high-quality generation (Flash only on quota/rate limit)
-const GEMINI_MODELS_PRO = [
-  'gemini-3-pro-preview',
-  'gemini-2.5-pro'
-];
-
 // Gemini TTS models (for TTS fallback)
 const GEMINI_TTS_MODELS = [
   'gemini-2.5-pro-tts',
   'gemini-2.5-flash-tts'
 ];
-
-async function callGeminiWithModel(prompt, model, options = {}) {
-  const apiKey = options.apiKey || process.env.GEMINI_API_KEY;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-
-  log('INFO', `Calling Gemini model: ${model}`);
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: typeof options.temperature === 'number' ? options.temperature : 0.4,
-        maxOutputTokens: options.maxTokens || 16384,
-        responseMimeType: 'application/json',
-        topP: typeof options.topP === 'number' ? options.topP : 0.95
-      }
-    })
-  });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    const error = new Error(`Gemini error (${model}): ${errText}`);
-    error.status = response.status;
-    error.model = model;
-    throw error;
-  }
-
-  // Helper to clean JSON string (remove markdown, find first { and last })
-  function cleanJson(text) {
-    if (!text) return text;
-    // Remove markdown code blocks
-    let cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '');
-
-    // Find first '{'
-    const start = cleaned.indexOf('{');
-    if (start === -1) return cleaned;
-
-    // Robust extraction: count braces to find the matching closing brace
-    let braceCount = 0;
-    let inString = false;
-    let escape = false;
-
-    for (let i = start; i < cleaned.length; i++) {
-      const char = cleaned[i];
-      if (escape) {
-        escape = false;
-        continue;
-      }
-      if (char === '\\') {
-        escape = true;
-        continue;
-      }
-      if (char === '"') {
-        inString = !inString;
-        continue;
-      }
-
-      if (!inString) {
-        if (char === '{') braceCount++;
-        else if (char === '}') braceCount--;
-
-        if (braceCount === 0) {
-          // Found the matching end
-          return cleaned.substring(start, i + 1);
-        }
-      }
-    }
-
-    // Fallback: return from start to end if no balanced closure found
-    return cleaned.substring(start);
-  }
-
-  const data = await response.json();
-
-  if (!data.candidates || !data.candidates[0]?.content?.parts?.[0]?.text) {
-    throw new Error(`Gemini returned empty response from ${model}`);
-  }
-
-  let text = data.candidates[0].content.parts[0].text;
-  log('INFO', `Gemini ${model} success`, { responseLength: text.length });
-
-  // Try to parse JSON, with repair for truncated responses
-  try {
-    const cleanedText = cleanJson(text);
-    return JSON.parse(cleanedText);
-  } catch (parseErr) {
-    log('WARN', `JSON parse failed, attempting repair...`, { error: parseErr.message });
-
-    // Attempt to repair truncated JSON
-    const repaired = repairTruncatedJSON(cleanJson(text));
-    if (repaired) {
-      log('INFO', 'JSON repair successful');
-      return repaired;
-    }
-
-    throw parseErr;
-  }
-}
 
 function validateQuestionItem(item) {
   const errors = [];
@@ -1182,82 +1162,6 @@ function validateQuestionItem(item) {
   if (!item.explain_brief || typeof item.explain_brief !== 'string') errors.push('missing_explain_brief');
   if (!Array.isArray(item.tags) || item.tags.length === 0) errors.push('missing_tags');
   if (item.media && typeof item.media !== 'object') errors.push('media_invalid');
-  return errors;
-}
-
-function validateGroupResult(group) {
-  const errors = [];
-  const ids = new Set();
-  if (!group || typeof group !== 'object') return ['group_not_object'];
-  if (!group.group_id || typeof group.group_id !== 'string') errors.push('missing_group_id');
-  if (!group.title_vi || typeof group.title_vi !== 'string') errors.push('missing_title_vi');
-  if (!Array.isArray(group.mondai) || group.mondai.length === 0) errors.push('missing_mondai');
-  if (!Array.isArray(group.mondai)) return errors;
-
-  // Listening types for validation
-  const listeningTypes = ['listening_dialogue', 'listening_mono', 'listen_respond', 'listen_integration', 'listen_task'];
-
-  for (let mi = 0; mi < group.mondai.length; mi++) {
-    const m = group.mondai[mi];
-    if (!m || typeof m !== 'object') {
-      errors.push(`mondai_${mi}_not_object`);
-      continue;
-    }
-    if (!m.mondai_id || typeof m.mondai_id !== 'string') errors.push(`mondai_${mi}_missing_mondai_id`);
-    if (!m.title_vi || typeof m.title_vi !== 'string') errors.push(`mondai_${mi}_missing_title_vi`);
-    if (!m.instructions_vi || typeof m.instructions_vi !== 'string') errors.push(`mondai_${mi}_missing_instructions_vi`);
-    if (!Array.isArray(m.items) || m.items.length === 0) errors.push(`mondai_${mi}_missing_items`);
-
-    if (!Array.isArray(m.items)) continue;
-
-    // Check if this is a listening mondai
-    const isListeningMondai = m.items.some(item => item && listeningTypes.includes(item.type));
-
-    for (let ii = 0; ii < m.items.length; ii++) {
-      const item = m.items[ii];
-      const itemErrors = validateQuestionItem(item);
-      if (itemErrors.length) errors.push(`mondai_${mi}_item_${ii}:${itemErrors.join(',')}`);
-      if (item && typeof item.id === 'string') {
-        if (ids.has(item.id)) errors.push(`duplicate_id:${item.id}`);
-        ids.add(item.id);
-      }
-
-      // Listening Mode B: item-level script_text is NOT allowed for listening mondai
-      if (isListeningMondai && item && item.media?.script_text) {
-        errors.push(`mondai_${mi}_item_${ii}:script_text_should_be_at_mondai_level`);
-      }
-
-      // Legacy: non-listening items with media.script_text (keep existing validation)
-      if (!isListeningMondai) {
-        const needsScript = item && item.media && Object.prototype.hasOwnProperty.call(item.media, 'script_text');
-        if (needsScript && item.media.script_text !== null && typeof item.media.script_text !== 'string') {
-          errors.push(`mondai_${mi}_item_${ii}:script_text_invalid`);
-        }
-      }
-    }
-
-    // Listening Mode B: mondai-level script_text is REQUIRED for listening mondai
-    if (isListeningMondai) {
-      if (!m.media?.script_text || typeof m.media.script_text !== 'string' || m.media.script_text.trim() === '') {
-        errors.push(`mondai_${mi}_missing_mondai_script_text`);
-      }
-    }
-  }
-  return errors;
-}
-
-function validateGeneratedTestResult(testData) {
-  const errors = [];
-  if (!testData || typeof testData !== 'object') return ['test_not_object'];
-  if (!testData.meta || typeof testData.meta !== 'object') errors.push('missing_meta');
-  if (!Array.isArray(testData.groups) || testData.groups.length === 0) errors.push('missing_groups');
-  if (!Array.isArray(testData.groups)) return errors;
-
-  testData.groups.forEach((group, index) => {
-    const groupErrors = validateGroupResult(group);
-    groupErrors.forEach((error) => errors.push(`group_${index}:${error}`));
-  });
-
   return errors;
 }
 
@@ -1307,404 +1211,6 @@ function formatLlmProviderLabel(meta) {
   if (!meta?.provider) return 'llm-router';
   return meta.model ? `${meta.provider}:${meta.model}` : meta.provider;
 }
-
-function handleLlmEndpointFailure(res, error, fallbackMessage) {
-  if (isTemporaryUnavailableError(error)) {
-    return res.status(503).json(getTemporaryUnavailablePayload(error));
-  }
-
-  return res.status(500).json({ error: fallbackMessage });
-}
-
-function buildFixGroupPrompt(examSpec, mode, group, groupIndex, errors) {
-  return `You are fixing a JSON output for a ${examSpec.display_name_vi} practice test group.
-
-EXAM: ${examSpec.display_name_vi}
-LEVEL: ${examSpec.level}
-LANGUAGE: ${examSpec.language}
-MODE: ${mode}
-GROUP INDEX: ${groupIndex + 1}
-
-The JSON has validation errors. Fix ONLY what is necessary to satisfy the schema and errors below.
-Do NOT change the overall intent/difficulty, do NOT remove questions unless absolutely required to satisfy schema.
-
-VALIDATION ERRORS:
-${errors.slice(0, 40).join('\n')}
-
-RULES:
-1. Return RAW JSON only.
-2. Ensure choices are full answer texts (NOT letters "A/B/C/D").
-3. Each item must have 4 non-empty string choices and exactly 1 correct answer_index (0-3).
-4. Keep existing ids where possible; if you must change, keep uniqueness.
-
-INPUT JSON:
-${JSON.stringify(group)}
-
-RETURN FIXED JSON ONLY.`;
-}
-
-// Attempt to repair truncated JSON by closing open brackets
-function repairTruncatedJSON(text) {
-  try {
-    // First try as-is
-    return JSON.parse(text);
-  } catch (e) {
-    // Count open brackets
-    let openBraces = 0;
-    let openBrackets = 0;
-    let inString = false;
-    let escape = false;
-
-    for (let i = 0; i < text.length; i++) {
-      const char = text[i];
-
-      if (escape) {
-        escape = false;
-        continue;
-      }
-
-      if (char === '\\') {
-        escape = true;
-        continue;
-      }
-
-      if (char === '"' && !escape) {
-        inString = !inString;
-        continue;
-      }
-
-      if (!inString) {
-        if (char === '{') openBraces++;
-        else if (char === '}') openBraces--;
-        else if (char === '[') openBrackets++;
-        else if (char === ']') openBrackets--;
-      }
-    }
-
-    // If we're in a string, close it
-    let repaired = text;
-    if (inString) {
-      repaired += '"';
-    }
-
-    // Close open brackets and braces
-    repaired += ']'.repeat(Math.max(0, openBrackets));
-    repaired += '}'.repeat(Math.max(0, openBraces));
-
-    try {
-      return JSON.parse(repaired);
-    } catch (e2) {
-      log('WARN', 'JSON repair failed', { error: e2.message });
-      return null;
-    }
-  }
-}
-
-class ModelRouter {
-  constructor() {
-    this.keys = {
-      'gemini-3-pro-preview': this.getKeys('GEMINI_KEYS_3_PRO'),
-      'gemini-2.5-pro': this.getKeys('GEMINI_KEYS_25_PRO'),
-      'gemini-3-flash-preview': this.getKeys('GEMINI_KEYS_FLASH'),
-      'gemini-2.5-flash': this.getKeys('GEMINI_KEYS_FLASH'),
-      'openai': this.getKeys('OPENAI_KEYS')
-    };
-
-    // Fallback/Legacy single key support
-    const defaultKey = process.env.GEMINI_API_KEY;
-    if (defaultKey) {
-      if (this.keys['gemini-3-pro-preview'].length === 0) this.keys['gemini-3-pro-preview'].push(defaultKey);
-      if (this.keys['gemini-2.5-pro'].length === 0) this.keys['gemini-2.5-pro'].push(defaultKey);
-      if (this.keys['gemini-3-flash-preview'].length === 0) this.keys['gemini-3-flash-preview'].push(defaultKey);
-      if (this.keys['gemini-2.5-flash'].length === 0) this.keys['gemini-2.5-flash'].push(defaultKey);
-    }
-
-    this.keyIndex = {}; // { model: index }
-  }
-
-  getKeys(envVar) {
-    return (process.env[envVar] || '').split(',').map(k => k.trim()).filter(Boolean);
-  }
-
-  getNextKey(model) {
-    const keys = this.keys[model] || [];
-    if (keys.length === 0) return null;
-    const idx = (this.keyIndex[model] || 0) % keys.length;
-    return keys[idx];
-  }
-
-  rotateKey(model) {
-    const keys = this.keys[model] || [];
-    if (keys.length <= 1) return;
-    this.keyIndex[model] = (this.keyIndex[model] || 0) + 1;
-    log('INFO', `Rotating key for ${model}, now using index ${this.keyIndex[model] % keys.length}`);
-  }
-
-  /**
-   * Determine model ladder based on request options
-   */
-  getLadder(options) {
-    // If specific model requested, start with it
-    const requested = options.model ? [options.model] : [];
-
-    // Base ladder
-    let base = [];
-    if (options.proOnly) {
-      // Quality tier
-      base = ['gemini-3-pro-preview', 'gemini-2.5-pro'];
-    } else {
-      // Speed/Standard tier
-      base = ['gemini-2.5-pro', 'gemini-2.5-flash'];
-    }
-
-    // Flash fallback (always available as last resort unless explicitly excluded)
-    // Existing logic had complex proOnly rules. 
-    // New rule: "gemini-2.5-flash (only if ALL Gemini keys exhausted)"
-    // So we append flash at end of ladder.
-    const fallback = ['gemini-2.5-flash', 'gemini-3-flash-preview'];
-
-    // Merge unique
-    const ladder = [...requested, ...base, ...fallback].filter((v, i, a) => a.indexOf(v) === i);
-    return ladder;
-  }
-
-  async callWithFallback(prompt, options) {
-    const ladder = this.getLadder(options);
-    let lastError = null;
-
-    for (const model of ladder) {
-      // Try keys for this model
-      const keys = this.keys[model] || [null]; // If no keys managed, might rely on global env in legacy?
-      // Actually constructor guarantees keys array (might be empty).
-      // If empty, and no default, we skip?
-      // Wait, getNextKey handles it.
-
-      // We try the CURRENT key. If it fails with quota, we rotate and retry SAME model?
-      // OR we rotate and move to next model?
-      // Requirement: "rotate/retry on quota errors".
-      // Let's try up to key count times.
-
-      const maxRetries = keys.length || 1;
-
-      for (let attempt = 0; attempt < maxRetries; attempt++) {
-        const apiKey = this.getNextKey(model);
-        if (!apiKey && model !== 'openai') {
-          // Skip if no key (shouldn't happen with fallback logic)
-          break;
-        }
-
-        try {
-          if (model === 'openai') {
-            return await callOpenAI([{ role: 'user', content: prompt }], { apiKey, ...options });
-          } else {
-            return await callGeminiWithModel(prompt, model, { ...options, apiKey });
-          }
-        } catch (err) {
-          lastError = err;
-
-          const isQuota = err.status === 429 || err.status === 403 || (err.message && err.message.includes('429'));
-
-          if (isQuota) {
-            log('WARN', `Quota exceeded for ${model} (key ${attempt}), rotating...`);
-            this.rotateKey(model);
-            // Retry loop continues to next key
-          } else {
-            // Non-quota error (e.g. 400 Bad Request, 500), might be model issue.
-            // Move to next model in ladder.
-            log('WARN', `Error with ${model}: ${err.message}. Trying next model.`);
-            break; // Break key loop, go to next model
-          }
-        }
-      }
-    }
-
-    throw lastError || new Error('All models/keys exhausted');
-  }
-}
-
-const modelRouter = new ModelRouter();
-
-async function callGemini(prompt, options = {}) {
-  return modelRouter.callWithFallback(prompt, options);
-}
-
-async function generateGroupWithIntegrity(examSpec, mode, group, groupIndex, options = {}) {
-  const maxTokens = options.maxTokens || 16384;
-  const temperature = typeof options.temperature === 'number' ? options.temperature : 0.4;
-  const prompt = buildGenerateGroupPrompt(examSpec, mode, group, groupIndex);
-
-  return runJsonTask({
-    task: 'generate',
-    prompt,
-    validateResult: validateGroupResult,
-    maxTokens,
-    temperature
-  });
-}
-
-// Generate test
-app.post('/api/generate-test', authMiddleware, async (req, res) => {
-  try {
-    const { examSpec, mode, userHistory } = req.body;
-    const prompt = buildGenerateTestPrompt(examSpec, mode, userHistory);
-    const generation = await runJsonTask({
-      task: 'generate',
-      prompt,
-      validateResult: validateGeneratedTestResult,
-      maxTokens: 16384,
-      temperature: 0.4
-    });
-
-    saveQuestionsFromTest(generation.result).catch((error) => console.error('Bank save error:', error));
-    res.json(generation.result);
-  } catch (err) {
-    console.error('Generate test error:', err);
-    log('ERROR', 'Generate test failed', { error: err.message, stack: err.stack?.substring(0, 500) });
-    return handleLlmEndpointFailure(res, err, 'Lỗi máy chủ. Vui lòng thử lại sau.');
-  }
-});
-
-// Generate a single group (for progressive loading)
-app.post('/api/generate-group', authMiddleware, async (req, res) => {
-  try {
-    const { examSpec, mode, groupIndex } = req.body;
-    const group = examSpec.groups[groupIndex];
-    if (!group) {
-      return res.status(400).json({ error: 'Invalid group index' });
-    }
-
-    const generation = await generateGroupWithIntegrity(examSpec, mode, group, groupIndex, {
-      maxTokens: 16384,
-      temperature: 0.4
-    });
-    const result = generation.result;
-
-    saveQuestionsFromTest({ groups: [result] }).catch((error) => console.error('Bank save error group:', error));
-
-    if (groupIndex === 0) {
-      const modeConfig = examSpec.modes[mode];
-      const timeScale = modeConfig.time_scale;
-
-      result.meta = {
-        exam_id: examSpec.exam_id,
-        level: examSpec.level,
-        language: examSpec.language,
-        mode,
-        seed: Math.random().toString(36).substring(7),
-        generated_at: new Date().toISOString(),
-        providers: { llm: formatLlmProviderLabel(generation.meta), tts_mode: 'auto' },
-        time_limits: {
-          overall_sec: Math.round(examSpec.official_time_limits_sec.overall_time_sec * timeScale),
-          groups: examSpec.official_time_limits_sec.groups.map((entry) => ({
-            group_id: entry.group_id,
-            time_sec: Math.round(entry.time_sec * timeScale)
-          }))
-        }
-      };
-    }
-
-    res.json(result);
-  } catch (err) {
-    console.error('Generate group error:', err);
-    log('ERROR', 'Generate group failed', { error: err.message, stack: err.stack?.substring(0, 500) });
-    return handleLlmEndpointFailure(res, err, 'Lỗi máy chủ. Vui lòng thử lại sau.');
-  }
-});
-
-// Generate a chunk of mondai (2-3 at a time for faster progressive loading)
-app.post('/api/generate-mondai-chunk', authMiddleware, async (req, res) => {
-  try {
-    const {
-      examSpec, mode, groupIndex, chunkIndex, chunkSize = 3,
-      previousMondai = []
-    } = req.body;
-
-    const group = examSpec.groups[groupIndex];
-    if (!group) {
-      return res.status(400).json({ error: 'Invalid group index' });
-    }
-
-    const startMondaiIndex = chunkIndex * chunkSize;
-    const endMondaiIndex = Math.min(startMondaiIndex + chunkSize, group.mondai.length);
-    const mondaiToGenerate = group.mondai.slice(startMondaiIndex, endMondaiIndex);
-
-    if (mondaiToGenerate.length === 0) {
-      return res.json({ mondai: [], isLast: true });
-    }
-
-    const isLast = endMondaiIndex >= group.mondai.length;
-    const isFirst = chunkIndex === 0;
-    const prompt = buildMondaiChunkPrompt(
-      examSpec,
-      mode,
-      group,
-      groupIndex,
-      mondaiToGenerate,
-      startMondaiIndex,
-      previousMondai
-    );
-    const generation = await runJsonTask({
-      task: 'generate',
-      prompt,
-      validateResult: validateMondaiChunkResult,
-      maxTokens: 8192,
-      temperature: 0.4
-    });
-    const validatedMondai = Array.isArray(generation?.result?.mondai) ? generation.result.mondai : [];
-
-    const response = {
-      mondai: validatedMondai,
-      chunkIndex,
-      isFirst,
-      isLast,
-      totalMondai: group.mondai.length,
-      generatedCount: validatedMondai.length
-    };
-
-    if (isFirst) {
-      response.group_id = group.group_id;
-      response.title_vi = group.title_vi;
-
-      if (groupIndex === 0) {
-        const modeConfig = examSpec.modes[mode];
-        const timeScale = modeConfig.time_scale;
-        response.meta = {
-          exam_id: examSpec.exam_id,
-          level: examSpec.level,
-          language: examSpec.language,
-          mode,
-          seed: Math.random().toString(36).substring(7),
-          generated_at: new Date().toISOString(),
-          providers: { llm: formatLlmProviderLabel(generation.meta), tts_mode: 'auto' },
-          time_limits: {
-            overall_sec: Math.round(examSpec.official_time_limits_sec.overall_time_sec * timeScale),
-            groups: examSpec.official_time_limits_sec.groups.map((entry) => ({
-              group_id: entry.group_id,
-              time_sec: Math.round(entry.time_sec * timeScale)
-            }))
-          }
-        };
-      }
-    }
-
-    saveQuestionsFromTest({ groups: [{ mondai: validatedMondai }] }).catch((error) => console.error('Bank save error chunk:', error));
-
-    const hashedResponse = hashifyAnswers(response);
-
-    log('INFO', `Generated mondai chunk ${chunkIndex + 1}`, {
-      groupIndex: groupIndex + 1,
-      mondaiCount: validatedMondai.length,
-      provider: formatLlmProviderLabel(generation.meta),
-      security: 'answer_hash'
-    });
-
-    res.json(hashedResponse);
-  } catch (err) {
-    console.error('Generate mondai chunk error:', err);
-    log('ERROR', 'Generate mondai chunk failed', { error: err.message, stack: err.stack?.substring(0, 500) });
-    return handleLlmEndpointFailure(res, err, 'Lỗi máy chủ. Vui lòng thử lại sau.');
-  }
-});
 
 // Answer Verification Endpoint (for client-side quick grading)
 app.post('/api/verify-answer', authMiddleware, verifyAnswerLimiter, (req, res) => {
@@ -2310,210 +1816,70 @@ async function generateGeminiTTS(text, language, speed = 1.0, voice) {
 
 // ============ Prompt Builders ============
 
-function buildGenerateTestPrompt(examSpec, mode, userHistory) {
-  const modeConfig = examSpec.modes[mode];
-  const questionScale = modeConfig.question_scale;
-  const timeScale = modeConfig.time_scale;
+function getExamPromptProfile(examSpec) {
+  const examId = String(examSpec?.exam_id || '').toLowerCase();
 
-  const groupsInfo = examSpec.groups.map(g => {
-    const mondaiInfo = g.mondai.map(m => {
-      const count = Math.max(1, Math.round(m.count_official * questionScale));
-      return `  - ${m.mondai_id} (${m.title_vi}): ${count} questions, types: ${m.types.join(', ')}`;
-    }).join('\n');
-    return `Group: ${g.group_id} (${g.title_vi})\n${mondaiInfo}`;
-  }).join('\n\n');
+  if (examId.includes('jlpt') || examSpec?.language === 'ja-JP') {
+    const jlptCanDo = {
+      'N5': {
+        desc: 'Understand very basic sentences. Familiar, concrete daily topics. Explicit information only.',
+        grammar: 'polite forms, basic conjunctions, no abstraction',
+        types: 'kanji reading, vocabulary usage, particle selection, short sentence ordering, literal reading comprehension'
+      },
+      'N4': {
+        desc: 'Understand simple explanations and descriptions. Slightly longer daily-life contexts. Still concrete, minimal abstraction.',
+        grammar: 'polite forms, basic conjunctions, simple て-form, no abstraction',
+        types: 'kanji reading, vocabulary usage, particle selection, short sentence ordering, literal reading comprehension'
+      },
+      'N3': {
+        desc: 'Understand main points of everyday and semi-formal texts. Simple opinions, reasons, and intentions. Limited inference allowed.',
+        grammar: 'plain forms, reasons (から/ので), soft opinions, basic conditional',
+        types: 'meaning inference, paraphrase matching, intent identification (simple)'
+      },
+      'N2': {
+        desc: 'Understand logical structure and arguments. Workplace, news-like, and explanatory texts. Abstract but practical concepts.',
+        grammar: 'passive/causative, contrast (一方/に対して), logical connectors, formal expressions',
+        types: 'logical flow, opinion vs fact, contextual paraphrasing'
+      },
+      'N1': {
+        desc: 'Understand abstract, academic, critical, and implicit content. Opinions, nuance, stance, and author intent. High-density information.',
+        grammar: 'modality, stance markers, ellipsis, rhetorical devices, literary expressions',
+        types: 'abstract inference, author attitude, rhetorical purpose, implicit meaning'
+      }
+    };
 
-  return `You are an expert ${examSpec.display_name_vi} exam creator. Generate a complete practice test.
+    return {
+      family: 'JLPT',
+      authority: 'The Japan Foundation',
+      systemRole: 'You are an AI Expert that generates JLPT exam content.',
+      levelProfiles: jlptCanDo,
+      fallbackLevel: jlptCanDo.N3,
+      scopeRules: `Vocabulary, kanji, and grammar MUST satisfy ALL conditions:
+- Belongs to ${examSpec.level} OR lower
+- Frequently appears in official JLPT prep materials
+- Natural Japanese usage (no textbook artifacts)`
+    };
+  }
 
-EXAM: ${examSpec.display_name_vi}
-LEVEL: ${examSpec.level}
-LANGUAGE: ${examSpec.language}
-MODE: ${mode} (time_scale: ${timeScale}, question_scale: ${questionScale})
-
-STRUCTURE:
-${groupsInfo}
-
-RULES:
-1. Generate 100% original questions. DO NOT copy or paraphrase real exam questions.
-2. Each question must have exactly 4 choices with exactly 1 correct answer.
-3. Questions must match the difficulty and style of ${examSpec.display_name_vi}.
-4. For reading/listening questions, include appropriate passages/scripts.
-5. For ${mode} mode, scale passage lengths proportionally (shorter for basic/standard).
-6. Include meaningful tags and brief explanations for each question.
-7. For listening items, include script_text for audio generation.
-8. Ensure difficulty distribution within each mondai: easy 20%, medium 60%, hard 20%.
-9. Distractors must be plausible (same part-of-speech/category), but clearly wrong for a single, verifiable reason.
-10. Never create ambiguous items with multiple correct answers.
-11. "choices" must be full answer texts, NOT letters "A/B/C/D".
-
-PERSONALIZATION INSTRUCTIONS:
-${userHistory?.weakTags?.length > 0 ? `The user is weak in: ${userHistory.weakTags.join(', ')}. Please include more questions covering these topics.` : 'Generate a balanced mix of questions.'}
-${userHistory?.recentResults ? 'Avoid repeating exact questions from recent tests, but re-test similar concepts.' : ''}
-
-OUTPUT JSON ONLY matching this schema:
-{
-  "meta": {
-    "exam_id": "${examSpec.exam_id}",
-    "level": "${examSpec.level}",
-    "language": "${examSpec.language}",
-    "mode": "${mode}",
-    "seed": "<random_string>",
-    "generated_at": "<ISO8601>",
-    "providers": { "llm": "<provider>", "tts_mode": "auto", "tts_text_llm": "<provider>" },
-    "time_limits": {
-      "overall_sec": ${Math.round(examSpec.official_time_limits_sec.overall_time_sec * timeScale)},
-      "groups": [${examSpec.official_time_limits_sec.groups.map(g =>
-    `{ "group_id": "${g.group_id}", "time_sec": ${Math.round(g.time_sec * timeScale)} }`
-  ).join(', ')}]
-    }
-  },
-  "groups": [
-    {
-      "group_id": "<string>",
-      "title_vi": "<string>",
-      "mondai": [
-        {
-          "mondai_id": "<string>",
-          "title_vi": "<string>",
-          "instructions_vi": "<Vietnamese instructions>",
-          "passage": { "title": "<optional>", "text": "<for reading>" },
-          "items": [
-            {
-              "id": "<unique_id>",
-              "type": "<question_type>",
-              "prompt": "<question in ${examSpec.language}>",
-              "choices": ["<choiceA text>", "<choiceB text>", "<choiceC text>", "<choiceD text>"],
-              "answer_index": 0,
-              "explain_brief": "<brief explanation>",
-              "tags": ["<tag1>", "<tag2>"],
-              "media": {
-                "script_text": "<for listening>",
-                "tts_text": null,
-                "tts_text_provider": null
-              }
-            }
-          ]
-        }
-      ]
-    }
-  ]
-}
-
-Generate the complete test now. JSON ONLY, no other text.`;
-}
-
-// Build prompt for generating a single group
-function buildGenerateGroupPrompt(examSpec, mode, group, groupIndex) {
-  const modeConfig = examSpec.modes[mode];
-  const questionScale = modeConfig.question_scale;
-
-  // Full exam structure for context
-  const fullExamStructure = examSpec.groups.map((g, idx) => {
-    const groupMondai = g.mondai.map(m => {
-      const count = Math.max(1, Math.round(m.count_official * questionScale));
-      return `    - ${m.mondai_id}: ${count} questions (${m.types.join(', ')})`;
-    }).join('\n');
-    const marker = idx === groupIndex ? ' ← GENERATE THIS ONE' : '';
-    return `  ${idx + 1}. ${g.group_id} (${g.title_vi})${marker}\n${groupMondai}`;
-  }).join('\n');
-
-  // Reading type IDs for special handling
-  const readingTypes = ['reading_short', 'reading_mid', 'reading_long', 'reading_compare', 'reading_info'];
-
-  // Current group details with special handling for reading
-  const mondaiInfo = group.mondai.map(m => {
-    const totalQuestions = Math.max(1, Math.round(m.count_official * questionScale));
-    const isReading = m.types.some(t => readingTypes.includes(t));
-
-    if (isReading && totalQuestions > 2) {
-      // For reading: fewer passages, more questions each
-      // E.g., instead of 5 passages x 1 question, create 2 passages x 2-3 questions
-      const passageCount = Math.min(2, Math.ceil(totalQuestions / 3));
-      const questionsPerPassage = Math.ceil(totalQuestions / passageCount);
-      return `  - ${m.mondai_id} (${m.title_vi}): ${passageCount} passage(s), ${questionsPerPassage} questions each (total ${totalQuestions}), types: ${m.types.join(', ')}
-    *** IMPORTANT: Create FEWER passages with MORE questions per passage to reduce reading time ***`;
-    }
-
-    return `  - ${m.mondai_id} (${m.title_vi}): ${totalQuestions} questions, types: ${m.types.join(', ')}`;
-  }).join('\n');
-
-  return `You are an expert ${examSpec.display_name_vi} exam creator. You are generating a complete ${examSpec.display_name_vi} practice test GROUP BY GROUP.
-
-EXAM: ${examSpec.display_name_vi}
-LEVEL: ${examSpec.level}
-LANGUAGE: ${examSpec.language}
-MODE: ${mode} (question_scale: ${questionScale})
-
-FULL EXAM STRUCTURE (for context - you are generating Group ${groupIndex + 1}):
-${fullExamStructure}
-
-NOW GENERATE GROUP ${groupIndex + 1} OF ${examSpec.groups.length}:
-Group: ${group.group_id} (${group.title_vi})
-${mondaiInfo}
-
-IMPORTANT CONTEXT:
-- This is part ${groupIndex + 1} of ${examSpec.groups.length} in a complete ${examSpec.display_name_vi} practice test
-- Maintain consistent difficulty throughout the exam
-- Questions should feel like they belong to the same cohesive test
-- Use appropriate vocabulary and grammar for ${examSpec.level} level
-
-*** READING COMPREHENSION OPTIMIZATION ***
-For reading types (reading_short, reading_mid, reading_long, reading_compare, reading_info):
-- Create FEWER passages but with MORE questions per passage
-- Example: Instead of 5 passages with 1 question each, create 2 passages with 2-3 questions each
-- This reduces total reading time while maintaining question count
-- Each passage should be rich enough to support multiple questions
-
-RULES:
-1. Generate 100% original questions. DO NOT copy real exam questions.
-2. Each question must have exactly 4 choices with exactly 1 correct answer.
-3. Questions must match the difficulty and style of ${examSpec.display_name_vi}.
-4. For reading/listening questions, include appropriate passages/scripts.
-5. Include meaningful tags and brief explanations for each question.
-6. For listening items, include script_text for audio generation.
-7. "choices" must be full answer texts, NOT letters "A/B/C/D".
-
-OUTPUT JSON ONLY matching the following schema.
-IMPORTANT:
-- Return RAW JSON only. Do not wrap in markdown code blocks.
-- Ensure strict JSON validity (escape quotes properly).
-- Ensure all required fields are present.
-
-Schema:
-{
-  "group_id": "${group.group_id}",
-  "title_vi": "${group.title_vi}",
-  "mondai": [
-    {
-      "mondai_id": "<string>",
-      "title_vi": "<Vietnamese Title> (<Japanese Title>)",
-      "instructions_vi": "<Vietnamese instructions>",
-      "passage": { "title": "<optional>", "text": "<for reading>" },
-      "items": [
-        {
-          "id": "<unique_id>",
-          "type": "<question_type>",
-          "prompt": "<question in ${examSpec.language}>",
-          "choices": ["<choiceA text>", "<choiceB text>", "<choiceC text>", "<choiceD text>"],
-          "answer_index": 0,
-          "explain_brief": "<brief explanation>",
-          "tags": ["<tag1>", "<tag2>"],
-          "media": {
-            "script_text": "<for listening, null otherwise>"
-          }
-        }
-      ]
-    }
-  ]
-}
-
-GENERATE JSON NOW:`;
+  return {
+    family: examSpec?.exam_id || 'language exam',
+    authority: 'official exam conventions',
+    systemRole: 'You are an AI Expert that generates language exam content.',
+    levelProfiles: {},
+    fallbackLevel: {
+      desc: 'Keep the language natural, level-appropriate, and instruction-following.',
+      grammar: 'Use grammar and vocabulary that match the declared level only.',
+      types: 'Follow the requested question types exactly.'
+    },
+    scopeRules: `Vocabulary and grammar must stay within the declared level for ${examSpec?.display_name_vi || examSpec?.exam_id || 'this exam'} and remain natural for native materials.`
+  };
 }
 
 // Build prompt for generating a chunk of mondai (2-3 at a time)
 function buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGenerate, startMondaiIndex, previousMondai = []) {
   const modeConfig = examSpec.modes[mode];
   const questionScale = modeConfig.question_scale;
+  const promptProfile = getExamPromptProfile(examSpec);
 
   // Reading type IDs for special handling
   const readingTypes = ['reading_short', 'reading_mid', 'reading_long', 'reading_compare', 'reading_info'];
@@ -2599,43 +1965,10 @@ ${usedVocabulary.length > 0 ? `Sample Vocabulary: ${usedVocabulary.slice(0, 6).j
 `;
   }
 
-  // Determine if this is a single-section exam (grammar/vocab only, listening only, or reading only)
-  const isSingleSection = examSpec.groups.length === 1;
-  const sectionType = group.group_id;
+  const levelInfo = promptProfile.levelProfiles[examSpec.level] || promptProfile.fallbackLevel;
 
-  // JLPT Can-do definitions by level
-  const jlptCanDo = {
-    'N5': {
-      desc: 'Understand very basic sentences. Familiar, concrete daily topics. Explicit information only.',
-      grammar: 'polite forms, basic conjunctions, no abstraction',
-      types: 'kanji reading, vocabulary usage, particle selection, short sentence ordering, literal reading comprehension'
-    },
-    'N4': {
-      desc: 'Understand simple explanations and descriptions. Slightly longer daily-life contexts. Still concrete, minimal abstraction.',
-      grammar: 'polite forms, basic conjunctions, simple て-form, no abstraction',
-      types: 'kanji reading, vocabulary usage, particle selection, short sentence ordering, literal reading comprehension'
-    },
-    'N3': {
-      desc: 'Understand main points of everyday and semi-formal texts. Simple opinions, reasons, and intentions. Limited inference allowed.',
-      grammar: 'plain forms, reasons (から/ので), soft opinions, basic conditional',
-      types: 'meaning inference, paraphrase matching, intent identification (simple)'
-    },
-    'N2': {
-      desc: 'Understand logical structure and arguments. Workplace, news-like, and explanatory texts. Abstract but practical concepts.',
-      grammar: 'passive/causative, contrast (一方/に対して), logical connectors, formal expressions',
-      types: 'logical flow, opinion vs fact, contextual paraphrasing'
-    },
-    'N1': {
-      desc: 'Understand abstract, academic, critical, and implicit content. Opinions, nuance, stance, and author intent. High-density information.',
-      grammar: 'modality, stance markers, ellipsis, rhetorical devices, literary expressions',
-      types: 'abstract inference, author attitude, rhetorical purpose, implicit meaning'
-    }
-  };
-
-  const levelInfo = jlptCanDo[examSpec.level] || jlptCanDo['N3'];
-
-  return `You are an AI Expert that generates JLPT exam content.
-All output MUST conform to official standards defined by The Japan Foundation.
+  return `${promptProfile.systemRole}
+All output MUST conform to official standards defined by ${promptProfile.authority}.
 
 ================================
 CORE PRINCIPLE: LEVEL DISCIPLINE
@@ -2669,10 +2002,7 @@ Using grammar ≥ one level above ${examSpec.level} → FORBIDDEN.
 -------------------------
 LANGUAGE SCOPE CONTROL
 -------------------------
-Vocabulary, kanji, and grammar MUST satisfy ALL conditions:
-- Belongs to ${examSpec.level} OR lower
-- Frequently appears in official JLPT prep materials
-- Natural Japanese usage (no textbook artifacts)
+${promptProfile.scopeRules}
 
 Prohibited:
 - Trick phrasing
@@ -2862,7 +2192,178 @@ function buildTtsTextPrompt(text, language) {
                                   JSON ONLY, no other text.`;
 }
 
+function getAdminSecretFromRequest(req) {
+  return req.headers['x-warmup-secret'] || req.query.secret || req.body?.secret;
+}
+
+function isAuthorizedAdminRequest(req) {
+  const expectedSecret = process.env.WARMUP_SECRET;
+  const secret = getAdminSecretFromRequest(req);
+  return Boolean(expectedSecret && secret && secret === expectedSecret);
+}
+
+function getLlmConfigSnapshot() {
+  const tasks = ['generate', 'repair', 'explain'];
+  const taskStages = Object.fromEntries(
+    tasks.map((task) => [task, buildProviderStages(task).map((stage) => ({
+      name: stage.name,
+      provider: stage.provider,
+      model: stage.model,
+      repairModel: stage.repairModel || stage.model
+    }))])
+  );
+
+  return {
+    openrouterConfigured: Boolean(process.env.OPENROUTER_API_KEY),
+    geminiConfigured: Boolean(
+      process.env.GEMINI_API_KEY ||
+      process.env.GEMINI_API_KEY_A ||
+      process.env.GEMINI_API_KEY_B
+    ),
+    embeddingConfigured: Boolean(
+      process.env.GEMINI_EMBEDDING_KEY_A ||
+      process.env.GEMINI_EMBEDDING_KEY_B ||
+      process.env.GEMINI_API_KEY ||
+      process.env.GEMINI_API_KEY_A ||
+      process.env.GEMINI_API_KEY_B
+    ),
+    tasks: taskStages,
+    env: {
+      OPENROUTER_MODEL_GENERATE_PRIMARY: process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || 'qwen/qwen3.6-plus-preview:free',
+      OPENROUTER_MODEL_GENERATE_SECONDARY: process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || 'nvidia/nemotron-3-super-120b-a12b:free',
+      OPENROUTER_MODEL_REPAIR_PRIMARY: process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || 'nvidia/nemotron-3-nano-30b-a3b:free',
+      OPENROUTER_MODEL_REPAIR_SECONDARY: process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || 'arcee-ai/trinity-large-preview:free',
+      OPENROUTER_MODEL_EXPLAIN_PRIMARY: process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || 'qwen/qwen3.6-plus-preview:free',
+      OPENROUTER_MODEL_EXPLAIN_SECONDARY: process.env.OPENROUTER_MODEL_EXPLAIN_SECONDARY || 'nvidia/nemotron-3-super-120b-a12b:free',
+      OPENROUTER_RPM: process.env.OPENROUTER_RPM || '5',
+      BLUEPRINT_GENERATION_CONCURRENCY: process.env.BLUEPRINT_GENERATION_CONCURRENCY || '4',
+      BLUEPRINT_GENERATION_CONCURRENCY_EFFECTIVE: String(getEffectiveBlueprintGenerationConcurrency()),
+      GEMINI_MODEL_FALLBACK: process.env.GEMINI_MODEL_FALLBACK || 'gemini-3.1-flash-lite-preview',
+      GEMINI_MODEL_FALLBACK_COMPAT: process.env.GEMINI_MODEL_FALLBACK_COMPAT || '',
+      GEMINI_EMBEDDING_MODEL_PRIMARY: process.env.GEMINI_EMBEDDING_MODEL_PRIMARY || process.env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001',
+      GEMINI_EMBEDDING_MODEL_SECONDARY: process.env.GEMINI_EMBEDDING_MODEL_SECONDARY || '',
+      EMBEDDING_BACKFILL_BATCH_SIZE: process.env.EMBEDDING_BACKFILL_BATCH_SIZE || '24',
+      EMBEDDING_BATCH_MAX_ITEMS: process.env.EMBEDDING_BATCH_MAX_ITEMS || '6',
+      EMBEDDING_BATCH_MAX_CHARS: process.env.EMBEDDING_BATCH_MAX_CHARS || '24000'
+    }
+  };
+}
+
+function buildLlmHealthPrompt(task, stage) {
+  return `Return JSON only.
+{
+  "ok": true,
+  "task": "${task}",
+  "stage": "${stage.name}",
+  "provider": "${stage.provider}",
+  "model": "${stage.model}"
+}`;
+}
+
+function validateLlmHealthResponse(value) {
+  if (!value || typeof value !== 'object') return ['health_payload_invalid'];
+  if (value.ok !== true) return ['health_ok_false'];
+  return [];
+}
+
+async function probeLlmStage(task, stage) {
+  const prompt = buildLlmHealthPrompt(task, stage);
+  const startedAt = Date.now();
+
+  try {
+    let response;
+
+    if (stage.provider === 'openrouter') {
+      response = await callOpenRouter({
+        prompt,
+        model: stage.model,
+        maxTokens: 256,
+        temperature: 0
+      });
+    } else {
+      response = await callGeminiText({
+        prompt,
+        model: stage.model,
+        apiKey: stage.apiKey,
+        maxTokens: 256,
+        temperature: 0
+      });
+    }
+
+    const parsed = JSON.parse(String(response.text || '').replace(/```json/gi, '').replace(/```/g, '').trim());
+    const validationErrors = validateLlmHealthResponse(parsed);
+    if (validationErrors.length > 0) {
+      throw new Error(`Invalid health payload: ${validationErrors.join(', ')}`);
+    }
+
+    return {
+      task,
+      name: stage.name,
+      provider: stage.provider,
+      model: stage.model,
+      ok: true,
+      latencyMs: Date.now() - startedAt
+    };
+  } catch (error) {
+    return {
+      task,
+      name: stage.name,
+      provider: stage.provider,
+      model: stage.model,
+      ok: false,
+      latencyMs: Date.now() - startedAt,
+      error: error.message,
+      status: error.status || null,
+      retryable: Boolean(error.retryable)
+    };
+  }
+}
+
 // ============ V2 Endpoints (Pool Architectre) ============
+
+// ============ Admin LLM Diagnostics ============
+
+app.get('/api/admin/llm-config', async (req, res) => {
+  if (!isAuthorizedAdminRequest(req)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  return res.json({
+    ok: true,
+    config: getLlmConfigSnapshot()
+  });
+});
+
+app.post('/api/admin/llm-healthcheck', async (req, res) => {
+  if (!isAuthorizedAdminRequest(req)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const requestedTasks = Array.isArray(req.body?.tasks) ? req.body.tasks : ['generate', 'repair', 'explain'];
+  const tasks = requestedTasks
+    .map((task) => String(task || '').trim().toLowerCase())
+    .filter((task, index, values) => ['generate', 'repair', 'explain'].includes(task) && values.indexOf(task) === index);
+
+  const results = [];
+
+  for (const task of tasks) {
+    const stages = buildProviderStages(task).slice(0, 4);
+    for (const stage of stages) {
+      results.push(await probeLlmStage(task, stage));
+    }
+  }
+
+  return res.json({
+    ok: true,
+    checkedAt: new Date().toISOString(),
+    summary: {
+      total: results.length,
+      passed: results.filter((item) => item.ok).length,
+      failed: results.filter((item) => !item.ok).length
+    },
+    results
+  });
+});
 
 // ============ Admin Warmup Endpoint ============
 
@@ -3119,6 +2620,93 @@ app.post('/api/admin/warm-pool', async (req, res) => {
 });
 
 /**
+ * GET|POST /api/admin/embeddings/backfill - Backfill missing embeddings in controlled batches
+ * Authentication: x-warmup-secret header OR ?secret= query param
+ * Params/Body: batch_size?, max_batches?, max_items_per_request?, max_chars_per_request?
+ */
+async function handleEmbeddingBackfillRequest(req, res) {
+  const secret = req.headers['x-warmup-secret'] || req.query.secret || req.body?.secret;
+  const expectedSecret = process.env.WARMUP_SECRET;
+  if (!expectedSecret || secret !== expectedSecret) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    if (!(await db.initDb())) {
+      return res.status(503).json({ error: 'DB unavailable' });
+    }
+
+    const batchSize = Math.max(
+      1,
+      parseInt(req.body?.batch_size || req.body?.batchSize || req.query.batch_size || req.query.batchSize) || 24
+    );
+    const maxBatches = Math.max(
+      1,
+      parseInt(req.body?.max_batches || req.body?.maxBatches || req.query.max_batches || req.query.maxBatches) || 1
+    );
+    const maxItemsPerRequest = Math.max(
+      1,
+      parseInt(
+        req.body?.max_items_per_request ||
+        req.body?.maxItemsPerRequest ||
+        req.query.max_items_per_request ||
+        req.query.maxItemsPerRequest
+      ) || 6
+    );
+    const maxCharsPerRequest = Math.max(
+      1000,
+      parseInt(
+        req.body?.max_chars_per_request ||
+        req.body?.maxCharsPerRequest ||
+        req.query.max_chars_per_request ||
+        req.query.maxCharsPerRequest
+      ) || 24000
+    );
+
+    let batchesRun = 0;
+    let selected = 0;
+    let processed = 0;
+    let remaining = null;
+    let lastStats = null;
+
+    for (let index = 0; index < maxBatches; index += 1) {
+      const stats = await runEmbeddingBackfill(db, {
+        batchSize,
+        maxItemsPerRequest,
+        maxCharsPerRequest
+      });
+      lastStats = stats;
+      batchesRun += 1;
+      selected += stats.selected || 0;
+      processed += stats.processed || 0;
+      remaining = stats.remaining;
+
+      if ((stats.selected || 0) === 0) break;
+      if (typeof stats.remaining === 'number' && stats.remaining <= 0) break;
+    }
+
+    return res.json({
+      ok: true,
+      batchesRun,
+      batchSize,
+      maxBatches,
+      maxItemsPerRequest,
+      maxCharsPerRequest,
+      selected,
+      processed,
+      remaining,
+      skipped: lastStats?.skipped || null
+    });
+  } catch (error) {
+    console.error('[EmbeddingBackfill] Error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+}
+
+app.get('/api/admin/embeddings/backfill', handleEmbeddingBackfillRequest);
+app.post('/api/admin/embeddings/backfill', handleEmbeddingBackfillRequest);
+
+/**
  * POST /api/admin/cleanup - Remove old pool snapshots and items
  * Authentication: x-warmup-secret header
  * Body: { keepDays?: number } (default 14)
@@ -3169,6 +2757,27 @@ app.post('/api/admin/cleanup', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+/**
+ * Helper: Attach stable slot metadata to delivered mondai
+ */
+function attachSlotMetaToMondai(content, slot, groupId, slotIndex) {
+  const cloned = JSON.parse(JSON.stringify(content || {}));
+  const slotId = slot?.slot_id || buildBlueprintSlotId(groupId, cloned?.mondai_id || 'M', slotIndex);
+  cloned.slot_id = slotId;
+  cloned.slot_index = slotIndex;
+  cloned.group_id = groupId;
+
+  if (!cloned.meta || typeof cloned.meta !== 'object') {
+    cloned.meta = {};
+  }
+
+  cloned.meta.slot_id = slotId;
+  cloned.meta.group_id = groupId;
+  cloned.meta.delivery_mode = slot?.delivery_mode || 'flexible';
+
+  return cloned;
+}
 
 /**
  * Helper: Deliver next chunk for an instance
@@ -3256,7 +2865,7 @@ async function deliverNextChunk(instanceKey, want) {
       }
 
       if (content) {
-        mondaiToDeliver.push(content);
+        mondaiToDeliver.push(attachSlotMetaToMondai(content, slot, group.group_id, idx));
       }
       cursor = idx + 1;
     }
@@ -3519,12 +3128,11 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
         groups: blueprint.groups.map((group) => ({
           group_id: group.group_id,
           title_vi: group.title_vi,
-          expected_mondai_count: group.mondai_slots.length
+          expected_mondai_count: group.mondai_slots.length,
+          slot_order: group.mondai_slots.map((slot) => slot.slot_id)
         }))
       },
-      firstChunk: sanitizeMondaiForClient(firstChunk),
-      mondai: sanitizeMondaiForClient({ mondai: firstChunk.mondai }).mondai,
-      prefetchHints: []
+      mondai: sanitizeMondaiForClient({ mondai: firstChunk.mondai }).mondai
     });
   } catch (err) {
     console.error('Start exam V2 error:', err);
@@ -3778,8 +3386,6 @@ if (require.main === module) {
         process.exit(1);
       }
     }
-
-    scheduleEmbeddingBackfill(db);
 
     app.listen(PORT, () => {
       console.log(`Language Exam Server running on http://localhost:${PORT}`);

@@ -246,8 +246,40 @@
             }
         },
 
+        async requestAdmin(endpoint, options = {}) {
+            const secret = options.secret || '';
+            const response = await fetch(`${CONFIG.apiBase}${endpoint}`, {
+                ...options,
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(secret ? { 'x-warmup-secret': secret } : {}),
+                    ...options.headers
+                },
+                body: options.body ? JSON.stringify(options.body) : undefined
+            });
+
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({ error: response.statusText }));
+                throw new Error(error.error || 'Admin request failed');
+            }
+
+            return response.json();
+        },
+
         async getMe() {
             return this.request('/me', { method: 'POST' });
+        },
+
+        async getAdminLlmConfig(secret) {
+            return this.requestAdmin('/admin/llm-config', { method: 'GET', secret });
+        },
+
+        async runAdminLlmHealthcheck(secret, tasks = ['generate', 'repair', 'explain']) {
+            return this.requestAdmin('/admin/llm-healthcheck', {
+                method: 'POST',
+                secret,
+                body: { tasks }
+            });
         },
 
         async getUserData() {
@@ -286,27 +318,6 @@
                 }
             }
             return this.request('/user-data', { method: 'PUT', body: data });
-        },
-
-        async generateTest(examSpec, mode, provider, userHistory) {
-            return this.request('/generate-test', {
-                method: 'POST',
-                body: { examSpec, mode, provider, userHistory }
-            });
-        },
-
-        async generateGroup(examSpec, mode, groupIndex, provider) {
-            return this.request('/generate-group', {
-                method: 'POST',
-                body: { examSpec, mode, groupIndex, provider }
-            });
-        },
-
-        async generateMondaiChunk(examSpec, mode, groupIndex, chunkIndex, chunkSize = 3, previousMondai = [], provider, model = null) {
-            return this.request('/generate-mondai-chunk', {
-                method: 'POST',
-                body: { examSpec, mode, groupIndex, chunkIndex, chunkSize, previousMondai, provider, model }
-            });
         },
 
         async gradeTest(test, answers, provider, model = null, instanceKey = null) {
@@ -1855,6 +1866,45 @@
             if (text) text.textContent = '100%';
         },
 
+        getMondaiKey(mondai) {
+            return mondai?.slot_id || mondai?.meta?.slot_id || mondai?.mondai_id || null;
+        },
+
+        getGroupExpectedCount(groupIndex) {
+            const manifestGroup = State.test?.meta?.manifest?.groups?.[groupIndex];
+            if (manifestGroup?.expected_mondai_count) {
+                return manifestGroup.expected_mondai_count;
+            }
+            return State.examSpec?.groups?.[groupIndex]?.mondai?.length || 0;
+        },
+
+        getLoadedMondaiCount(group) {
+            if (!group) return 0;
+            return group.order ? Object.keys(group._mondaiById || {}).length : (group.mondai || []).length;
+        },
+
+        getGroupMondaiCount(group) {
+            if (!group) return 0;
+            return group.order && group.order.length > 0 ? group.order.length : (group.mondai ? group.mondai.length : 0);
+        },
+
+        assignMondaiToGroup(group, mondai) {
+            if (!group || !mondai) return false;
+            const key = this.getMondaiKey(mondai);
+            if (!key) return false;
+            if (!group._mondaiById) group._mondaiById = {};
+            group._mondaiById[key] = mondai;
+            return true;
+        },
+
+        getOrderedMondaiList(group) {
+            if (!group) return [];
+            if (group.order && group.order.length > 0) {
+                return group.order.map((id) => group._mondaiById?.[id]).filter(Boolean);
+            }
+            return group.mondai || [];
+        },
+
 
         async startTest() {
             // Prevent duplicate test starts
@@ -1942,11 +1992,10 @@
                         manifest: res.manifest  // Store manifest for processChunk/loadRemainingChunksV2
                     },
                     groups: res.manifest.groups.map(g => {
-                        const specGroup = State.examSpec.groups.find(sg => sg.group_id === g.group_id);
                         return {
                             group_id: g.group_id,
                             title_vi: g.title_vi,
-                            order: specGroup?.mondai?.map(m => m.mondai_id) || [],
+                            order: Array.isArray(g.slot_order) ? g.slot_order : [],
                             _mondaiById: {},
                             mondai: [] // Legacy array fallback
                         };
@@ -1997,7 +2046,7 @@
                 const group = State.test.groups.find(g => g.group_id === targetGroupId);
                 if (group && res.chunk && res.chunk.length > 0) {
                     res.chunk.forEach(m => {
-                        group._mondaiById[m.mondai_id] = m;
+                        this.assignMondaiToGroup(group, m);
                     });
                     this.updateProgressUI();
                 }
@@ -2016,20 +2065,21 @@
             if (!manifest) return;
 
             mondaiList.forEach(m => {
+                const key = this.getMondaiKey(m);
                 for (let i = 0; i < State.test.groups.length; i++) {
                     const group = State.test.groups[i];
-                    if (group.order && group.order.includes(m.mondai_id)) {
-                        const wasPresent = !!group._mondaiById[m.mondai_id];
-                        console.log(`[ProcessChunk] assigning ${m.mondai_id} to ${group.group_id}. Already present: ${wasPresent}`);
-                        group._mondaiById[m.mondai_id] = m;
+                    if (group.order && key && group.order.includes(key)) {
+                        const wasPresent = !!group._mondaiById[key];
+                        console.log(`[ProcessChunk] assigning ${key} to ${group.group_id}. Already present: ${wasPresent}`);
+                        this.assignMondaiToGroup(group, m);
                         return;
                     }
                 }
                 // Fallback: push to last group
                 if (State.test.groups.length > 0) {
                     const group = State.test.groups[State.test.groups.length - 1];
-                    console.log(`[ProcessChunk] fallback assigning ${m.mondai_id} to last group ${group.group_id}`);
-                    group._mondaiById[m.mondai_id] = m;
+                    console.log(`[ProcessChunk] fallback assigning ${key || m.mondai_id} to last group ${group.group_id}`);
+                    this.assignMondaiToGroup(group, m);
                 }
             });
             this.updateProgressUI();
@@ -2049,7 +2099,7 @@
                 const manifestGroup = State.test.meta.manifest.groups.find(mg => mg.group_id === group_id);
                 const expected = manifestGroup?.expected_mondai_count || 0;
 
-                const currentCount = group.order ? Object.keys(group._mondaiById).length : group.mondai.length;
+                const currentCount = this.getLoadedMondaiCount(group);
                 if (currentCount >= expected) {
                     console.log(`Group ${group_id} already has ${currentCount}/${expected} items.`);
                     return;
@@ -2063,9 +2113,10 @@
 
                         if (res.chunk && res.chunk.length > 0) {
                             res.chunk.forEach(m => {
-                                const wasPresent = !!group._mondaiById[m.mondai_id];
-                                group._mondaiById[m.mondai_id] = m;
-                                console.log(`[ChunkReq] Recv ${m.mondai_id}. Present before: ${wasPresent}`);
+                                const key = this.getMondaiKey(m);
+                                const wasPresent = !!group._mondaiById[key];
+                                this.assignMondaiToGroup(group, m);
+                                console.log(`[ChunkReq] Recv ${key}. Present before: ${wasPresent}`);
                             });
                             this.updateNavigationButtons();
                             this.updateProgressUI();
@@ -2084,182 +2135,14 @@
                 this.updateNavigationButtons();
             };
 
-            // Schedule all groups concurrently (limit to 3 concurrent)
-            RequestQueue.setLimit(3);
+            // Schedule all groups concurrently with a small bounded window.
+            RequestQueue.setLimit(4);
             const promises = State.test.groups.map((_, gIdx) =>
                 RequestQueue.schedule(() => loadGroup(gIdx))
             );
 
             await Promise.all(promises);
             console.log('All chunks loaded (V2 concurrent).');
-        },
-
-        async loadRemainingChunksInBackground(groupResult, startChunkIndex, totalChunks, previousMondai, llmProvider, targetModel = null, concurrency = 3, pendingPromisesMap = {}, pendingGroupsMap = {}) {
-            // STREAM C START: Fire off remaining groups (Listening, etc.)
-            console.log('Starting Stream C: Queuing remaining groups...');
-            this.loadRemainingGroupsInBackground(llmProvider, targetModel, concurrency, pendingGroupsMap);
-
-            // STREAM A: Sliding Window Load
-            console.log(`Stream A Active: Queuing chunks ${startChunkIndex} to ${totalChunks - 1} with buffering...`);
-
-            const promises = [];
-            const chunkSize = 2;
-
-            for (let i = startChunkIndex; i < totalChunks; i++) {
-                if (pendingPromisesMap[i]) {
-                    // Wrap priority promise with RETRY logic
-                    // If it resolved with error, try again immediately here
-                    const p = pendingPromisesMap[i].then(outcome => {
-                        if (outcome.error) {
-                            console.warn(`Stream A: Priority chunk ${i} failed previously. Retrying...`, outcome.error);
-                            return RequestQueue.schedule(() =>
-                                Api.generateMondaiChunk(
-                                    State.examSpec,
-                                    State.currentMode,
-                                    0, // groupIndex
-                                    i,
-                                    chunkSize,
-                                    previousMondai,
-                                    llmProvider,
-                                    targetModel
-                                )
-                            ).then(result => ({ chunkIndex: i, result }))
-                                .catch(err => ({ chunkIndex: i, error: err }));
-                        }
-                        return outcome;
-                    });
-                    promises.push(p);
-                } else {
-                    const p = RequestQueue.schedule(() =>
-                        Api.generateMondaiChunk(
-                            State.examSpec,
-                            State.currentMode,
-                            0, // groupIndex
-                            i,
-                            chunkSize,
-                            previousMondai,
-                            llmProvider,
-                            targetModel
-                        )
-                    ).then(result => ({ chunkIndex: i, result }))
-                        .catch(err => ({ chunkIndex: i, error: err }));
-                    promises.push(p);
-                }
-            }
-
-            let nextIndex = startChunkIndex;
-            const buffer = {};
-            // Pre-fill buffer with any completed pending promises that haven't been pushed
-            // (handled by the promise.then below)
-
-            promises.forEach(p => {
-                p.then(({ chunkIndex, result, error }) => {
-                    if (result) {
-                        buffer[chunkIndex] = result.mondai;
-                    }
-                    while (buffer[nextIndex]) {
-                        groupResult.mondai.push(...buffer[nextIndex]);
-                        delete buffer[nextIndex];
-                        nextIndex++;
-                        this.updateNavigationButtons();
-                    }
-                });
-            });
-
-            await Promise.all(promises);
-            console.log('Stream A Complete: First group fully loaded.');
-        },
-
-        async loadRemainingGroupsInBackground(llmProvider, targetModel = null, concurrency = 3, pendingGroupsMap = {}) {
-            const totalGroups = State.examSpec.groups.length;
-            const remainingIndices = [];
-            for (let i = 1; i < totalGroups; i++) remainingIndices.push(i);
-
-            const groupPromises = remainingIndices.map(async (groupIndex) => {
-                const group = State.examSpec.groups[groupIndex];
-
-                // Ensure slot
-                if (!State.test.groups[groupIndex]) {
-                    State.test.groups[groupIndex] = {
-                        group_id: group.group_id,
-                        title_vi: group.title_vi,
-                        mondai: []
-                    };
-                }
-                const groupResult = State.test.groups[groupIndex];
-
-                const pendingForGroup = pendingGroupsMap[groupIndex] || [];
-                const chunkSize = 2;
-                const groupTotalChunks = Math.ceil(group.mondai.length / chunkSize);
-                const promises = [];
-
-                try {
-                    for (let c = 0; c < groupTotalChunks; c++) {
-                        if (pendingForGroup[c]) {
-                            // Wrap priority promise with RETRY logic
-                            const p = pendingForGroup[c].then(outcome => {
-                                if (outcome.error) {
-                                    console.warn(`Stream C: Priority chunk ${c} (Group ${groupIndex}) failed previously. Retrying...`, outcome.error);
-                                    return RequestQueue.schedule(() =>
-                                        Api.generateMondaiChunk(
-                                            State.examSpec,
-                                            State.currentMode,
-                                            groupIndex,
-                                            c,
-                                            chunkSize,
-                                            [],
-                                            llmProvider,
-                                            targetModel
-                                        )
-                                    ).then(result => ({ chunkIndex: c, result }))
-                                        .catch(err => ({ chunkIndex: c, error: err }));
-                                }
-                                return outcome;
-                            });
-                            promises.push(p);
-                        } else {
-                            promises.push(
-                                RequestQueue.schedule(() =>
-                                    Api.generateMondaiChunk(
-                                        State.examSpec,
-                                        State.currentMode,
-                                        groupIndex,
-                                        c,
-                                        chunkSize,
-                                        [],
-                                        llmProvider,
-                                        targetModel
-                                    )
-                                ).then(result => ({ chunkIndex: c, result }))
-                                    .catch(err => ({ chunkIndex: c, error: err }))
-                            );
-                        }
-                    }
-
-                    // Buffer logic
-                    let nextIdx = 0;
-                    const buffer = {};
-
-                    promises.forEach(p => {
-                        p.then(({ chunkIndex, result }) => {
-                            if (result) buffer[chunkIndex] = result.mondai;
-                            while (buffer[nextIdx]) {
-                                groupResult.mondai.push(...buffer[nextIdx]);
-                                delete buffer[nextIdx];
-                                nextIdx++;
-                            }
-                        });
-                    });
-
-                    await Promise.all(promises);
-                    console.log(`Stream C Update: Group ${groupIndex + 1} (${group.title_vi}) fully loaded`);
-                } catch (err) {
-                    console.error(`Stream C Error: Group ${groupIndex + 1}:`, err);
-                }
-            });
-
-            await Promise.all(groupPromises);
-            console.log('Stream C Complete: All groups loaded');
         },
 
 
@@ -2320,7 +2203,6 @@
 
         initializeTest() {
             const test = State.test;
-            const spec = State.examSpec;
 
             // Start timers
             Timer.startOverallTimer(test.meta.time_limits.overall_sec);
@@ -2332,7 +2214,7 @@
             }
 
             // Update total mondai count
-            const totalMondai = ExamLoader.getTotalMondai(spec);
+            const totalMondai = this.getTotalMondaiCount();
             $('#mondai-total').textContent = totalMondai;
 
             // Render first mondai
@@ -2366,15 +2248,6 @@
             // Get current group from GENERATED test (for position within loaded mondai)
             const currentGroup = State.test.groups[State.currentGroupIndex];
             if (!currentGroup) return;
-
-            // Calculate position within current group using GENERATED test
-            let firstMondaiOfGroup = 0;
-            for (let i = 0; i < State.currentGroupIndex; i++) {
-                if (State.test.groups[i]) {
-                    firstMondaiOfGroup += State.test.groups[i].mondai.length;
-                }
-            }
-            const mondaiPosInGroup = globalIndex - firstMondaiOfGroup + 1;
 
             // Total uses EXAM SPEC for the full intended count
             this.updateProgressUI();
@@ -2623,7 +2496,7 @@
         getCurrentMondaiData() {
             let globalIdxCount = 0;
             for (const group of State.test.groups) {
-                const count = group.order && group.order.length > 0 ? group.order.length : (group.mondai ? group.mondai.length : 0);
+                const count = this.getGroupMondaiCount(group);
                 if (State.currentMondaiIndex >= globalIdxCount && State.currentMondaiIndex < globalIdxCount + count) {
                     const localIdx = State.currentMondaiIndex - globalIdxCount;
                     let mondai;
@@ -2646,7 +2519,7 @@
             let globalIdxCount = 0;
             for (const group of State.test.groups) {
                 if (!group) continue;
-                const count = group.order && group.order.length > 0 ? group.order.length : (group.mondai ? group.mondai.length : 0);
+                const count = this.getGroupMondaiCount(group);
                 if (globalIndex >= globalIdxCount && globalIndex < globalIdxCount + count) {
                     const localIdx = globalIndex - globalIdxCount;
                     if (group.order && group.order.length > 0) {
@@ -2665,7 +2538,7 @@
             if (!State.test || !State.examSpec) return;
 
             const globalIndex = this.getGlobalMondaiIndex();
-            const totalMondaiFromSpec = State.examSpec.groups.reduce((sum, g) => sum + g.mondai.length, 0);
+            const totalMondaiFromSpec = this.getTotalMondaiCount();
             const nextMondaiLoaded = this.isMondaiLoaded(globalIndex + 1);
 
             // Update Previous button
@@ -2747,12 +2620,12 @@
         updateProgressUI() {
             if (!State.test || !State.examSpec) return;
             const currentGroupIdx = State.currentGroupIndex;
-            const expected = State.examSpec.groups[currentGroupIdx].mondai.length;
+            const expected = this.getGroupExpectedCount(currentGroupIdx);
             const group = State.test.groups[currentGroupIdx];
 
             let loaded = 0;
             if (group) {
-                loaded = group.order ? Object.keys(group._mondaiById).length : group.mondai.length;
+                loaded = this.getLoadedMondaiCount(group);
             }
 
             const progressCurrent = $('#mondai-current');
@@ -2786,12 +2659,12 @@
         isLastMondaiInCurrentGroup() {
             if (!State.examSpec) return false;
             const currentGroupIdx = State.currentGroupIndex;
-            const expected = State.examSpec.groups[currentGroupIdx].mondai.length;
+            const expected = this.getGroupExpectedCount(currentGroupIdx);
             const globalIndex = this.getGlobalMondaiIndex();
 
             let firstMondaiOfGroup = 0;
             for (let i = 0; i < currentGroupIdx; i++) {
-                firstMondaiOfGroup += State.examSpec.groups[i].mondai.length;
+                firstMondaiOfGroup += this.getGroupExpectedCount(i);
             }
 
             const mondaiPosInGroup = globalIndex - firstMondaiOfGroup;
@@ -2804,7 +2677,7 @@
                 return State.test.meta.manifest.groups.reduce((sum, g) => sum + (g.expected_mondai_count || 0), 0);
             }
             // V1 / Fallback
-            return State.test.groups.reduce((sum, g) => sum + g.mondai.length, 0);
+            return State.test.groups.reduce((sum, g) => sum + this.getGroupMondaiCount(g), 0);
         },
 
         renderQuestions(items, language) {
@@ -2907,14 +2780,14 @@
                     const newGroupIndex = State.currentGroupIndex + 1;
                     const currentGrp = State.test.groups[State.currentGroupIndex];
                     const nextGrp = State.test.groups[newGroupIndex];
-                    const expected = State.examSpec.groups[newGroupIndex].mondai.length;
-                    const loaded = nextGrp ? (nextGrp.order ? Object.keys(nextGrp._mondaiById).length : nextGrp.mondai.length) : 0;
+                    const expected = this.getGroupExpectedCount(newGroupIndex);
+                    const loaded = nextGrp ? this.getLoadedMondaiCount(nextGrp) : 0;
 
                     console.log(`[Nav] Auto-transition group: ${currentGrp ? currentGrp.group_id : State.currentGroupIndex} -> ${nextGrp ? nextGrp.group_id : newGroupIndex} | Index: ${newGroupIndex} | Progress: ${loaded}/${expected}`);
 
                     let newGroupFirstIndex = 0;
                     for (let i = 0; i < newGroupIndex; i++) {
-                        newGroupFirstIndex += State.examSpec.groups[i].mondai.length;
+                        newGroupFirstIndex += this.getGroupExpectedCount(i);
                     }
 
                     TTSManager.stopRuntimeOnly();
@@ -2980,10 +2853,11 @@
             let idx = 0;
             for (let gi = 0; gi < State.test.groups.length; gi++) {
                 const group = State.test.groups[gi];
-                if (mondaiIndex < idx + group.mondai.length) {
+                const count = this.getGroupMondaiCount(group);
+                if (mondaiIndex < idx + count) {
                     return gi;
                 }
-                idx += group.mondai.length;
+                idx += count;
             }
             return 0;
         },
@@ -2991,7 +2865,7 @@
         getFirstMondaiIndexOfGroup(groupIndex) {
             let idx = 0;
             for (let gi = 0; gi < groupIndex; gi++) {
-                idx += State.test.groups[gi].mondai.length;
+                idx += this.getGroupMondaiCount(State.test.groups[gi]);
             }
             return idx;
         },
@@ -3004,15 +2878,15 @@
                 // Count in current group only
                 const currentGroup = State.test.groups[State.currentGroupIndex];
                 if (currentGroup) {
-                    currentGroup.mondai.forEach(m => {
+                    this.getOrderedMondaiList(currentGroup).forEach(m => {
                         if (m.items) items.push(...m.items);
                     });
                 }
             } else {
                 // Count all loaded items
                 State.test.groups.forEach(g => {
-                    if (g && g.mondai) {
-                        g.mondai.forEach(m => {
+                    if (g) {
+                        this.getOrderedMondaiList(g).forEach(m => {
                             if (m.items) items.push(...m.items);
                         });
                     }
@@ -3083,7 +2957,7 @@
                 // Find first mondai of next group
                 let mondaiIdx = 0;
                 for (let i = 0; i < nextGroupIdx; i++) {
-                    mondaiIdx += State.test.groups[i].mondai.length;
+                    mondaiIdx += this.getGroupMondaiCount(State.test.groups[i]);
                 }
                 State.currentMondaiIndex = mondaiIdx;
 
@@ -3182,7 +3056,7 @@
                     // And merge with local content (which has prompts/choices but maybe not answers)
                     const questionsWithAnswers = [];
                     State.test.groups.forEach(group => {
-                        group.mondai.forEach(mondai => {
+                        TestUI.getOrderedMondaiList(group).forEach(mondai => {
                             mondai.items.forEach(item => {
                                 const result = feedback.by_question[item.id];
                                 if (result) {
@@ -3223,7 +3097,8 @@
             const scoreByGroup = {};
 
             // Determine if we can grade (check for answer_index)
-            const canGrade = State.test.groups[0].mondai[0]?.items[0]?.answer_index !== undefined;
+            const firstMondai = TestUI.getOrderedMondaiList(State.test.groups[0])[0];
+            const canGrade = firstMondai?.items?.[0]?.answer_index !== undefined;
             if (!canGrade) {
                 showToast('Không thể chấm bài (thiếu đáp án). Vui lòng thử lại.', 'error');
                 return;
@@ -3231,7 +3106,7 @@
 
             State.test.groups.forEach(group => {
                 let groupCorrect = 0;
-                const mondaiList = group.order ? group.order.map(id => group._mondaiById[id]).filter(Boolean) : (group.mondai || []);
+                const mondaiList = this.getOrderedMondaiList(group);
                 mondaiList.forEach(mondai => {
                     mondai.items.forEach(item => {
                         totalCount++;
@@ -3402,7 +3277,7 @@
                 let parentMondai = null;
 
                 for (const group of State.test.groups) {
-                    for (const mondai of group.mondai) {
+                    for (const mondai of TestUI.getOrderedMondaiList(group)) {
                         const found = mondai.items.find(q => q.id === item.id);
                         if (found) {
                             questionData = found;
@@ -3641,7 +3516,7 @@
                 // Find question data
                 let questionData = null;
                 for (const group of test.groups) {
-                    const mondaiList = group.order ? group.order.map(id => group._mondaiById[id]).filter(Boolean) : (group.mondai || []);
+                    const mondaiList = TestUI.getOrderedMondaiList(group);
                     for (const mondai of mondaiList) {
                         const items = mondai.items || [];
                         const found = items.find(q => q.id === item.id);
@@ -3780,7 +3655,7 @@
             // Find question data by searching through test groups
             let question = null;
             for (const group of State.test.groups) {
-                for (const mondai of group.mondai) {
+                for (const mondai of TestUI.getOrderedMondaiList(group)) {
                     const found = mondai.items.find(q => q.id === questionId);
                     if (found) {
                         question = found;
@@ -3817,7 +3692,7 @@
         getTotalQuestions() {
             let count = 0;
             for (const group of State.test.groups) {
-                for (const mondai of group.mondai) {
+                for (const mondai of TestUI.getOrderedMondaiList(group)) {
                     count += mondai.items.length;
                 }
             }
@@ -4095,6 +3970,149 @@
         }
     };
 
+    const AdminUI = {
+        storageKey: 'admin_warmup_secret',
+        config: null,
+
+        init() {
+            const secretInput = $('#admin-secret');
+            if (!secretInput) return;
+
+            const savedSecret = sessionStorage.getItem(this.storageKey) || '';
+            secretInput.value = savedSecret;
+
+            secretInput.addEventListener('input', (event) => {
+                sessionStorage.setItem(this.storageKey, event.target.value.trim());
+            });
+
+            $('#btn-admin-load')?.addEventListener('click', () => this.loadConfig());
+            $('#btn-admin-healthcheck')?.addEventListener('click', () => this.runHealthcheck());
+        },
+
+        getSecret() {
+            return ($('#admin-secret')?.value || '').trim();
+        },
+
+        setBadge(tone, text) {
+            const badge = $('#admin-health-badge');
+            if (!badge) return;
+            badge.className = `status-badge ${tone}`;
+            badge.textContent = text;
+        },
+
+        setSummary(lines) {
+            const summary = $('#admin-config-summary');
+            if (!summary) return;
+            summary.innerHTML = lines.map((line) => `<p>${line}</p>`).join('');
+        },
+
+        renderEnvBlock(config) {
+            const output = $('#admin-env-output');
+            if (!output) return;
+
+            const env = config?.env || {};
+            output.textContent = [
+                `OPENROUTER_MODEL_GENERATE_PRIMARY=${env.OPENROUTER_MODEL_GENERATE_PRIMARY || ''}`,
+                `OPENROUTER_MODEL_GENERATE_SECONDARY=${env.OPENROUTER_MODEL_GENERATE_SECONDARY || ''}`,
+                `OPENROUTER_MODEL_REPAIR_PRIMARY=${env.OPENROUTER_MODEL_REPAIR_PRIMARY || ''}`,
+                `OPENROUTER_MODEL_REPAIR_SECONDARY=${env.OPENROUTER_MODEL_REPAIR_SECONDARY || ''}`,
+                `OPENROUTER_MODEL_EXPLAIN_PRIMARY=${env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || ''}`,
+                `OPENROUTER_MODEL_EXPLAIN_SECONDARY=${env.OPENROUTER_MODEL_EXPLAIN_SECONDARY || ''}`,
+                `OPENROUTER_RPM=${env.OPENROUTER_RPM || ''}`,
+                `BLUEPRINT_GENERATION_CONCURRENCY=${env.BLUEPRINT_GENERATION_CONCURRENCY || ''}`,
+                `BLUEPRINT_GENERATION_CONCURRENCY_EFFECTIVE=${env.BLUEPRINT_GENERATION_CONCURRENCY_EFFECTIVE || ''}`,
+                `GEMINI_MODEL_FALLBACK=${env.GEMINI_MODEL_FALLBACK || ''}`,
+                `GEMINI_MODEL_FALLBACK_COMPAT=${env.GEMINI_MODEL_FALLBACK_COMPAT || ''}`,
+                `GEMINI_EMBEDDING_MODEL_PRIMARY=${env.GEMINI_EMBEDDING_MODEL_PRIMARY || ''}`,
+                `GEMINI_EMBEDDING_MODEL_SECONDARY=${env.GEMINI_EMBEDDING_MODEL_SECONDARY || ''}`,
+                `EMBEDDING_BACKFILL_BATCH_SIZE=${env.EMBEDDING_BACKFILL_BATCH_SIZE || ''}`,
+                `EMBEDDING_BATCH_MAX_ITEMS=${env.EMBEDDING_BATCH_MAX_ITEMS || ''}`,
+                `EMBEDDING_BATCH_MAX_CHARS=${env.EMBEDDING_BATCH_MAX_CHARS || ''}`
+            ].join('\n');
+        },
+
+        renderHealthResults(results = []) {
+            const container = $('#admin-health-results');
+            if (!container) return;
+
+            if (!results.length) {
+                container.innerHTML = '';
+                return;
+            }
+
+            container.innerHTML = results.map((item) => `
+                <article class="admin-health-item">
+                    <header>
+                        <strong>${item.task} · ${item.provider}</strong>
+                        <span class="status-badge ${item.ok ? 'success' : 'error'}">${item.ok ? 'Pass' : 'Fail'}</span>
+                    </header>
+                    <p class="admin-health-meta">${item.name} · ${item.model}</p>
+                    <p class="admin-health-meta">Latency: ${item.latencyMs}ms${item.status ? ` · HTTP ${item.status}` : ''}${item.retryable ? ' · retryable' : ''}</p>
+                    ${item.error ? `<p class="admin-health-error">${item.error}</p>` : ''}
+                </article>
+            `).join('');
+        },
+
+        async loadConfig() {
+            const secret = this.getSecret();
+            if (!secret) {
+                showToast('Nhập WARMUP_SECRET để tải cấu hình admin.', 'warning');
+                return;
+            }
+
+            this.setBadge('neutral', 'Đang tải');
+
+            try {
+                const response = await Api.getAdminLlmConfig(secret);
+                this.config = response.config;
+                const config = response.config;
+                const taskSummary = Object.entries(config.tasks || {})
+                    .map(([task, stages]) => `${task}: ${Array.isArray(stages) ? stages.length : 0} stage`)
+                    .join(' · ');
+
+                this.setSummary([
+                    `OpenRouter: ${config.openrouterConfigured ? 'configured' : 'missing'} · Gemini: ${config.geminiConfigured ? 'configured' : 'missing'} · Embeddings: ${config.embeddingConfigured ? 'configured' : 'missing'}`,
+                    `Router stages: ${taskSummary}`,
+                    'Muốn đổi model cho toàn project: sửa env trên local hoặc Vercel rồi redeploy.'
+                ]);
+                this.renderEnvBlock(config);
+                this.setBadge('success', 'Đã tải');
+                showToast('Đã tải cấu hình AI hiện tại.', 'success');
+            } catch (error) {
+                this.setBadge('error', 'Lỗi auth');
+                this.setSummary([
+                    'Không tải được cấu hình admin.',
+                    error.message
+                ]);
+                showToast(`Lỗi admin: ${error.message}`, 'error');
+            }
+        },
+
+        async runHealthcheck() {
+            const secret = this.getSecret();
+            if (!secret) {
+                showToast('Nhập WARMUP_SECRET để probe models.', 'warning');
+                return;
+            }
+
+            this.setBadge('neutral', 'Đang probe');
+            this.renderHealthResults([]);
+
+            try {
+                const response = await Api.runAdminLlmHealthcheck(secret);
+                const summary = response.summary || {};
+                this.renderHealthResults(response.results || []);
+
+                const tone = summary.failed > 0 ? (summary.passed > 0 ? 'warning' : 'error') : 'success';
+                this.setBadge(tone, `${summary.passed || 0}/${summary.total || 0} pass`);
+                showToast(`Probe xong: ${summary.passed || 0} pass / ${summary.failed || 0} fail`, summary.failed > 0 ? 'warning' : 'success');
+            } catch (error) {
+                this.setBadge('error', 'Probe lỗi');
+                showToast(`Không probe được models: ${error.message}`, 'error');
+            }
+        }
+    };
+
     // ============================================
     // Event Handlers
     // ============================================
@@ -4267,6 +4285,7 @@
         console.log('Language Exam Practice App initializing...');
 
         Theme.init();
+        AdminUI.init();
         initEventHandlers();
         await Auth.init();
 
