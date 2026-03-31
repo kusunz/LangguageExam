@@ -1978,6 +1978,18 @@
             return null;
         },
 
+        getCanonicalMondaiId(mondai) {
+            if (!mondai) return null;
+            if (mondai.meta?.expected_mondai_id) return mondai.meta.expected_mondai_id;
+            if (mondai.mondai_id) return mondai.mondai_id;
+
+            const slotId = this.getMondaiKey(mondai);
+            if (!slotId || typeof slotId !== 'string') return null;
+
+            const parts = slotId.split(':');
+            return parts.length >= 2 ? parts[1] : null;
+        },
+
         markGroupCompleteIfSatisfied(groupOrId) {
             const group = typeof groupOrId === 'string'
                 ? State.test?.groups?.find(g => g.group_id === groupOrId)
@@ -2009,7 +2021,7 @@
         },
 
         buildCanonicalMondaiDisplayTitle(mondai, fallbackIsListening = false) {
-            const rawId = mondai?.mondai_id || '';
+            const rawId = this.getCanonicalMondaiId(mondai) || '';
             const officialNum = this.extractOfficialMondaiNumber(rawId) || String(State.currentMondaiIndex + 1);
             const specMondai = this.findMondaiDefinition(rawId);
             const isListening = rawId.startsWith('L') || fallbackIsListening;
@@ -2471,7 +2483,7 @@
             if (!currentGroup) return;
 
             // Total uses EXAM SPEC for the full intended count
-            this.updateProgressUI();
+            this.updateProgressUI({ group, mondai });
 
             // Update navigation buttons (prev/next state based on loaded mondai)
             this.updateNavigationButtons();
@@ -2480,7 +2492,7 @@
             const isListening = mondai.mondai_id?.startsWith('L') || mondai.items?.some(item =>
                 item.type?.includes('listen') || item.type?.includes('dialogue') || item.type?.includes('mono')
             ) || !!mondai.media?.script_text;
-            const specMondai = this.findMondaiDefinition(mondai.mondai_id);
+            const specMondai = this.findMondaiDefinition(this.getCanonicalMondaiId(mondai));
             const displayTitle = this.buildCanonicalMondaiDisplayTitle(mondai, isListening);
 
             $('#mondai-title').textContent = displayTitle;
@@ -2818,9 +2830,13 @@
             return State.currentMondaiIndex;
         },
 
-        updateProgressUI() {
+        updateProgressUI(currentMondaiData = null) {
             if (!State.test || !State.examSpec) return;
-            const currentGroupIdx = State.currentGroupIndex;
+            const resolvedMondaiData = currentMondaiData || this.getCurrentMondaiData();
+            const resolvedGroup = resolvedMondaiData?.group || State.test.groups[State.currentGroupIndex];
+            const currentGroupIdx = resolvedGroup
+                ? State.test.groups.findIndex(group => group?.group_id === resolvedGroup.group_id)
+                : State.currentGroupIndex;
             const expected = this.getGroupExpectedCount(currentGroupIdx);
 
             let groupStartIndex = 0;
@@ -2828,9 +2844,17 @@
                 groupStartIndex += this.getGroupExpectedCount(i);
             }
 
-            const currentPosition = expected > 0
+            let currentPosition = expected > 0
                 ? Math.min(expected, Math.max(1, State.currentMondaiIndex - groupStartIndex + 1))
                 : 0;
+
+            if (resolvedGroup && resolvedMondaiData?.mondai && Array.isArray(resolvedGroup.order) && resolvedGroup.order.length > 0) {
+                const displayedKey = this.getMondaiKey(resolvedMondaiData.mondai);
+                const displayedIndex = resolvedGroup.order.indexOf(displayedKey);
+                if (displayedIndex >= 0) {
+                    currentPosition = displayedIndex + 1;
+                }
+            }
 
             const progressCurrent = $('#mondai-current');
             const progressTotal = $('#mondai-total');

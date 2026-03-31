@@ -2886,6 +2886,7 @@ app.post('/api/admin/cleanup', async (req, res) => {
 function attachSlotMetaToMondai(content, slot, groupId, slotIndex) {
   const cloned = JSON.parse(JSON.stringify(content || {}));
   const slotId = slot?.slot_id || buildBlueprintSlotId(groupId, cloned?.mondai_id || 'M', slotIndex);
+  const expectedMondaiId = slot?.mondai_id || cloned?.mondai_id || null;
   cloned.slot_id = slotId;
   cloned.slot_index = slotIndex;
   cloned.group_id = groupId;
@@ -2894,8 +2895,14 @@ function attachSlotMetaToMondai(content, slot, groupId, slotIndex) {
     cloned.meta = {};
   }
 
+  if (expectedMondaiId && cloned.mondai_id !== expectedMondaiId) {
+    cloned.meta.generated_mondai_id = cloned.mondai_id || null;
+    cloned.mondai_id = expectedMondaiId;
+  }
+
   cloned.meta.slot_id = slotId;
   cloned.meta.group_id = groupId;
+  cloned.meta.expected_mondai_id = expectedMondaiId;
   cloned.meta.delivery_mode = slot?.delivery_mode || 'flexible';
 
   return cloned;
