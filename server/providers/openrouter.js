@@ -2,7 +2,62 @@ const DEFAULT_OPENROUTER_BASE =
   process.env.OPENROUTER_API_BASE ||
   process.env.OPENROUTER_BASE_URL ||
   'https://openrouter.ai/api/v1';
-const DEFAULT_TIMEOUT_MS = Number.parseInt(process.env.LLM_TIMEOUT_MS || '180000', 10);
+const DEFAULT_OPENROUTER_BASE_URL = DEFAULT_OPENROUTER_BASE.replace(/\/+$/, '');
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const DEFAULT_TIMEOUT_MS = parsePositiveInt(
+  process.env.OPENROUTER_TIMEOUT_MS || process.env.LLM_TIMEOUT_MS,
+  120000
+);
+const DEFAULT_MAX_TOKENS = parsePositiveInt(
+  process.env.OPENROUTER_MAX_TOKENS || process.env.LLM_GENERATE_MAX_TOKENS,
+  16384
+);
+const RETRYABLE_STATUS_CODES = new Set([401, 402, 403, 404, 429]);
+const RETRYABLE_ERROR_PATTERNS = [
+  'temporarily rate-limited upstream',
+  'provider returned error',
+  'no endpoints available matching your guardrail restrictions',
+  'run out of credit',
+  'err_ngrok_4026'
+];
+
+let UndiciAgent;
+try {
+  ({ Agent: UndiciAgent } = require('undici'));
+} catch (_error) {
+  UndiciAgent = null;
+}
+
+let OPENROUTER_DISPATCHER;
+function getOpenRouterDispatcher() {
+  if (OPENROUTER_DISPATCHER !== undefined) {
+    return OPENROUTER_DISPATCHER;
+  }
+
+  OPENROUTER_DISPATCHER = null;
+  if (!UndiciAgent) {
+    return OPENROUTER_DISPATCHER;
+  }
+
+  try {
+    OPENROUTER_DISPATCHER = new UndiciAgent({
+      connectTimeout: parsePositiveInt(process.env.OPENROUTER_CONNECT_TIMEOUT_MS, 15000),
+      keepAliveTimeout: parsePositiveInt(process.env.OPENROUTER_KEEPALIVE_TIMEOUT_MS, 10000),
+      keepAliveMaxTimeout: parsePositiveInt(process.env.OPENROUTER_KEEPALIVE_MAX_TIMEOUT_MS, 30000),
+      connections: parsePositiveInt(process.env.OPENROUTER_POOL_CONNECTIONS, 8),
+      pipelining: 1
+    });
+  } catch (_error) {
+    OPENROUTER_DISPATCHER = null;
+  }
+
+  return OPENROUTER_DISPATCHER;
+}
 
 function createProviderError(message, extra = {}) {
   const error = new Error(message);
@@ -11,28 +66,33 @@ function createProviderError(message, extra = {}) {
 }
 
 function getOpenRouterBaseUrl() {
-  return DEFAULT_OPENROUTER_BASE.replace(/\/+$/, '');
+  return DEFAULT_OPENROUTER_BASE_URL;
 }
 
 function extractMessageText(message) {
   if (!message) return '';
-  if (typeof message.content === 'string') return message.content;
-  if (!Array.isArray(message.content)) return '';
+  const content = message.content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
 
-  return message.content
-    .map((part) => {
-      if (!part) return '';
-      if (typeof part === 'string') return part;
-      if (typeof part.text === 'string') return part.text;
-      return '';
-    })
-    .join('');
+  let text = '';
+  for (const part of content) {
+    if (!part) continue;
+    if (typeof part === 'string') {
+      text += part;
+      continue;
+    }
+    if (typeof part.text === 'string') {
+      text += part.text;
+    }
+  }
+  return text;
 }
 
 function isRetryableOpenRouterFailure(status, errorText) {
   const normalized = String(errorText || '').toLowerCase();
 
-  if (status === 401 || status === 402 || status === 403 || status === 404 || status === 429) {
+  if (RETRYABLE_STATUS_CODES.has(status)) {
     return true;
   }
 
@@ -40,26 +100,22 @@ function isRetryableOpenRouterFailure(status, errorText) {
     return true;
   }
 
-  return [
-    'temporarily rate-limited upstream',
-    'provider returned error',
-    'no endpoints available matching your guardrail restrictions',
-    'run out of credit',
-    'err_ngrok_4026'
-  ].some((pattern) => normalized.includes(pattern));
+  return RETRYABLE_ERROR_PATTERNS.some((pattern) => normalized.includes(pattern));
 }
 
 async function callOpenRouter(options) {
   const {
     prompt,
     model,
-    maxTokens = 16384,
+    maxTokens = DEFAULT_MAX_TOKENS,
     temperature = 0.4,
     reasoning,
     apiKey = process.env.OPENROUTER_API_KEY,
     baseUrl = getOpenRouterBaseUrl(),
     timeoutMs = DEFAULT_TIMEOUT_MS,
-    fetchImpl = fetch
+    fetchImpl = fetch,
+    expectJson = true,
+    includeRaw = true
   } = options || {};
 
   if (!apiKey) {
@@ -71,29 +127,51 @@ async function callOpenRouter(options) {
     });
   }
 
+  const normalizedTimeoutMs = parsePositiveInt(timeoutMs, DEFAULT_TIMEOUT_MS);
+  const normalizedMaxTokens = parsePositiveInt(maxTokens, DEFAULT_MAX_TOKENS);
+  const normalizedBaseUrl = String(baseUrl || getOpenRouterBaseUrl()).replace(/\/+$/, '');
+
+  const requestBody = {
+    model,
+    messages: [{ role: 'user', content: prompt }],
+    temperature,
+    max_tokens: normalizedMaxTokens
+  };
+  if (expectJson) {
+    requestBody.response_format = { type: 'json_object' };
+  }
+  if (reasoning && typeof reasoning === 'object') {
+    requestBody.reasoning = reasoning;
+  }
+
+  const requestInit = {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(requestBody)
+  };
+
+  if (fetchImpl === fetch) {
+    const dispatcher = getOpenRouterDispatcher();
+    if (dispatcher) {
+      requestInit.dispatcher = dispatcher;
+    }
+  }
+
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(), normalizedTimeoutMs);
+  if (typeof timeout.unref === 'function') {
+    timeout.unref();
+  }
+
+  requestInit.signal = controller.signal;
 
   let response;
   try {
-    response = await fetchImpl(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: prompt }],
-        temperature,
-        max_tokens: maxTokens,
-        response_format: { type: 'json_object' },
-        ...(reasoning && typeof reasoning === 'object' ? { reasoning } : {})
-      })
-    });
+    response = await fetchImpl(`${normalizedBaseUrl}/chat/completions`, requestInit);
   } catch (error) {
-    clearTimeout(timeout);
     if (error?.name === 'AbortError') {
       throw createProviderError(`OpenRouter ${model} timed out`, {
         provider: 'openrouter',
@@ -109,9 +187,9 @@ async function callOpenRouter(options) {
       retryable: true,
       code: 'network_error'
     });
+  } finally {
+    clearTimeout(timeout);
   }
-
-  clearTimeout(timeout);
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -126,7 +204,7 @@ async function callOpenRouter(options) {
   let data;
   try {
     data = await response.json();
-  } catch (error) {
+  } catch (_error) {
     throw createProviderError(`OpenRouter ${model} returned invalid JSON envelope`, {
       provider: 'openrouter',
       model,
@@ -145,12 +223,17 @@ async function callOpenRouter(options) {
     });
   }
 
-  return {
+  const result = {
     provider: 'openrouter',
     model,
-    text,
-    raw: data
+    text
   };
+
+  if (includeRaw) {
+    result.raw = data;
+  }
+
+  return result;
 }
 
 module.exports = {

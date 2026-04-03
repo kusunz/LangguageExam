@@ -2449,7 +2449,7 @@
         },
 
         isRetryableChunkError(err) {
-            return err?.status === 503 || err?.status === 429 || err?.retryable === true;
+            return err?.status === 503 || err?.status === 504 || err?.status === 429 || err?.retryable === true;
         },
 
         async fetchExamChunkWithRetry(instanceKey, groupId, options = {}) {

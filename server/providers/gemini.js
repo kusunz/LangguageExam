@@ -89,7 +89,8 @@ async function callGeminiText(options) {
     maxTokens = 16384,
     temperature = 0.4,
     timeoutMs = DEFAULT_TIMEOUT_MS,
-    fetchImpl = fetch
+    fetchImpl = fetch,
+    includeRaw = true
   } = options || {};
 
   if (!apiKey) {
@@ -176,12 +177,17 @@ async function callGeminiText(options) {
     });
   }
 
-  return {
+  const result = {
     provider: 'gemini',
     model,
-    text,
-    raw: data
+    text
   };
+
+  if (includeRaw) {
+    result.raw = data;
+  }
+
+  return result;
 }
 
 async function callGeminiEmbedding(options) {
@@ -420,4 +426,3 @@ module.exports = {
   getGeminiEmbeddingKeyStages,
   getGeminiTextKeyStages
 };
-

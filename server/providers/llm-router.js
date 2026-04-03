@@ -240,7 +240,7 @@ function buildTaskReasoningOptions(task, options = {}) {
 
   if (task !== 'generate') return undefined;
 
-  const budget = Number.parseInt(process.env.OPENROUTER_GENERATE_REASONING_MAX_TOKENS || '1024', 10);
+  const budget = Number.parseInt(process.env.OPENROUTER_GENERATE_REASONING_MAX_TOKENS || '512', 10);
   if (!Number.isFinite(budget) || budget <= 0) return undefined;
 
   return {
@@ -292,7 +292,8 @@ async function invokeStage(stage, prompt, options) {
     temperature: options.temperature,
     timeoutMs: options.timeoutMs,
     reasoning: options.reasoning,
-    fetchImpl: options.fetchImpl
+    fetchImpl: options.fetchImpl,
+    includeRaw: options.includeRaw
   };
 
   if (stage.provider === 'openrouter') {
@@ -327,7 +328,8 @@ async function runJsonTask(options) {
     maxTokens = 16384,
     temperature = 0.4,
     timeoutMs,
-    fetchImpl = fetch
+    fetchImpl = fetch,
+    includeRaw = false
   } = options || {};
 
   const taskReasoning = buildTaskReasoningOptions(task, options);
@@ -355,7 +357,8 @@ async function runJsonTask(options) {
         temperature,
         timeoutMs,
         reasoning: taskReasoning,
-        fetchImpl
+        fetchImpl,
+        includeRaw
       });
     } catch (error) {
       if (isRetryableFailure(error)) {
