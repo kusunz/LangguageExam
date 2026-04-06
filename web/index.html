@@ -3,7 +3,7 @@
 
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="Ứng dụng luyện thi JLPT N2, HSK - Tạo đề thi ngẫu nhiên 100% bằng AI">
   <title>Luyện Thi Ngoại Ngữ | Language Exam Practice</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -52,9 +52,9 @@
         </div>
         <div class="header-right">
           <span id="user-email" class="user-badge"></span>
-          <button id="btn-theme-toggle" class="btn btn-icon-only" title="Đổi giao diện"><i
+          <button id="btn-theme-toggle" class="btn btn-icon-only" title="Đổi giao diện" aria-label="Đổi giao diện"><i
               class="fa-solid fa-moon"></i></button>
-          <button id="btn-logout" class="btn btn-icon-only" title="Đăng xuất"><i
+          <button id="btn-logout" class="btn btn-icon-only" title="Đăng xuất" aria-label="Đăng xuất"><i
               class="fa-solid fa-power-off"></i></button>
         </div>
       </header>
@@ -68,7 +68,8 @@
         <div class="exam-selector card glass">
           <h3>Chọn kỳ thi</h3>
           <div class="exam-tabs">
-            <div class="exam-tab-wrapper active" data-exam="jlpt">
+            <div class="exam-tab-wrapper active" data-exam="jlpt" role="button" tabindex="0" aria-pressed="true"
+              aria-label="Chọn kỳ thi JLPT">
               <div class="exam-tab-header">
                 <span class="exam-flag">🇯🇵</span>
                 <span class="exam-name">JLPT</span>
@@ -81,7 +82,8 @@
                 <option value="N1">N1 (Cao cấp)</option>
               </select>
             </div>
-            <div class="exam-tab-wrapper" data-exam="hsk" aria-disabled="true">
+            <div class="exam-tab-wrapper" data-exam="hsk" aria-disabled="true" role="button" tabindex="-1"
+              aria-pressed="false" aria-label="HSK sắp có, hiện chưa khả dụng">
               <div class="exam-tab-header">
                 <span class="exam-flag">🇨🇳</span>
                 <span class="exam-name">HSK</span>
@@ -220,14 +222,15 @@
 
     <!-- Loading Screen -->
     <section id="loading-screen" class="screen">
-      <div class="loading-container">
+      <div class="loading-container" role="status" aria-live="polite" aria-atomic="true">
         <div class="loader-icon"><i class="fa-solid fa-robot fa-bounce"></i></div>
         <p id="loading-text">Đang tạo đề thi...</p>
         <p class="loading-hint" id="loading-hint">AI đang phân tích và tạo câu hỏi mới...</p>
 
         <div class="progress-container">
-          <div class="progress-bar">
-            <div id="loading-progress" class="progress-fill" style="width: 0%"></div>
+          <div id="loading-progress-bar" class="progress-bar" role="progressbar" aria-labelledby="loading-text"
+            aria-describedby="loading-hint progress-text" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div id="loading-progress" class="progress-fill" style="width: 0%" aria-hidden="true"></div>
           </div>
           <div id="progress-text" class="progress-text">0%</div>
         </div>
@@ -247,7 +250,7 @@
             <span id="group-time" class="timer-value">00:00</span>
           </div>
         </div>
-        <button id="btn-pause-test" class="btn btn-icon-only" title="Tạm dừng"><i
+        <button id="btn-pause-test" class="btn btn-icon-only" title="Tạm dừng" aria-label="Tạm dừng bài thi"><i
             class="fa-solid fa-pause"></i></button>
       </header>
 
@@ -266,7 +269,8 @@
 
         <div id="audio-player" class="audio-player hidden">
           <div class="audio-controls">
-            <button id="btn-replay-audio" class="btn btn-sm btn-secondary btn-icon-only" title="Tua lại 5s">
+            <button id="btn-replay-audio" class="btn btn-sm btn-secondary btn-icon-only" title="Tua lại 5s"
+              aria-label="Tua lại 5 giây">
               <i class="fa-solid fa-rotate-left"></i>
             </button>
             <button id="btn-play-audio" class="btn btn-primary">
@@ -288,9 +292,12 @@
 
         <div id="passage-container" class="passage-container hidden">
           <div class="passage-controls">
-            <button id="btn-zoom-in" class="btn btn-sm"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
-            <button id="btn-zoom-out" class="btn btn-sm"><i class="fa-solid fa-magnifying-glass-minus"></i></button>
-            <button id="btn-focus-mode" class="btn btn-sm"><i class="fa-solid fa-expand"></i></button>
+            <button id="btn-zoom-in" class="btn btn-sm" aria-label="Phóng to đoạn văn"><i
+                class="fa-solid fa-magnifying-glass-plus"></i></button>
+            <button id="btn-zoom-out" class="btn btn-sm" aria-label="Thu nhỏ đoạn văn"><i
+                class="fa-solid fa-magnifying-glass-minus"></i></button>
+            <button id="btn-focus-mode" class="btn btn-sm" aria-label="Bật chế độ tập trung"><i
+                class="fa-solid fa-expand"></i></button>
           </div>
           <div id="passage-text" class="passage-text"></div>
         </div>
@@ -303,7 +310,8 @@
       <!-- Footer with navigation at bottom -->
       <footer class="test-footer glass">
         <div class="mondai-nav">
-          <button id="btn-prev-mondai" class="nav-btn" disabled><i class="fa-solid fa-chevron-left"></i></button>
+          <button id="btn-prev-mondai" class="nav-btn" disabled aria-label="Câu trước"><i
+              class="fa-solid fa-chevron-left"></i></button>
           <div class="mondai-progress">
             <span id="mondai-current">M1</span>
             <span class="mondai-sep">/</span>
@@ -312,16 +320,19 @@
           <span id="nav-loading-indicator" class="nav-loading hidden" aria-hidden="true">
             <i class="fa-solid fa-spinner fa-spin"></i>
           </span>
-          <button id="btn-next-mondai" class="nav-btn"><i class="fa-solid fa-chevron-right"></i></button>
+          <button id="btn-next-mondai" class="nav-btn" aria-label="Câu tiếp theo"><i
+              class="fa-solid fa-chevron-right"></i></button>
         </div>
         <div class="question-dots" id="question-dots"></div>
       </footer>
     </section>
 
     <!-- Focus Mode Overlay -->
-    <div id="focus-overlay" class="focus-overlay hidden">
+    <div id="focus-overlay" class="focus-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="focus-title">
       <div class="focus-content">
-        <button id="btn-close-focus" class="btn-close-focus"><i class="fa-solid fa-xmark"></i></button>
+        <h2 id="focus-title" class="sr-only">Chế độ tập trung</h2>
+        <button id="btn-close-focus" class="btn-close-focus" aria-label="Đóng chế độ tập trung"><i
+            class="fa-solid fa-xmark"></i></button>
         <div id="focus-passage" class="focus-passage"></div>
       </div>
     </div>
@@ -329,7 +340,8 @@
     <!-- Grammar Book Screen -->
     <section id="grammar-screen" class="screen">
       <header class="app-header glass">
-        <button id="btn-back-grammar" class="btn btn-icon-only"><i class="fa-solid fa-arrow-left"></i></button>
+        <button id="btn-back-grammar" class="btn btn-icon-only" aria-label="Quay lại trang chủ"><i
+            class="fa-solid fa-arrow-left"></i></button>
         <h1 class="header-title">Sổ tay ngữ pháp</h1>
         <div></div>
       </header>
@@ -338,7 +350,8 @@
           <!-- Grammar items will be populated here -->
         </div>
         <div id="grammar-detail" class="grammar-detail hidden">
-          <button id="btn-close-grammar-detail" class="btn-close-detail"><i class="fa-solid fa-xmark"></i></button>
+          <button id="btn-close-grammar-detail" class="btn-close-detail" aria-label="Đóng chi tiết ngữ pháp"><i
+              class="fa-solid fa-xmark"></i></button>
           <div class="detail-content">
             <h2 id="grammar-title"></h2>
             <div id="grammar-meaning" class="grammar-section"></div>
@@ -353,7 +366,8 @@
     <!-- Review Screen -->
     <section id="review-screen" class="screen">
       <header class="app-header glass">
-        <button id="btn-back-home" class="btn btn-icon-only"><i class="fa-solid fa-arrow-left"></i></button>
+        <button id="btn-back-home" class="btn btn-icon-only" aria-label="Quay lại trang chủ"><i
+            class="fa-solid fa-arrow-left"></i></button>
         <h1 class="header-title">Kết quả bài thi</h1>
         <div></div>
       </header>
@@ -391,7 +405,8 @@
     <!-- History Screen -->
     <section id="history-screen" class="screen">
       <header class="app-header glass">
-        <button id="btn-history-back" class="btn btn-icon-only"><i class="fa-solid fa-arrow-left"></i></button>
+        <button id="btn-history-back" class="btn btn-icon-only" aria-label="Quay lại trang chủ"><i
+            class="fa-solid fa-arrow-left"></i></button>
         <h1 class="header-title">Lịch sử làm bài</h1>
         <div></div>
       </header>
@@ -406,7 +421,8 @@
     <!-- Mistakes Screen -->
     <section id="mistakes-screen" class="screen">
       <header class="app-header glass">
-        <button id="btn-mistakes-back" class="btn btn-icon-only"><i class="fa-solid fa-arrow-left"></i></button>
+        <button id="btn-mistakes-back" class="btn btn-icon-only" aria-label="Quay lại trang chủ"><i
+            class="fa-solid fa-arrow-left"></i></button>
         <h1 class="header-title">Sổ lỗi sai</h1>
         <div></div>
       </header>
@@ -419,40 +435,44 @@
     </section>
 
     <!-- Email OTP Modal -->
-    <div id="otp-modal" class="modal hidden">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content glass">
-        <h3>Xác thực Email</h3>
+    <div id="otp-modal" class="modal hidden" role="dialog" aria-modal="true" aria-hidden="true"
+      aria-labelledby="otp-modal-title" aria-describedby="otp-email-display">
+      <div class="modal-backdrop" aria-hidden="true"></div>
+      <div class="modal-content glass" tabindex="-1">
+        <h3 id="otp-modal-title">Xác thực Email</h3>
         <p id="otp-email-display">Nhập mã OTP đã gửi đến email của bạn</p>
         <input type="text" id="otp-input" class="otp-input" maxlength="6" placeholder="000000"
-          autocomplete="one-time-code">
+          autocomplete="one-time-code" aria-describedby="otp-email-display otp-error">
         <div class="modal-actions">
           <button id="btn-verify-otp" class="btn btn-primary">Xác nhận</button>
           <button id="btn-cancel-otp" class="btn btn-secondary">Hủy</button>
         </div>
-        <p id="otp-error" class="error-text hidden"></p>
+        <p id="otp-error" class="error-text hidden" role="alert"></p>
       </div>
     </div>
 
     <!-- Email Input Modal -->
-    <div id="email-modal" class="modal hidden">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content glass">
-        <h3>Đăng nhập bằng Email</h3>
-        <p>Nhập email để nhận mã xác thực</p>
-        <input type="email" id="email-input" class="email-input" placeholder="email@example.com">
+    <div id="email-modal" class="modal hidden" role="dialog" aria-modal="true" aria-hidden="true"
+      aria-labelledby="email-modal-title" aria-describedby="email-modal-desc">
+      <div class="modal-backdrop" aria-hidden="true"></div>
+      <div class="modal-content glass" tabindex="-1">
+        <h3 id="email-modal-title">Đăng nhập bằng Email</h3>
+        <p id="email-modal-desc">Nhập email để nhận mã xác thực</p>
+        <input type="email" id="email-input" class="email-input" placeholder="email@example.com"
+          aria-describedby="email-modal-desc email-error">
         <div class="modal-actions">
           <button id="btn-send-otp" class="btn btn-primary">Gửi mã OTP</button>
           <button id="btn-cancel-email" class="btn btn-secondary">Hủy</button>
         </div>
-        <p id="email-error" class="error-text hidden"></p>
+        <p id="email-error" class="error-text hidden" role="alert"></p>
       </div>
     </div>
 
     <!-- Confirm Modal -->
-    <div id="confirm-modal" class="modal hidden">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content glass">
+    <div id="confirm-modal" class="modal hidden" role="dialog" aria-modal="true" aria-hidden="true"
+      aria-labelledby="confirm-title" aria-describedby="confirm-message">
+      <div class="modal-backdrop" aria-hidden="true"></div>
+      <div class="modal-content glass" tabindex="-1">
         <h3 id="confirm-title">Xác nhận</h3>
         <p id="confirm-message">Bạn có chắc chắn muốn tiếp tục?</p>
         <div class="modal-actions">
@@ -463,11 +483,12 @@
     </div>
 
     <!-- Grading Option Modal -->
-    <div id="grading-modal" class="modal hidden">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content glass">
-        <h3>Chọn cách chấm điểm</h3>
-        <p>Bạn muốn chấm điểm bài thi như thế nào?</p>
+    <div id="grading-modal" class="modal hidden" role="dialog" aria-modal="true" aria-hidden="true"
+      aria-labelledby="grading-modal-title" aria-describedby="grading-modal-desc">
+      <div class="modal-backdrop" aria-hidden="true"></div>
+      <div class="modal-content glass" tabindex="-1">
+        <h3 id="grading-modal-title">Chọn cách chấm điểm</h3>
+        <p id="grading-modal-desc">Bạn muốn chấm điểm bài thi như thế nào?</p>
         <div class="grading-options">
           <button id="btn-grade-quick" class="grading-option">
             <div class="option-icon"><i class="fa-solid fa-bolt"></i></div>
@@ -489,12 +510,14 @@
     </div>
 
     <!-- Nickname Modal -->
-    <div id="nickname-modal" class="modal hidden">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content glass">
-        <h3>Chào mừng bạn mới!</h3>
-        <p>Vui lòng chọn biệt danh (Nickname) để hiển thị.</p>
-        <input type="text" id="nickname-input" class="modal-input" placeholder="Nhập biệt danh của bạn" maxlength="20">
+    <div id="nickname-modal" class="modal hidden" role="dialog" aria-modal="true" aria-hidden="true"
+      aria-labelledby="nickname-modal-title" aria-describedby="nickname-modal-desc">
+      <div class="modal-backdrop" aria-hidden="true"></div>
+      <div class="modal-content glass" tabindex="-1">
+        <h3 id="nickname-modal-title">Chào mừng bạn mới!</h3>
+        <p id="nickname-modal-desc">Vui lòng chọn biệt danh (Nickname) để hiển thị.</p>
+        <input type="text" id="nickname-input" class="modal-input" placeholder="Nhập biệt danh của bạn" maxlength="20"
+          aria-describedby="nickname-modal-desc">
         <div class="modal-actions">
           <button id="btn-save-nickname" class="btn btn-primary">Bắt đầu</button>
           <button id="btn-skip-nickname" class="btn btn-secondary">Dùng Email làm tên</button>
@@ -503,7 +526,7 @@
     </div>
 
     <!-- Fullscreen Loading Overlay (blocks all interaction during login/session) -->
-    <div id="fullscreen-loader" class="fullscreen-loader hidden">
+    <div id="fullscreen-loader" class="fullscreen-loader hidden" role="status" aria-live="polite" aria-busy="true">
       <div class="fullscreen-loader-content">
         <div class="loader-spinner"><i class="fa-solid fa-spinner fa-spin fa-3x"></i></div>
         <p id="fullscreen-loader-text">Đang đăng nhập...</p>
@@ -511,7 +534,7 @@
     </div>
 
     <!-- Toast Notifications -->
-    <div id="toast-container" class="toast-container"></div>
+    <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="true"></div>
   </div>
 
   <script type="module" src="./main.js"></script>

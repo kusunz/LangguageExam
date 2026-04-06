@@ -176,6 +176,10 @@ body {
   overflow-x: hidden;
 }
 
+body.modal-open {
+  overflow: hidden;
+}
+
 /* Background Pattern */
 body::before {
   content: '';
@@ -527,6 +531,11 @@ input:focus-visible,
   cursor: pointer;
   transition: all var(--transition-fast);
   position: relative;
+}
+
+.exam-tab-wrapper:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .exam-tab-wrapper.active {
@@ -1369,8 +1378,10 @@ input:focus-visible,
 }
 
 .question-dot {
+  appearance: none;
   width: 14px;
   height: 14px;
+  padding: 0;
   border-radius: var(--radius-full);
   background: var(--bg-tertiary);
   border: 2px solid var(--text-muted);
@@ -1900,6 +1911,7 @@ input:focus-visible,
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
+  width: min(calc(100vw - (var(--space-md) * 2)), 420px);
 }
 
 .toast {
@@ -2026,6 +2038,11 @@ input:focus-visible,
   padding: var(--space-xl);
   border-radius: var(--radius-xl);
   text-align: center;
+}
+
+.modal-content:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .modal-content h3 {
@@ -2279,6 +2296,17 @@ input:focus-visible,
 .fullscreen-loader-content p {
   font-size: var(--text-lg);
   font-weight: 500;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* ============================================

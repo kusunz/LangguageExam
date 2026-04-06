@@ -193,9 +193,98 @@
     // Screen Management
     // ============================================
     function showScreen(screenId) {
-        $$('.screen').forEach(s => s.classList.remove('active'));
-        const screen = $(`#${screenId}`);
-        if (screen) screen.classList.add('active');
+        $$('.screen').forEach((screen) => {
+            const isActive = screen.id === screenId;
+            screen.classList.toggle('active', isActive);
+            screen.setAttribute('aria-hidden', isActive ? 'false' : 'true');
+        });
+        document.body.setAttribute('aria-busy', screenId === 'loading-screen' ? 'true' : 'false');
+    }
+
+    function getFocusableElements(container) {
+        if (!container) return [];
+        return Array.from(container.querySelectorAll(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )).filter((element) => element.getClientRects().length > 0 && element.getAttribute('aria-hidden') !== 'true');
+    }
+
+    function openModal(modal, options = {}) {
+        if (!modal) return () => { };
+
+        const {
+            initialFocus = null,
+            onRequestClose = null,
+            dismissible = true
+        } = options;
+        const content = modal.querySelector('.modal-content') || modal;
+        const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+        const handleKeydown = (event) => {
+            if (event.key === 'Escape' && dismissible) {
+                event.preventDefault();
+                if (typeof onRequestClose === 'function') onRequestClose();
+                return;
+            }
+
+            if (event.key !== 'Tab') return;
+
+            const focusable = getFocusableElements(content);
+            if (focusable.length === 0) {
+                event.preventDefault();
+                content.focus();
+                return;
+            }
+
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+
+            if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+            }
+        };
+
+        const handleBackdropClick = (event) => {
+            if (!dismissible) return;
+            if (event.target === modal || event.target.classList.contains('modal-backdrop')) {
+                event.preventDefault();
+                if (typeof onRequestClose === 'function') onRequestClose();
+            }
+        };
+
+        modal.classList.remove('hidden');
+        modal.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('modal-open');
+        modal.addEventListener('keydown', handleKeydown);
+        modal.addEventListener('click', handleBackdropClick);
+
+        requestAnimationFrame(() => {
+            const fallbackFocus = getFocusableElements(content)[0] || content;
+            (initialFocus || fallbackFocus)?.focus?.();
+        });
+
+        return () => {
+            modal.classList.add('hidden');
+            modal.setAttribute('aria-hidden', 'true');
+            modal.removeEventListener('keydown', handleKeydown);
+            modal.removeEventListener('click', handleBackdropClick);
+            if (!document.querySelector('.modal:not(.hidden)')) {
+                document.body.classList.remove('modal-open');
+            }
+            previousFocus?.focus?.();
+        };
+    }
+
+    function updateLoadingProgressA11y(progress) {
+        const normalized = Math.max(0, Math.min(100, Number(progress) || 0));
+        const progressBar = $('#loading-progress-bar');
+        if (!progressBar) return;
+
+        progressBar.setAttribute('aria-valuenow', String(normalized));
+        progressBar.setAttribute('aria-valuetext', `${normalized}% hoàn thành`);
     }
 
     // ============================================
@@ -205,6 +294,7 @@
         const container = $('#toast-container');
         const toast = document.createElement('div');
         toast.className = `toast ${type}`;
+        toast.setAttribute('role', type === 'error' || type === 'warning' ? 'alert' : 'status');
         toast.textContent = message;
         container.appendChild(toast);
 
@@ -670,11 +760,20 @@
             const modal = $('#email-modal');
             const input = $('#email-input');
             const error = $('#email-error');
+            let cleanupModal = () => { };
+            const closeModal = () => cleanupModal();
 
-            modal.classList.remove('hidden');
+            cleanupModal = openModal(modal, {
+                initialFocus: input,
+                onRequestClose: closeModal
+            });
             input.value = '';
+            input.removeAttribute('aria-invalid');
             error.classList.add('hidden');
-            input.focus();
+            input.oninput = () => {
+                error.classList.add('hidden');
+                input.removeAttribute('aria-invalid');
+            };
 
             // Set up handlers
             $('#btn-send-otp').onclick = async () => {
@@ -682,20 +781,23 @@
                 if (!email || !email.includes('@')) {
                     error.textContent = 'Vui lòng nhập email hợp lệ';
                     error.classList.remove('hidden');
+                    input.setAttribute('aria-invalid', 'true');
                     return;
                 }
 
                 try {
+                    input.removeAttribute('aria-invalid');
                     $('#btn-send-otp').disabled = true;
                     $('#btn-send-otp').textContent = 'Đang gửi...';
 
                     await this.privy.auth.email.sendCode(email);
                     this.pendingEmail = email;
-                    modal.classList.add('hidden');
+                    closeModal();
                     this.showOTPModal(email);
                 } catch (err) {
                     error.textContent = 'Không thể gửi OTP: ' + err.message;
                     error.classList.remove('hidden');
+                    input.setAttribute('aria-invalid', 'true');
                 } finally {
                     $('#btn-send-otp').disabled = false;
                     $('#btn-send-otp').textContent = 'Gửi mã OTP';
@@ -703,7 +805,7 @@
             };
 
             $('#btn-cancel-email').onclick = () => {
-                modal.classList.add('hidden');
+                closeModal();
             };
         },
 
@@ -712,12 +814,24 @@
             const input = $('#otp-input');
             const error = $('#otp-error');
             const display = $('#otp-email-display');
+            let cleanupModal = () => { };
+            const closeModal = () => cleanupModal();
 
-            modal.classList.remove('hidden');
+            cleanupModal = openModal(modal, {
+                initialFocus: input,
+                onRequestClose: () => {
+                    this.pendingEmail = null;
+                    closeModal();
+                }
+            });
             display.textContent = `Nhập mã OTP đã gửi đến ${email}`;
             input.value = '';
+            input.removeAttribute('aria-invalid');
             error.classList.add('hidden');
-            input.focus();
+            input.oninput = () => {
+                error.classList.add('hidden');
+                input.removeAttribute('aria-invalid');
+            };
 
             // Set up handlers
             $('#btn-verify-otp').onclick = async () => {
@@ -725,21 +839,24 @@
                 if (!code || code.length !== 6) {
                     error.textContent = 'Vui lòng nhập mã 6 số';
                     error.classList.remove('hidden');
+                    input.setAttribute('aria-invalid', 'true');
                     return;
                 }
 
                 try {
+                    input.removeAttribute('aria-invalid');
                     $('#btn-verify-otp').disabled = true;
                     $('#btn-verify-otp').textContent = 'Đang xác thực...';
                     this.showAuthLoading('Đang xác thực OTP...');
 
                     const session = await this.privy.auth.email.loginWithCode(this.pendingEmail, code);
-                    modal.classList.add('hidden');
+                    closeModal();
                     await this.handlePrivySession(session);
                 } catch (err) {
                     this.hideAuthLoading();
                     error.textContent = 'Mã OTP không đúng hoặc đã hết hạn';
                     error.classList.remove('hidden');
+                    input.setAttribute('aria-invalid', 'true');
                 } finally {
                     $('#btn-verify-otp').disabled = false;
                     $('#btn-verify-otp').textContent = 'Xác nhận';
@@ -747,8 +864,8 @@
             };
 
             $('#btn-cancel-otp').onclick = () => {
-                modal.classList.add('hidden');
                 this.pendingEmail = null;
+                closeModal();
             };
         },
 
@@ -839,15 +956,25 @@
             const input = $('#nickname-input');
             const btnSave = $('#btn-save-nickname');
             const btnSkip = $('#btn-skip-nickname');
+            let cleanupModal = () => { };
+            const closeModal = () => cleanupModal();
 
-            modal.classList.remove('hidden');
+            cleanupModal = openModal(modal, {
+                initialFocus: input,
+                dismissible: false
+            });
+            input.value = '';
+            input.removeAttribute('aria-invalid');
+            input.oninput = () => {
+                input.removeAttribute('aria-invalid');
+            };
 
             const saveNickname = async (name) => {
                 try {
                     State.userData.nickname = name;
                     await Api.saveUserData({ nickname: name });
                     this.updateUI();
-                    modal.classList.add('hidden');
+                    closeModal();
                 } catch (err) {
                     console.error('Save nickname error:', err);
                     showToast('Lỗi lưu biệt danh', 'error');
@@ -856,7 +983,13 @@
 
             btnSave.onclick = () => {
                 const name = input.value.trim();
-                if (name) saveNickname(name);
+                if (name) {
+                    input.removeAttribute('aria-invalid');
+                    saveNickname(name);
+                    return;
+                }
+                input.setAttribute('aria-invalid', 'true');
+                input.focus();
             };
 
             btnSkip.onclick = () => {
@@ -1993,6 +2126,7 @@
 
                 bar.style.width = `${progress}%`;
                 if (text) text.textContent = `${progress}%`;
+                updateLoadingProgressA11y(progress);
             }, 200);
         },
 
@@ -2002,6 +2136,7 @@
             const text = $('#progress-text');
             if (bar) bar.style.width = '100%';
             if (text) text.textContent = '100%';
+            updateLoadingProgressA11y(100);
         },
 
         getMondaiKey(mondai) {
@@ -2265,6 +2400,7 @@
             const progressText = $('#progress-text');
             if (progressBar) progressBar.style.width = '30%';
             if (progressText) progressText.textContent = '30%';
+            updateLoadingProgressA11y(30);
 
             try {
                 // Call V2 Start Endpoint
@@ -2273,6 +2409,7 @@
 
                 if (progressBar) progressBar.style.width = '70%';
                 if (progressText) progressText.textContent = '70%';
+                updateLoadingProgressA11y(70);
 
                 // Initialize State.test from Manifest
                 State.currentInstanceKey = res.instanceKey;
@@ -3016,9 +3153,12 @@
             const container = $('#question-dots');
 
             container.innerHTML = items.map((item, idx) => `
-        <div class="question-dot ${State.answers[item.id] !== undefined ? 'answered' : ''}"
-             data-question-id="${item.id}"
-             data-index="${idx}"></div>
+        <button type="button"
+                class="question-dot ${State.answers[item.id] !== undefined ? 'answered' : ''}"
+                data-question-id="${item.id}"
+                data-index="${idx}"
+                aria-label="Đi đến câu ${idx + 1}"
+                aria-pressed="${State.answers[item.id] !== undefined ? 'true' : 'false'}"></button>
       `).join('');
 
             container.querySelectorAll('.question-dot').forEach(dot => {
@@ -3045,7 +3185,10 @@
 
             // Update dot
             const dot = $(`.question-dot[data-question-id="${questionId}"]`);
-            if (dot) dot.classList.add('answered');
+            if (dot) {
+                dot.classList.add('answered');
+                dot.setAttribute('aria-pressed', 'true');
+            }
         },
 
         navigateMondai(direction) {
@@ -3278,15 +3421,23 @@
                 const btnQuick = $('#btn-grade-quick');
                 const btnAI = $('#btn-grade-ai');
                 const btnCancel = $('#btn-grade-cancel');
-
-                modal.classList.remove('hidden');
+                let cleanupModal = () => { };
+                const closeModal = () => cleanupModal();
 
                 const cleanup = () => {
-                    modal.classList.add('hidden');
+                    closeModal();
                     btnQuick.onclick = null;
                     btnAI.onclick = null;
                     btnCancel.onclick = null;
                 };
+
+                cleanupModal = openModal(modal, {
+                    initialFocus: btnQuick,
+                    onRequestClose: () => {
+                        cleanup();
+                        resolve(null);
+                    }
+                });
 
                 btnQuick.onclick = () => {
                     cleanup();
@@ -3466,12 +3617,13 @@
             $('#loading-hint').textContent = 'AI đang phân tích và đánh giá câu trả lời của bạn...';
 
             // Get progress bar elements
-            const progressBar = $('#loading-progress-inner');
-            const progressText = $('#loading-progress-text');
+            const progressBar = $('#loading-progress-inner') || $('#loading-progress');
+            const progressText = $('#loading-progress-text') || $('#progress-text');
 
             // Reset progress
             if (progressBar) progressBar.style.width = '0%';
             if (progressText) progressText.textContent = '0%';
+            updateLoadingProgressA11y(0);
 
             // Start simulated progress (same as question generation)
             const progressInterval = this.simulateProgress(progressBar, progressText);
@@ -3492,6 +3644,7 @@
                 clearInterval(progressInterval);
                 if (progressBar) progressBar.style.width = '100%';
                 if (progressText) progressText.textContent = '100%';
+                updateLoadingProgressA11y(100);
                 await new Promise(resolve => setTimeout(resolve, 300));
 
                 // Save to history
@@ -3553,16 +3706,25 @@
                 const messageEl = $('#confirm-message');
                 const btnYes = $('#btn-confirm-yes');
                 const btnNo = $('#btn-confirm-no');
+                let cleanupModal = () => { };
+                const closeModal = () => cleanupModal();
 
                 titleEl.textContent = title;
                 messageEl.textContent = message;
-                modal.classList.remove('hidden');
 
                 const cleanup = () => {
-                    modal.classList.add('hidden');
+                    closeModal();
                     btnYes.onclick = null;
                     btnNo.onclick = null;
                 };
+
+                cleanupModal = openModal(modal, {
+                    initialFocus: btnNo,
+                    onRequestClose: () => {
+                        cleanup();
+                        resolve(false);
+                    }
+                });
 
                 btnYes.onclick = () => {
                     cleanup();
@@ -4487,20 +4649,43 @@
         $('#btn-theme-toggle')?.addEventListener('click', () => Theme.toggle());
 
         // Exam selection (using wrapper classes)
+        const syncExamTabs = () => {
+            $$('.exam-tab-wrapper').forEach((wrapper) => {
+                const isDisabled = wrapper.getAttribute('aria-disabled') === 'true';
+                const isActive = wrapper.classList.contains('active');
+                wrapper.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+                wrapper.setAttribute('tabindex', isDisabled ? '-1' : '0');
+            });
+        };
+
+        const selectExamWrapper = (wrapper) => {
+            if (!wrapper || wrapper.getAttribute('aria-disabled') === 'true') return;
+
+            $$('.exam-tab-wrapper').forEach(w => w.classList.remove('active'));
+            wrapper.classList.add('active');
+            State.currentExam = wrapper.dataset.exam;
+
+            const sectionSelector = $('#exam-section-selector');
+            if (sectionSelector) {
+                sectionSelector.classList.remove('hidden');
+            }
+
+            syncExamTabs();
+        };
+
+        syncExamTabs();
         $$('.exam-tab-wrapper').forEach(wrapper => {
             wrapper.addEventListener('click', (e) => {
                 // Don't select if clicking on the dropdown itself or if disabled
                 if (e.target.tagName === 'SELECT' || wrapper.getAttribute('aria-disabled') === 'true') return;
+                selectExamWrapper(wrapper);
+            });
 
-                $$('.exam-tab-wrapper').forEach(w => w.classList.remove('active'));
-                wrapper.classList.add('active');
-                State.currentExam = wrapper.dataset.exam;
-
-                // Show section selector when exam is selected
-                const sectionSelector = $('#exam-section-selector');
-                if (sectionSelector) {
-                    sectionSelector.classList.remove('hidden');
-                }
+            wrapper.addEventListener('keydown', (e) => {
+                if (wrapper.getAttribute('aria-disabled') === 'true') return;
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault();
+                selectExamWrapper(wrapper);
             });
         });
 
@@ -4593,10 +4778,12 @@
             const passage = $('#passage-text').textContent;
             $('#focus-passage').textContent = passage;
             $('#focus-overlay').classList.remove('hidden');
+            $('#btn-close-focus')?.focus();
         });
 
         $('#btn-close-focus').addEventListener('click', () => {
             $('#focus-overlay').classList.add('hidden');
+            $('#btn-focus-mode')?.focus();
         });
 
         // Audio controls
@@ -4641,6 +4828,12 @@
 
         // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
+            if (!$('#focus-overlay').classList.contains('hidden') && e.key === 'Escape') {
+                $('#focus-overlay').classList.add('hidden');
+                $('#btn-focus-mode')?.focus();
+                return;
+            }
+
             if ($('#test-screen').classList.contains('active')) {
                 if (e.key === 'ArrowLeft') {
                     TestUI.navigateMondai(-1);
