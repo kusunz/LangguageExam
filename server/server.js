@@ -253,6 +253,442 @@ function shortText(obj, len = 200) {
   return txt.length > len ? txt.substring(0, len) + '...' : txt;
 }
 
+function ensureArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function ensureObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function uniqueStrings(values, limit = 10) {
+  const output = [];
+  for (const value of ensureArray(values)) {
+    const text = String(value || '').trim();
+    if (!text || output.includes(text)) continue;
+    output.push(text);
+    if (output.length >= limit) break;
+  }
+  return output;
+}
+
+function getLearningProfileKey(examId, level) {
+  return `${String(examId || 'general').toLowerCase()}::${String(level || 'all').toUpperCase()}`;
+}
+
+function normalizeLearningProfile(profile) {
+  const source = ensureObject(profile);
+  const exams = {};
+
+  Object.entries(ensureObject(source.exams)).forEach(([key, value]) => {
+    const examProfile = ensureObject(value);
+    exams[key] = {
+      exam_id: examProfile.exam_id || null,
+      level: examProfile.level || null,
+      mode: examProfile.mode || null,
+      updated_at: examProfile.updated_at || null,
+      attempts: Number.isFinite(examProfile.attempts) ? examProfile.attempts : 0,
+      last_score: Number.isFinite(examProfile.last_score) ? examProfile.last_score : null,
+      max_score: Number.isFinite(examProfile.max_score) ? examProfile.max_score : null,
+      last_accuracy: Number.isFinite(examProfile.last_accuracy) ? examProfile.last_accuracy : null,
+      average_accuracy: Number.isFinite(examProfile.average_accuracy) ? examProfile.average_accuracy : null,
+      weak_tags: uniqueStrings(examProfile.weak_tags, 12),
+      strength_tags: uniqueStrings(examProfile.strength_tags, 12),
+      focus_tags: uniqueStrings(examProfile.focus_tags, 12),
+      confusion_patterns: uniqueStrings(examProfile.confusion_patterns, 10),
+      personalization_hints: uniqueStrings(examProfile.personalization_hints, 10),
+      study_plan: uniqueStrings(examProfile.study_plan, 8),
+      next_goals: uniqueStrings(examProfile.next_goals, 8),
+      learner_summary: String(examProfile.learner_summary || '').trim(),
+      recommendation: String(examProfile.recommendation || '').trim(),
+      explanation_style: ['step_by_step', 'contrastive', 'example_first'].includes(examProfile.explanation_style)
+        ? examProfile.explanation_style
+        : 'step_by_step'
+    };
+  });
+
+  return {
+    updated_at: source.updated_at || null,
+    explanation_style: ['step_by_step', 'contrastive', 'example_first'].includes(source.explanation_style)
+      ? source.explanation_style
+      : 'step_by_step',
+    weak_tags: uniqueStrings(source.weak_tags, 12),
+    strength_tags: uniqueStrings(source.strength_tags, 12),
+    focus_tags: uniqueStrings(source.focus_tags, 12),
+    confusion_patterns: uniqueStrings(source.confusion_patterns, 10),
+    personalization_hints: uniqueStrings(source.personalization_hints, 10),
+    study_plan: uniqueStrings(source.study_plan, 8),
+    next_goals: uniqueStrings(source.next_goals, 8),
+    learner_summary: String(source.learner_summary || '').trim(),
+    recommendation: String(source.recommendation || '').trim(),
+    exams
+  };
+}
+
+function mergePersistedLearningProfile(currentProfile, incomingProfile) {
+  const current = normalizeLearningProfile(currentProfile);
+  if (!incomingProfile) return current;
+
+  const incoming = normalizeLearningProfile(incomingProfile);
+  const mergedExams = { ...current.exams };
+
+  Object.entries(incoming.exams).forEach(([key, value]) => {
+    const existing = normalizeLearningProfile({ exams: { [key]: mergedExams[key] || {} } }).exams[key] || {};
+    mergedExams[key] = {
+      ...existing,
+      ...value,
+      weak_tags: uniqueStrings([...(existing?.weak_tags || []), ...value.weak_tags], 12),
+      strength_tags: uniqueStrings([...(existing?.strength_tags || []), ...value.strength_tags], 12),
+      focus_tags: uniqueStrings([...(existing?.focus_tags || []), ...value.focus_tags], 12),
+      confusion_patterns: uniqueStrings([...(existing?.confusion_patterns || []), ...value.confusion_patterns], 10),
+      personalization_hints: uniqueStrings([...(existing?.personalization_hints || []), ...value.personalization_hints], 10),
+      study_plan: uniqueStrings([...(existing?.study_plan || []), ...value.study_plan], 8),
+      next_goals: uniqueStrings([...(existing?.next_goals || []), ...value.next_goals], 8),
+      learner_summary: value.learner_summary || existing?.learner_summary || '',
+      recommendation: value.recommendation || existing?.recommendation || '',
+      explanation_style: value.explanation_style || existing?.explanation_style || 'step_by_step',
+      attempts: Math.max(existing?.attempts || 0, value.attempts || 0),
+      last_score: Number.isFinite(value.last_score) ? value.last_score : existing?.last_score ?? null,
+      max_score: Number.isFinite(value.max_score) ? value.max_score : existing?.max_score ?? null,
+      last_accuracy: Number.isFinite(value.last_accuracy) ? value.last_accuracy : existing?.last_accuracy ?? null,
+      average_accuracy: Number.isFinite(value.average_accuracy) ? value.average_accuracy : existing?.average_accuracy ?? null,
+      updated_at: value.updated_at || existing?.updated_at || current.updated_at || null
+    };
+  });
+
+  return {
+    ...current,
+    ...incoming,
+    updated_at: incoming.updated_at || current.updated_at || null,
+    explanation_style: incoming.explanation_style || current.explanation_style || 'step_by_step',
+    weak_tags: uniqueStrings([...current.weak_tags, ...incoming.weak_tags], 12),
+    strength_tags: uniqueStrings([...current.strength_tags, ...incoming.strength_tags], 12),
+    focus_tags: uniqueStrings([...current.focus_tags, ...incoming.focus_tags], 12),
+    confusion_patterns: uniqueStrings([...current.confusion_patterns, ...incoming.confusion_patterns], 10),
+    personalization_hints: uniqueStrings([...current.personalization_hints, ...incoming.personalization_hints], 10),
+    study_plan: uniqueStrings([...current.study_plan, ...incoming.study_plan], 8),
+    next_goals: uniqueStrings([...current.next_goals, ...incoming.next_goals], 8),
+    learner_summary: incoming.learner_summary || current.learner_summary || '',
+    recommendation: incoming.recommendation || current.recommendation || '',
+    exams: mergedExams
+  };
+}
+
+function normalizeUserDataShape(data) {
+  const source = ensureObject(data);
+  return {
+    ...source,
+    history: ensureArray(source.history),
+    mistakeBook: ensureArray(source.mistakeBook),
+    weakTags: uniqueStrings(source.weakTags, 20),
+    settings: ensureObject(source.settings),
+    learningProfile: normalizeLearningProfile(source.learningProfile)
+  };
+}
+
+function countTagsFromItems(items, limit = 8) {
+  const counts = new Map();
+  ensureArray(items).forEach((entry) => {
+    ensureArray(entry).forEach((tag) => {
+      const value = String(tag || '').trim();
+      if (!value) return;
+      counts.set(value, (counts.get(value) || 0) + 1);
+    });
+  });
+
+  return Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([tag]) => tag);
+}
+
+function buildUserLearningSignals(userData, examMeta = {}) {
+  const normalizedUser = normalizeUserDataShape(userData);
+  const examId = examMeta.exam_id || examMeta.examId || 'general';
+  const level = examMeta.level || 'all';
+  const profileKey = getLearningProfileKey(examId, level);
+  const learningProfile = normalizeLearningProfile(normalizedUser.learningProfile);
+  const examProfile = ensureObject(learningProfile.exams[profileKey]);
+  const sameExamHistory = normalizedUser.history.filter((entry) => !examId || !entry?.exam || entry.exam === examId);
+  const recentHistory = sameExamHistory.slice(-5);
+  const recentAccuracies = recentHistory
+    .map((entry) => {
+      const score = Number(entry?.score ?? entry?.summary?.total_score ?? entry?.summary?.score_total);
+      const maxScore = Number(entry?.maxScore ?? entry?.max_score ?? entry?.summary?.max_score ?? entry?.summary?.score_max);
+      if (!Number.isFinite(score) || !Number.isFinite(maxScore) || maxScore <= 0) return null;
+      return Math.round((score / maxScore) * 100);
+    })
+    .filter((value) => Number.isFinite(value));
+
+  const relevantMistakes = normalizedUser.mistakeBook.filter((entry) => !examId || !entry?.exam || entry.exam === examId);
+  const weakTagsFromMistakes = countTagsFromItems(
+    relevantMistakes.map((entry) => entry?.question?.tags || entry?.tags),
+    8
+  );
+
+  return {
+    profileKey,
+    attemptCount: Number.isFinite(examProfile.attempts) ? examProfile.attempts : recentHistory.length,
+    averageAccuracy: Number.isFinite(examProfile.average_accuracy)
+      ? examProfile.average_accuracy
+      : (recentAccuracies.length > 0
+        ? Math.round(recentAccuracies.reduce((sum, value) => sum + value, 0) / recentAccuracies.length)
+        : null),
+    lastAccuracy: Number.isFinite(examProfile.last_accuracy)
+      ? examProfile.last_accuracy
+      : (recentAccuracies.length > 0 ? recentAccuracies[recentAccuracies.length - 1] : null),
+    weakTags: uniqueStrings([
+      ...weakTagsFromMistakes,
+      ...normalizedUser.weakTags,
+      ...ensureArray(examProfile.weak_tags),
+      ...ensureArray(learningProfile.weak_tags)
+    ], 10),
+    strengthTags: uniqueStrings([
+      ...ensureArray(examProfile.strength_tags),
+      ...ensureArray(learningProfile.strength_tags)
+    ], 8),
+    focusTags: uniqueStrings([
+      ...ensureArray(examProfile.focus_tags),
+      ...ensureArray(learningProfile.focus_tags),
+      ...weakTagsFromMistakes
+    ], 8),
+    confusionPatterns: uniqueStrings([
+      ...ensureArray(examProfile.confusion_patterns),
+      ...ensureArray(learningProfile.confusion_patterns)
+    ], 6),
+    personalizationHints: uniqueStrings([
+      ...ensureArray(examProfile.personalization_hints),
+      ...ensureArray(learningProfile.personalization_hints)
+    ], 6),
+    studyPlan: uniqueStrings([
+      ...ensureArray(examProfile.study_plan),
+      ...ensureArray(learningProfile.study_plan)
+    ], 6),
+    nextGoals: uniqueStrings([
+      ...ensureArray(examProfile.next_goals),
+      ...ensureArray(learningProfile.next_goals)
+    ], 6),
+    explanationStyle: examProfile.explanation_style || learningProfile.explanation_style || 'step_by_step',
+    learnerSummary: examProfile.learner_summary || learningProfile.learner_summary || '',
+    recommendation: examProfile.recommendation || learningProfile.recommendation || ''
+  };
+}
+
+function buildUserLearningContext(userData, examMeta = {}, uiLocale = 'vi') {
+  const signals = buildUserLearningSignals(userData, examMeta);
+  const lines = [];
+
+  if (Number.isFinite(signals.averageAccuracy)) {
+    lines.push(`- Historical average accuracy: ${signals.averageAccuracy}% across ${signals.attemptCount || 0} saved attempts.`);
+  }
+  if (Number.isFinite(signals.lastAccuracy)) {
+    lines.push(`- Most recent saved accuracy: ${signals.lastAccuracy}%.`);
+  }
+  if (signals.weakTags.length > 0) {
+    lines.push(`- Frequent weak tags: ${signals.weakTags.join(', ')}.`);
+  }
+  if (signals.focusTags.length > 0) {
+    lines.push(`- Current focus tags: ${signals.focusTags.join(', ')}.`);
+  }
+  if (signals.confusionPatterns.length > 0) {
+    lines.push(`- Observed confusion patterns: ${signals.confusionPatterns.join(', ')}.`);
+  }
+  if (signals.personalizationHints.length > 0) {
+    lines.push(`- Helpful coaching style hints: ${signals.personalizationHints.join(', ')}.`);
+  }
+  if (signals.learnerSummary) {
+    lines.push(`- Existing learner summary: ${signals.learnerSummary}`);
+  }
+  if (signals.recommendation) {
+    lines.push(`- Existing recommendation: ${signals.recommendation}`);
+  }
+
+  if (lines.length === 0) {
+    return uiLocale === 'en'
+      ? 'No prior learner profile is available yet. Treat this as an early diagnostic attempt.'
+      : 'Chưa có hồ sơ học tập trước đó. Hãy xem đây là một lần chẩn đoán ban đầu.';
+  }
+
+  return lines.join('\n');
+}
+
+function buildUserExamGenerationHints(userData, examMeta = {}) {
+  const signals = buildUserLearningSignals(userData, examMeta);
+  const hints = {
+    weak_tags: uniqueStrings([...signals.focusTags, ...signals.weakTags], 5),
+    strong_tags: uniqueStrings(signals.strengthTags, 4),
+    confusion_patterns: uniqueStrings(signals.confusionPatterns, 4),
+    personalization_hints: uniqueStrings(signals.personalizationHints, 4),
+    explanation_style: signals.explanationStyle || 'step_by_step',
+    learner_summary: signals.learnerSummary || ''
+  };
+
+  const hasHints = hints.weak_tags.length > 0 ||
+    hints.strong_tags.length > 0 ||
+    hints.confusion_patterns.length > 0 ||
+    hints.personalization_hints.length > 0 ||
+    !!hints.learner_summary;
+
+  return hasHints ? hints : null;
+}
+
+function buildFallbackGradeAnalysis({
+  uiLocale,
+  correctCount,
+  totalCount,
+  weakTags = [],
+  strongTags = [],
+  previousSignals = null
+}) {
+  const percent = totalCount > 0 ? Math.round((correctCount / totalCount) * 100) : 0;
+  const focusTags = uniqueStrings(weakTags, 4);
+  const explanationStyle = previousSignals?.explanationStyle || 'step_by_step';
+
+  if (uiLocale === 'en') {
+    return {
+      recommendation: percent >= 70
+        ? 'You are on the right track. Keep your pace, then spend a few focused minutes reviewing the weak spots from this test.'
+        : 'This result is still very fixable. Review the weak spots from this test first, then retry similar items with short focused drills.',
+      learner_summary: focusTags.length > 0
+        ? `Your base is better on familiar patterns, but you still get pulled off track by ${focusTags.join(', ')}.`
+        : 'Your foundation is forming, and the next step is to make your answer-selection process more consistent.',
+      study_plan: focusTags.length > 0
+        ? focusTags.map((tag) => `Review ${tag} with 3-5 short examples and one contrast pair.`)
+        : ['Redo the incorrect questions once more and explain the correct choice aloud.'],
+      strength_tags: uniqueStrings(strongTags, 5),
+      weak_tags: uniqueStrings(weakTags, 8),
+      focus_tags: focusTags,
+      confusion_patterns: previousSignals?.confusionPatterns || [],
+      personalization_hints: uniqueStrings([
+        explanationStyle === 'contrastive'
+          ? 'Validate the learner’s likely intuition first, then contrast the chosen answer against the correct answer.'
+          : explanationStyle === 'example_first'
+            ? 'Lead with one concrete example before giving the rule, then end with what clue to notice next time.'
+            : 'Explain mistakes step by step, keep terminology simple, and end with what clue to notice next time.',
+        'Prefer short coaching notes that feel like one-on-one tutoring, not an answer key.'
+      ], 5),
+      explanation_style: explanationStyle,
+      next_goals: percent >= 70
+        ? ['Maintain score stability on the next attempt.', 'Push one weak tag into your comfort zone.']
+        : ['Recover the main weak tags from this attempt.', 'Aim for a clearer answer-selection process on similar items.']
+    };
+  }
+
+  return {
+    recommendation: percent >= 70
+      ? 'Bạn đang đi đúng hướng. Hãy giữ nhịp học hiện tại, rồi dành vài phút rà lại đúng những chỗ vừa sai trong bài này.'
+      : 'Bài này vẫn gỡ lại được. Bạn nên ôn ngay các điểm yếu vừa lộ ra, rồi làm lại vài câu cùng dạng để khóa cách nhận diện.',
+    learner_summary: focusTags.length > 0
+      ? `Nền tảng của bạn ổn hơn ở các mẫu quen thuộc, nhưng vẫn dễ bị kéo lệch ở ${focusTags.join(', ')}.`
+      : 'Bài làm này cho thấy nền tảng đang hình thành; bước tiếp theo là làm cho quy trình chọn đáp án ổn định hơn.',
+    study_plan: focusTags.length > 0
+      ? focusTags.map((tag) => `Ôn lại ${tag} bằng 3-5 ví dụ ngắn và 1 cặp so sánh đúng/sai.`)
+      : ['Làm lại các câu sai thêm một lần và tự giải thích vì sao đáp án đúng hợp lý hơn.'],
+    strength_tags: uniqueStrings(strongTags, 5),
+    weak_tags: uniqueStrings(weakTags, 8),
+    focus_tags: focusTags,
+    confusion_patterns: previousSignals?.confusionPatterns || [],
+    personalization_hints: uniqueStrings([
+      explanationStyle === 'contrastive'
+        ? 'Ưu tiên xác nhận chỗ dễ nhầm trước, rồi đối chiếu rõ đáp án đã chọn với đáp án đúng.'
+        : explanationStyle === 'example_first'
+          ? 'Ưu tiên đưa ví dụ cụ thể trước rồi mới rút ra quy tắc, và chốt lại bằng dấu hiệu cần nhìn ở lần sau.'
+          : 'Ưu tiên giải thích từng bước, dùng thuật ngữ đơn giản và chốt lại bằng dấu hiệu cần nhìn ở lần sau.',
+      'Giọng giải thích nên giống gia sư kèm riêng, không giống đáp án mẫu.'
+    ], 5),
+    explanation_style: explanationStyle,
+    next_goals: percent >= 70
+      ? ['Giữ vững điểm số ở lần làm tiếp theo.', 'Biến ít nhất 1 nhóm điểm yếu thành vùng an toàn hơn.']
+      : ['Gỡ lại các nhóm lỗi chính trong bài này.', 'Tập quy trình chọn đáp án rõ ràng hơn cho các câu tương tự.']
+  };
+}
+
+function mergeLearningProfile(userData, analysisSummary, examMeta = {}) {
+  const baseData = normalizeUserDataShape(userData);
+  const baseProfile = normalizeLearningProfile(baseData.learningProfile);
+  const examId = examMeta.exam_id || examMeta.examId || 'general';
+  const level = examMeta.level || 'all';
+  const profileKey = getLearningProfileKey(examId, level);
+  const existingExamProfile = ensureObject(baseProfile.exams[profileKey]);
+  const totalScore = Number(examMeta.total_score);
+  const maxScore = Number(examMeta.max_score);
+  const accuracy = Number.isFinite(totalScore) && Number.isFinite(maxScore) && maxScore > 0
+    ? Math.round((totalScore / maxScore) * 100)
+    : null;
+  const nextAttempts = (existingExamProfile.attempts || 0) + 1;
+  const nextAverageAccuracy = accuracy === null
+    ? (Number.isFinite(existingExamProfile.average_accuracy) ? existingExamProfile.average_accuracy : null)
+    : (
+      Number.isFinite(existingExamProfile.average_accuracy) && existingExamProfile.attempts
+        ? Math.round(((existingExamProfile.average_accuracy * existingExamProfile.attempts) + accuracy) / nextAttempts)
+        : accuracy
+    );
+  const nowIso = new Date().toISOString();
+
+  const nextExamProfile = {
+    exam_id: examId,
+    level,
+    mode: examMeta.mode || existingExamProfile.mode || null,
+    updated_at: nowIso,
+    attempts: nextAttempts,
+    last_score: Number.isFinite(totalScore) ? totalScore : existingExamProfile.last_score ?? null,
+    max_score: Number.isFinite(maxScore) ? maxScore : existingExamProfile.max_score ?? null,
+    last_accuracy: accuracy,
+    average_accuracy: nextAverageAccuracy,
+    weak_tags: uniqueStrings([
+      ...ensureArray(analysisSummary?.weak_tags),
+      ...ensureArray(existingExamProfile.weak_tags)
+    ], 12),
+    strength_tags: uniqueStrings([
+      ...ensureArray(analysisSummary?.strength_tags),
+      ...ensureArray(existingExamProfile.strength_tags)
+    ], 12),
+    focus_tags: uniqueStrings([
+      ...ensureArray(analysisSummary?.focus_tags),
+      ...ensureArray(analysisSummary?.weak_tags),
+      ...ensureArray(existingExamProfile.focus_tags)
+    ], 12),
+    confusion_patterns: uniqueStrings([
+      ...ensureArray(analysisSummary?.confusion_patterns),
+      ...ensureArray(existingExamProfile.confusion_patterns)
+    ], 10),
+    personalization_hints: uniqueStrings([
+      ...ensureArray(analysisSummary?.personalization_hints),
+      ...ensureArray(existingExamProfile.personalization_hints)
+    ], 10),
+    study_plan: uniqueStrings([
+      ...ensureArray(analysisSummary?.study_plan),
+      ...ensureArray(existingExamProfile.study_plan)
+    ], 8),
+    next_goals: uniqueStrings([
+      ...ensureArray(analysisSummary?.next_goals),
+      ...ensureArray(existingExamProfile.next_goals)
+    ], 8),
+    learner_summary: String(analysisSummary?.learner_summary || existingExamProfile.learner_summary || '').trim(),
+    recommendation: String(analysisSummary?.recommendation || existingExamProfile.recommendation || '').trim(),
+    explanation_style: ['step_by_step', 'contrastive', 'example_first'].includes(analysisSummary?.explanation_style)
+      ? analysisSummary.explanation_style
+      : (existingExamProfile.explanation_style || baseProfile.explanation_style || 'step_by_step')
+  };
+
+  return mergePersistedLearningProfile(baseProfile, {
+    updated_at: nowIso,
+    explanation_style: nextExamProfile.explanation_style,
+    weak_tags: nextExamProfile.weak_tags,
+    strength_tags: nextExamProfile.strength_tags,
+    focus_tags: nextExamProfile.focus_tags,
+    confusion_patterns: nextExamProfile.confusion_patterns,
+    personalization_hints: nextExamProfile.personalization_hints,
+    study_plan: nextExamProfile.study_plan,
+    next_goals: nextExamProfile.next_goals,
+    learner_summary: nextExamProfile.learner_summary,
+    recommendation: nextExamProfile.recommendation,
+    exams: {
+      [profileKey]: nextExamProfile
+    }
+  });
+}
+
 async function loadUserData(userId, email) {
   // Check DB availability via init
   const dbOk = await db.initDb();
@@ -269,13 +705,14 @@ async function loadUserData(userId, email) {
 
   // Standard Demo Mode (when DB is available but user is demo)
   if (IS_DEMO_MODE || isDemoUserId(userId)) {
-    return {
+    return normalizeUserDataShape({
       history: [],
       mistakeBook: [],
       weakTags: [],
       nickname: 'Demo User',
-      settings: {}
-    };
+      settings: {},
+      learningProfile: {}
+    });
   }
 
   try {
@@ -283,7 +720,7 @@ async function loadUserData(userId, email) {
 
     if (res.rows.length === 0) {
       // Create new user if not exists
-      const initialData = { history: [], mistakeBook: {}, weakTags: [], settings: {} };
+      const initialData = normalizeUserDataShape({ history: [], mistakeBook: [], weakTags: [], settings: {}, learningProfile: {} });
       await db.query(
         'INSERT INTO users (id, email, data) VALUES ($1, $2, $3)',
         [userId, email || '', JSON.stringify(initialData)]
@@ -293,7 +730,7 @@ async function loadUserData(userId, email) {
 
     const { data, nickname } = res.rows[0];
     const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
-    return { ...parsedData, nickname };
+    return { ...normalizeUserDataShape(parsedData), nickname };
   } catch (err) {
     console.error('DB load error:', err);
     throw err;
@@ -318,7 +755,8 @@ async function saveUserData(userId, data) {
   if (IS_DEMO_MODE || isDemoUserId(userId)) return;
 
   // Filter out heavy objects like ttsCache to prevent DB bloat
-  const { nickname, ttsCache, ...jsonData } = data;
+  const normalizedData = normalizeUserDataShape(data);
+  const { nickname, ttsCache, ...jsonData } = normalizedData;
 
   if (nickname) {
     await db.query(
@@ -517,8 +955,17 @@ app.post('/api/user-data', authMiddleware, async (req, res) => {
 // Save user data
 app.put('/api/user-data', authMiddleware, async (req, res) => {
   try {
-    const currentData = await loadUserData(req.user.userId, req.user.email);
-    const newData = { ...currentData, ...req.body };
+    const currentData = normalizeUserDataShape(await loadUserData(req.user.userId, req.user.email));
+    const incomingData = normalizeUserDataShape(req.body);
+    const newData = {
+      ...currentData,
+      ...incomingData,
+      history: Array.isArray(req.body?.history) ? incomingData.history : currentData.history,
+      mistakeBook: Array.isArray(req.body?.mistakeBook) ? incomingData.mistakeBook : currentData.mistakeBook,
+      weakTags: Array.isArray(req.body?.weakTags) ? incomingData.weakTags : currentData.weakTags,
+      settings: req.body?.settings ? { ...currentData.settings, ...incomingData.settings } : currentData.settings,
+      learningProfile: mergePersistedLearningProfile(currentData.learningProfile, req.body?.learningProfile)
+    };
     await saveUserData(req.user.userId, newData);
     res.json({ success: true });
   } catch (err) {
@@ -880,7 +1327,8 @@ async function generateMondaiForSlotBatch(params) {
     level,
     mode,
     group,
-    batchEntries
+    batchEntries,
+    learnerHints = null
   } = params;
 
   if (!Array.isArray(batchEntries) || batchEntries.length === 0) return [];
@@ -903,7 +1351,8 @@ async function generateMondaiForSlotBatch(params) {
     0,
     mondaiBatch,
     startMondaiIndex,
-    []
+    [],
+    learnerHints
   );
 
   const generation = await runJsonTask({
@@ -1237,7 +1686,8 @@ async function hydratePendingBlueprintSlots(params) {
     rng,
     usedHashes,
     userId,
-    allowRepeat
+    allowRepeat,
+    learnerHints = null
   } = params;
 
   if (!Array.isArray(pendingSlots) || pendingSlots.length === 0) {
@@ -1264,7 +1714,8 @@ async function hydratePendingBlueprintSlots(params) {
             level,
             mode,
             group: batchEntries[0].group,
-            batchEntries
+            batchEntries,
+            learnerHints
           });
           return { ok: true, batchEntries, generatedAssignments };
         } catch (error) {
@@ -1347,7 +1798,7 @@ async function hydratePendingBlueprintSlots(params) {
 async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snapshotId, selectionOptions = {}) {
   if (!snapshotId) throw new Error('Snapshot required');
 
-  const { userId = null, allowRepeat = false } = selectionOptions;
+  const { userId = null, allowRepeat = false, learnerHints = null } = selectionOptions;
 
   // Seedable RNG
   const rngSeed = `${seed}-${setNo}`;
@@ -1373,7 +1824,8 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
       set_no: setNo,
       snapshot_id: snapshotId,
       date_ymd: new Date().toISOString().split('T')[0],
-      generated_at: new Date().toISOString()
+      generated_at: new Date().toISOString(),
+      learner_hints: learnerHints || null
     }
   };
 
@@ -1464,7 +1916,8 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
       rng,
       usedHashes,
       userId,
-      allowRepeat
+      allowRepeat,
+      learnerHints
     }).then(() => {
       prefetchPendingSlots.forEach(({ slot }) => {
         if (!slot?.mondai_hash) slot.status = 'deferred';
@@ -1489,7 +1942,8 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
     rng,
     usedHashes,
     userId,
-    allowRepeat
+    allowRepeat,
+    learnerHints
   });
 
   deferredPendingSlots.forEach(({ slot }) => {
@@ -1757,6 +2211,89 @@ function validateExplanationResult(result) {
   return errors;
 }
 
+function buildDetailedGradeAnalysisValidator(questionIds = []) {
+  return function validateDetailedGradeAnalysis(result) {
+    const errors = [];
+    if (!result || typeof result !== 'object' || Array.isArray(result)) return ['result_not_object'];
+
+    const summary = ensureObject(result.summary);
+    if (!summary || Object.keys(summary).length === 0) {
+      errors.push('missing_summary');
+    } else {
+      if (typeof summary.recommendation !== 'string' || !summary.recommendation.trim()) {
+        errors.push('invalid_summary_recommendation');
+      }
+      if (typeof summary.learner_summary !== 'string' || !summary.learner_summary.trim()) {
+        errors.push('invalid_summary_learner_summary');
+      }
+      ['study_plan', 'strength_tags', 'weak_tags', 'focus_tags', 'confusion_patterns', 'personalization_hints', 'next_goals'].forEach((field) => {
+        if (!Array.isArray(summary[field])) errors.push(`invalid_summary_${field}`);
+      });
+      if (!['step_by_step', 'contrastive', 'example_first'].includes(summary.explanation_style)) {
+        errors.push('invalid_summary_explanation_style');
+      }
+    }
+
+    const questionFeedback = ensureObject(result.question_feedback);
+    if (!questionFeedback || Object.keys(questionFeedback).length === 0) {
+      errors.push('missing_question_feedback');
+    }
+
+    questionIds.forEach((questionId) => {
+      const feedback = ensureObject(questionFeedback[questionId]);
+      if (!feedback || Object.keys(feedback).length === 0) {
+        errors.push(`missing_feedback:${questionId}`);
+        return;
+      }
+      ['why_wrong', 'key_point', 'mini_lesson'].forEach((field) => {
+        if (typeof feedback[field] !== 'string' || !feedback[field].trim()) {
+          errors.push(`invalid_${field}:${questionId}`);
+        }
+      });
+      if (!Array.isArray(feedback.review_tasks) || feedback.review_tasks.length === 0) {
+        errors.push(`invalid_review_tasks:${questionId}`);
+      }
+      if (!Array.isArray(feedback.extra_examples)) {
+        errors.push(`invalid_extra_examples:${questionId}`);
+      }
+    });
+
+    return errors;
+  };
+}
+
+function setLocalizedStringField(target, fieldName, locale, text) {
+  const value = String(text || '').trim();
+  if (!value) return;
+  target[fieldName] = { ...ensureObject(target[fieldName]), [locale]: value };
+  target[`${fieldName}_${locale}`] = value;
+}
+
+function setLocalizedArrayField(target, fieldName, locale, values) {
+  const list = uniqueStrings(values, 8);
+  if (list.length === 0) return;
+  target[fieldName] = { ...ensureObject(target[fieldName]), [locale]: list };
+  target[`${fieldName}_${locale}`] = list;
+}
+
+function normalizeExtraExamples(examples, uiLocale) {
+  return ensureArray(examples)
+    .map((entry) => {
+      if (typeof entry === 'string') {
+        const target = String(entry || '').trim();
+        return target ? { target } : null;
+      }
+
+      const value = ensureObject(entry);
+      const target = String(value.target || value.ja || '').trim();
+      const translation = String(value[uiLocale] || value.vi || value.en || value.translation || '').trim();
+      if (!target) return null;
+      return translation ? { target, [uiLocale]: translation } : { target };
+    })
+    .filter(Boolean)
+    .slice(0, 3);
+}
+
 function formatLlmProviderLabel(meta) {
   if (!meta?.provider) return 'llm-router';
   return meta.model ? `${meta.provider}:${meta.model}` : meta.provider;
@@ -1829,11 +2366,33 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
       if (cachedAttempt.rows.length > 0 && cachedAttempt.rows[0].summary) {
         const cached = parseJsonb(cachedAttempt.rows[0].summary);
         if (cached && cached.by_question) {
+          try {
+            const cachedUserData = await loadUserData(req.user.userId, req.user.email);
+            if (!cached.learning_profile) {
+              cached.learning_profile = normalizeLearningProfile(cachedUserData?.learningProfile);
+            }
+          } catch (profileErr) {
+            console.warn('[Grade V2] Failed to enrich cached learning profile:', profileErr.message);
+          }
           console.log('[Grade V2] Returning cached AI result');
           cached.cached = true;
           return res.json(cached);
         }
       }
+
+      const userData = normalizeUserDataShape(await loadUserData(req.user.userId, req.user.email));
+      const examMeta = {
+        exam_id: blueprint?.meta?.exam_id || null,
+        level: blueprint?.meta?.level || null,
+        mode: blueprint?.meta?.mode || 'official'
+      };
+      const previousSignals = buildUserLearningSignals(userData, examMeta);
+      const hashToGroupId = {};
+      (blueprint.groups || []).forEach((group) => {
+        (group.mondai_slots || []).forEach((slot) => {
+          if (slot?.mondai_hash) hashToGroupId[slot.mondai_hash] = group.group_id;
+        });
+      });
 
       const allHashes = [];
       blueprint.groups.forEach((group) => group.mondai_slots.forEach((slot) => allHashes.push(slot.mondai_hash)));
@@ -1855,7 +2414,8 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
                 choices: item.choices,
                 tags: item.tags || [],
                 explain_brief: item.explain_brief || '',
-                passage: mondai.passage || ''
+                passage: mondai.passage || '',
+                group_id: hashToGroupId[row.hash] || null
               };
             }
           });
@@ -1864,6 +2424,7 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
 
       let correctCount = 0;
       let totalCount = 0;
+      const scoreByGroup = Object.fromEntries((blueprint.groups || []).map((group) => [group.group_id, 0]));
       const byQuestion = [];
       const wrongQuestions = [];
       const submittedIds = Object.keys(answers || {});
@@ -1875,13 +2436,19 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
         });
       }
 
-      for (const [questionId, userAnswer] of Object.entries(answers || {})) {
+      for (const questionId of Object.keys(questionMap)) {
         const question = questionMap[questionId];
         if (!question) continue;
+        const userAnswer = Object.prototype.hasOwnProperty.call(answers || {}, questionId)
+          ? answers[questionId]
+          : null;
 
         totalCount += 1;
         const isCorrect = userAnswer === question.correct_index;
         if (isCorrect) correctCount += 1;
+        if (isCorrect && question.group_id) {
+          scoreByGroup[question.group_id] = (scoreByGroup[question.group_id] || 0) + 1;
+        }
         const explainBrief = String(question.explain_brief || '').trim();
 
         const questionResult = {
@@ -1905,6 +2472,8 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
           wrongQuestions.push({
             id: questionId,
             prompt: question.prompt,
+            tags: question.tags,
+            explain_brief: explainBrief,
             choices: question.choices,
             user_answer: userAnswer !== null && userAnswer !== undefined
               ? question.choices[userAnswer]
@@ -1915,41 +2484,96 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
         }
       }
 
+      const weakTags = countTagsFromItems(
+        byQuestion.filter((question) => !question.is_correct).map((question) => question.tags),
+        10
+      );
+      const strongTags = countTagsFromItems(
+        byQuestion.filter((question) => question.is_correct).map((question) => question.tags),
+        6
+      ).filter((tag) => !weakTags.includes(tag));
+      let analysisSummary = buildFallbackGradeAnalysis({
+        uiLocale,
+        correctCount,
+        totalCount,
+        weakTags,
+        strongTags,
+        previousSignals
+      });
+
       if (wrongQuestions.length > 0) {
-        const wrongPrompt = uiLocale === 'en'
-          ? `You are a JLPT tutor. Write short explanations in ${getFeedbackLanguageName(uiLocale)} for ${wrongQuestions.length} incorrect answers.
-Return JSON only: { "explanations": { "<question_id>": "<1-2 sentence explanation>" } }
-
-${wrongQuestions.map((wq, idx) => `[Question ${idx + 1}] id="${wq.id}"
-Prompt: ${wq.prompt}
-Correct answer: ${wq.correct_answer}
-Student chose: ${wq.user_answer}
-${wq.passage_snippet ? `Context: ${wq.passage_snippet}...` : ''}`).join('\n\n')}`
-          : `Bạn là gia sư JLPT. Giải thích ngắn gọn bằng ${getFeedbackLanguageName(uiLocale)} cho ${wrongQuestions.length} câu sai.
-Trả lời JSON: { "explanations": { "<question_id>": "<giải thích 1-2 câu>" } }
-
-${wrongQuestions.map((wq, idx) => `[Câu ${idx + 1}] id="${wq.id}"
-Đề: ${wq.prompt}
-Đáp án đúng: ${wq.correct_answer}
-Thí sinh chọn: ${wq.user_answer}
-${wq.passage_snippet ? `Ngữ cảnh: ${wq.passage_snippet}...` : ''}`).join('\n\n')}`;
-        const explanationResult = await runJsonTask({
+        const detailedPrompt = buildDetailedGradeAnalysisPrompt({
+          uiLocale,
+          examMeta: {
+            ...examMeta,
+            total_score: correctCount,
+            max_score: totalCount
+          },
+          wrongQuestions,
+          weakTags,
+          strongTags,
+          scoreByGroup,
+          userLearningContext: buildUserLearningContext(userData, examMeta, uiLocale),
+          fallbackSummary: analysisSummary
+        });
+        const analysisResult = await runJsonTask({
           task: 'explain',
-          prompt: wrongPrompt,
-          validateResult: validateExplanationResult,
-          maxTokens: 4096,
+          prompt: detailedPrompt,
+          validateResult: buildDetailedGradeAnalysisValidator(wrongQuestions.map((question) => question.id)),
+          maxTokens: 8192,
           temperature: 0.2
         });
 
-        const explanations = explanationResult?.result?.explanations || {};
+        const analysis = analysisResult?.result || {};
+        analysisSummary = {
+          ...analysisSummary,
+          ...ensureObject(analysis.summary),
+          weak_tags: uniqueStrings([
+            ...weakTags,
+            ...ensureArray(analysis?.summary?.weak_tags)
+          ], 10),
+          strength_tags: uniqueStrings([
+            ...strongTags,
+            ...ensureArray(analysis?.summary?.strength_tags)
+          ], 8),
+          focus_tags: uniqueStrings([
+            ...ensureArray(analysis?.summary?.focus_tags),
+            ...weakTags
+          ], 6)
+        };
+        const questionFeedback = ensureObject(analysis.question_feedback);
         byQuestion.forEach((question) => {
-          const explanationText = String(explanations[question.id] || '').trim();
-          if (explanationText) {
-            question.key_point = { ...(question.key_point || {}), [uiLocale]: explanationText };
-            if (uiLocale === 'en') question.key_point_en = explanationText;
-            else question.key_point_vi = explanationText;
+          const feedback = ensureObject(questionFeedback[question.id]);
+          if (!feedback || Object.keys(feedback).length === 0) return;
+
+          setLocalizedStringField(question, 'why_wrong', uiLocale, feedback.why_wrong);
+          setLocalizedStringField(question, 'key_point', uiLocale, feedback.key_point || question.key_point?.[uiLocale] || question[`key_point_${uiLocale}`]);
+          setLocalizedStringField(question, 'mini_lesson', uiLocale, feedback.mini_lesson);
+          setLocalizedArrayField(question, 'review_tasks', uiLocale, feedback.review_tasks);
+
+          const examples = normalizeExtraExamples(feedback.extra_examples, uiLocale);
+          if (examples.length > 0) {
+            question.extra_examples = examples;
+            question.extra_examples_target = examples
+              .map((example) => example.target)
+              .filter(Boolean);
           }
         });
+      }
+
+      const updatedLearningProfile = mergeLearningProfile(userData, analysisSummary, {
+        ...examMeta,
+        total_score: correctCount,
+        max_score: totalCount
+      });
+
+      try {
+        await saveUserData(req.user.userId, {
+          ...userData,
+          learningProfile: updatedLearningProfile
+        });
+      } catch (profileSaveErr) {
+        console.error('Failed to save learning profile:', profileSaveErr);
       }
 
       const result = {
@@ -1957,24 +2581,24 @@ ${wq.passage_snippet ? `Ngữ cảnh: ${wq.passage_snippet}...` : ''}`).join('\n
           total_score: correctCount,
           max_score: totalCount,
           percentage: totalCount ? Math.round(correctCount / totalCount * 100) : 0,
-          weak_tags: byQuestion
-            .filter((question) => !question.is_correct)
-            .flatMap((question) => question.tags || [])
-            .filter((value, index, array) => array.indexOf(value) === index)
-            .slice(0, 10),
+          score_by_group: scoreByGroup,
+          weak_tags: uniqueStrings([
+            ...weakTags,
+            ...ensureArray(analysisSummary.weak_tags)
+          ], 10),
+          focus_tags: uniqueStrings(analysisSummary.focus_tags, 6),
+          strength_tags: uniqueStrings(analysisSummary.strength_tags, 6),
           ...(uiLocale === 'en'
             ? {
-              recommendation_en: correctCount >= totalCount * 0.7
-                ? 'Good result. Keep practicing to improve further.'
-                : 'You should review the weaker areas and try again.'
+              recommendation_en: analysisSummary.recommendation
             }
             : {
-              recommendation_vi: correctCount >= totalCount * 0.7
-                ? 'Kết quả tốt! Tiếp tục luyện tập để cải thiện.'
-                : 'Cần ôn tập thêm các phần còn yếu.'
+              recommendation_vi: analysisSummary.recommendation
             })
         },
         by_question: byQuestion,
+        learning_profile_summary: analysisSummary,
+        learning_profile: updatedLearningProfile,
         grading_mode: 'ai',
         cached: false
       };
@@ -2470,8 +3094,40 @@ function getExamPromptProfile(examSpec) {
   };
 }
 
+function buildLearnerHintPromptBlock(learnerHints) {
+  if (!learnerHints) return '';
+
+  const lines = [];
+  if (ensureArray(learnerHints.weak_tags).length > 0) {
+    lines.push(`- Gently reinforce these weak areas when natural: ${uniqueStrings(learnerHints.weak_tags, 5).join(', ')}`);
+  }
+  if (ensureArray(learnerHints.strong_tags).length > 0) {
+    lines.push(`- The learner is relatively steadier in: ${uniqueStrings(learnerHints.strong_tags, 4).join(', ')}`);
+  }
+  if (ensureArray(learnerHints.confusion_patterns).length > 0) {
+    lines.push(`- Frequent confusion patterns to address lightly: ${uniqueStrings(learnerHints.confusion_patterns, 4).join(', ')}`);
+  }
+  if (ensureArray(learnerHints.personalization_hints).length > 0) {
+    lines.push(`- Helpful explanation preferences: ${uniqueStrings(learnerHints.personalization_hints, 4).join(', ')}`);
+  }
+  if (learnerHints.learner_summary) {
+    lines.push(`- Learner snapshot: ${learnerHints.learner_summary}`);
+  }
+
+  if (lines.length === 0) return '';
+
+  return `
+-------------------------
+LIGHT PERSONALIZATION HINTS
+-------------------------
+Use these hints as a light bias only. Keep official exam standards, difficulty, structure, and coverage intact.
+Do NOT overfit the whole exam to one learner profile.
+${lines.join('\n')}
+- If you write explain_brief, prefer the declared explanation style: ${learnerHints.explanation_style || 'step_by_step'}.`;
+}
+
 // Build prompt for generating a chunk of mondai (2-3 at a time)
-function buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGenerate, startMondaiIndex, previousMondai = []) {
+function buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGenerate, startMondaiIndex, previousMondai = [], learnerHints = null) {
   const modeConfig = examSpec.modes[mode];
   const questionScale = modeConfig.question_scale;
   const promptProfile = getExamPromptProfile(examSpec);
@@ -2600,6 +3256,7 @@ ${usedVocabulary.length > 0 ? `Sample Vocabulary: ${usedVocabulary.slice(0, 6).j
     }
     return `- ${m.mondai_id}: obey the requested type "${primaryType}" exactly and keep all ${totalQuestions} items aligned with that type.`;
   }).join('\n');
+  const learnerHintBlock = buildLearnerHintPromptBlock(learnerHints);
 
   return `${promptProfile.systemRole}
 All output MUST conform to official standards defined by ${promptProfile.authority}.
@@ -2681,6 +3338,7 @@ TYPE-SPECIFIC INTEGRITY RULES
 ${typeSpecificRules}
 
 If any mondai mixes structures from another type, the output is INVALID and must be rewritten.
+${learnerHintBlock}
 
 -------------------------
 OUTPUT RULE
@@ -2772,7 +3430,7 @@ function buildGradeTestPrompt(test, answers, uiLocale = 'vi') {
     });
   });
 
-  return `You are an expert exam grader. Grade the following test and provide detailed feedback in ${feedbackLanguage}.
+  return `You are an expert exam grader and a supportive private tutor. Grade the following test and provide detailed feedback in ${feedbackLanguage}.
 
 TEST: ${test.meta.exam_id} ${test.meta.level}
 MODE: ${test.meta.mode}
@@ -2786,6 +3444,15 @@ For each incorrect answer, provide:
 3. mini_lesson: A mini lesson to help the user understand ({"${locale}": "<text>"})
 4. extra_examples: 2-3 example sentences in the target language with translation ([{"ja": "<example>", "${locale}": "<translation>"}])
 5. review_tasks: Suggested review tasks ({"${locale}": ["<task1>"]})
+
+Style rules:
+- Write like a warm one-on-one tutor speaking directly to the learner, not like a cold answer key.
+- In "why_wrong", first identify the likely confusion, then contrast the chosen answer with the correct answer.
+- In "mini_lesson", teach the clue to notice next time, not just the definition.
+- Whenever possible, end the explanation with a practical next-time signal such as what word, grammar clue, or passage evidence to look for.
+- "review_tasks" must be short, concrete, and immediately doable.
+- "extra_examples" should reinforce the same target pattern and avoid introducing side variants or exceptions unless absolutely necessary.
+- "${recommendationKey}" should sound encouraging and specific, ideally 2-3 sentences, not generic.
 
 OUTPUT JSON ONLY matching correct schema.
 IMPORTANT:
@@ -2816,6 +3483,104 @@ IMPORTANT:
 }
 
                               GENERATE JSON NOW:`;
+}
+
+function buildDetailedGradeAnalysisPrompt({
+  uiLocale = 'vi',
+  examMeta = {},
+  wrongQuestions = [],
+  weakTags = [],
+  strongTags = [],
+  scoreByGroup = {},
+  userLearningContext = '',
+  fallbackSummary = {}
+}) {
+  const locale = normalizeUiLocale(uiLocale);
+  const feedbackLanguage = getFeedbackLanguageName(locale);
+  const summaryJson = JSON.stringify({
+    weak_tags: uniqueStrings(weakTags, 8),
+    strong_tags: uniqueStrings(strongTags, 6),
+    score_by_group: scoreByGroup,
+    fallback_summary: fallbackSummary
+  }, null, 2);
+
+  return `You are a patient JLPT coach and a supportive private tutor.
+Analyze this learner's incorrect answers and produce highly actionable feedback in ${feedbackLanguage}.
+
+The scoring is already final. Do NOT change correctness, scores, or answer keys.
+Your task is to explain mistakes, suggest how the learner should improve, and update a lightweight learner profile for future personalization.
+Write as if you are speaking directly to one learner after class: warm, clear, practical, and specific.
+Do NOT sound like a dictionary, rubric, or generic answer key.
+
+EXAM META:
+- Exam: ${examMeta.exam_id || 'unknown'}
+- Level: ${examMeta.level || 'unknown'}
+- Mode: ${examMeta.mode || 'official'}
+- Score: ${examMeta.total_score ?? 0}/${examMeta.max_score ?? 0}
+
+PRIOR LEARNER CONTEXT:
+${userLearningContext}
+
+DETERMINISTIC OBSERVATIONS:
+${summaryJson}
+
+INCORRECT QUESTIONS:
+${wrongQuestions.map((question, index) => `[${index + 1}] id="${question.id}"
+Prompt: ${question.prompt}
+Tags: ${ensureArray(question.tags).join(', ') || '(none)'}
+Student chose: ${question.user_answer}
+Correct answer: ${question.correct_answer}
+Brief author hint: ${question.explain_brief || '(none)'}
+${question.passage_snippet ? `Context snippet: ${question.passage_snippet}` : ''}`).join('\n\n')}
+
+Return RAW JSON ONLY with this schema:
+{
+  "summary": {
+    "recommendation": "<personalized study recommendation in ${feedbackLanguage}>",
+    "learner_summary": "<short diagnostic summary in ${feedbackLanguage}>",
+    "study_plan": ["<step 1>", "<step 2>"],
+    "strength_tags": ["<tag>"],
+    "weak_tags": ["<tag>"],
+    "focus_tags": ["<tag>"],
+    "confusion_patterns": ["<pattern>"],
+    "personalization_hints": ["<how to explain for this learner later>"],
+    "explanation_style": "step_by_step",
+    "next_goals": ["<goal>"]
+  },
+  "question_feedback": {
+    "<question_id>": {
+      "why_wrong": "<why the learner got this wrong in ${feedbackLanguage}>",
+      "key_point": "<core grammar/vocab/listening point in ${feedbackLanguage}>",
+      "mini_lesson": "<2-4 short teaching sentences in ${feedbackLanguage}>",
+      "extra_examples": [
+        { "target": "<Japanese example>", "${locale}": "<translation in ${feedbackLanguage}>" }
+      ],
+      "review_tasks": ["<specific review task>", "<specific review task>"]
+    }
+  }
+}
+
+Rules:
+- Be concrete and constructive, not generic.
+- Do not merely restate "fallback_summary"; refine it so it matches the actual mistakes in this attempt.
+- "recommendation" should sound like a tutor talking to the learner: 2-3 sentences, encouraging but specific.
+- "learner_summary" should mention one meaningful weakness and, if possible, one retained strength.
+- "why_wrong" must compare the learner's chosen answer against the correct answer.
+- "why_wrong" should identify the likely confusion first, then point out the exact clue that resolves it.
+- "key_point" should be brief, memorable, and sound like a recall hook.
+- "mini_lesson" should feel like a short coaching note, not a dictionary entry.
+- "mini_lesson" should explicitly tell the learner what clue to notice next time.
+- If the question is reading/listening, mention the exact evidence phrase or keyword from the context when possible.
+- "review_tasks" must be actionable, not abstract.
+- The first review task should be a small action the learner can do in about 2 minutes.
+- The second review task should make the learner produce, compare, or explain something.
+- "extra_examples" should be short, natural, and directly related to the mistake.
+- "extra_examples" should reinforce the same target pattern and avoid introducing adjacent variants or exceptions unless truly necessary.
+- Keep "focus_tags" narrower than "weak_tags".
+- "personalization_hints" should help future explanations fit this learner, for example: validate the likely intuition first, then contrast, then give one next-time clue.
+- "explanation_style" must be one of: step_by_step, contrastive, example_first.
+- Prefer short sentences and direct learner-facing language.
+- Output valid JSON only. No markdown. No commentary outside JSON.`;
 }
 
 function buildTtsTextPrompt(text, language) {
@@ -3482,7 +4247,8 @@ async function hydrateDeferredSlotsForChunk({ blueprint, group, slotsToConsider,
     rng: Math.random,
     usedHashes,
     userId: userId || null,
-    allowRepeat: false
+    allowRepeat: false,
+    learnerHints: blueprint?.meta?.learner_hints || null
   });
 
   if (!blueprint.meta) blueprint.meta = {};
@@ -3825,6 +4591,7 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
     const user = await loadUserData(userId, req.user.email);
     const plan = user.plan || 'free';
     const level = examSpec.level || examSpec.default_level;
+    const learnerHints = buildUserExamGenerationHints(user, { exam_id: examSpec.exam_id, level, mode });
     const repeatAllowed = !!(allow_repeat ?? allowRepeat ?? false);
     const explicitRetake = !!(force_retake ?? forceRetake ?? false);
 
@@ -3893,7 +4660,7 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
           finalSetNo,
           plan,
           snapshotId,
-          { userId, allowRepeat: repeatAllowed || explicitRetake }
+          { userId, allowRepeat: repeatAllowed || explicitRetake, learnerHints }
         );
         const newInstanceKey = crypto.randomUUID();
 
@@ -3956,7 +4723,7 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
           finalSetNo,
           plan,
           snapshotId,
-          { userId, allowRepeat: repeatAllowed || explicitRetake }
+          { userId, allowRepeat: repeatAllowed || explicitRetake, learnerHints }
         );
         const newInstanceKey = crypto.randomUUID();
 
@@ -4175,19 +4942,18 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
 
     const byQuestion = {};
 
-    for (const [qId, userAns] of Object.entries(answers)) {
-      if (answerMap[qId] !== undefined) {
-        const correct = answerMap[qId];
-        const isCorrect = (userAns === correct);
-        if (isCorrect) correctCount++;
-        totalCount++;
-        // Return full info for UI highlighting
-        byQuestion[qId] = {
-          is_correct: isCorrect,
-          user_index: userAns,
-          correct_index: correct
-        };
-      }
+    for (const qId of Object.keys(answerMap)) {
+      const correct = answerMap[qId];
+      const userAns = Object.prototype.hasOwnProperty.call(answers || {}, qId) ? answers[qId] : null;
+      const isCorrect = (userAns === correct);
+      if (isCorrect) correctCount++;
+      totalCount++;
+      // Return full info for UI highlighting
+      byQuestion[qId] = {
+        is_correct: isCorrect,
+        user_index: userAns,
+        correct_index: correct
+      };
     }
 
     // Update attempts (fallback for missing UNIQUE constraint)

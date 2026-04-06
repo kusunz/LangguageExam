@@ -370,6 +370,31 @@
         return text;
     }
 
+    function pickLocalizedArrayField(localizedValue, fallbackValue = [], locale = getCurrentUiLocale()) {
+        if (localizedValue && typeof localizedValue === 'object' && !Array.isArray(localizedValue)) {
+            const candidates = [localizedValue[locale], localizedValue.vi, localizedValue.en];
+            for (const candidate of candidates) {
+                if (Array.isArray(candidate) && candidate.length > 0) {
+                    return candidate.map(item => String(item || '').trim()).filter(Boolean);
+                }
+            }
+        }
+
+        if (!Array.isArray(fallbackValue)) return [];
+        return fallbackValue.map(item => String(item || '').trim()).filter(Boolean);
+    }
+
+    function buildChoiceBadges(idx, userAnswer, correctAnswer) {
+        const badges = [];
+        if (idx === userAnswer) {
+            badges.push('<span class="choice-badge choice-badge-selected">Bạn chọn</span>');
+        }
+        if (idx === correctAnswer) {
+            badges.push('<span class="choice-badge choice-badge-correct">Đáp án đúng</span>');
+        }
+        return badges.join('');
+    }
+
     // ============================================
     // API Client
     // ============================================
@@ -3636,6 +3661,10 @@
                     getCurrentUiLocale()
                 );
                 feedback.grading_mode = 'ai';
+                if (!State.userData) State.userData = { history: [], mistakeBook: [] };
+                if (feedback.learning_profile) {
+                    State.userData.learningProfile = feedback.learning_profile;
+                }
                 State.feedback = feedback;
                 this.resetChunkLoadingState();
                 State.currentInstanceKey = null;
@@ -3742,6 +3771,7 @@
             if (!State.userData) State.userData = { history: [], mistakeBook: [] };
             if (!State.userData.history) State.userData.history = [];
             if (!State.userData.mistakeBook) State.userData.mistakeBook = [];
+            if (feedback.learning_profile) State.userData.learningProfile = feedback.learning_profile;
             const uiLocale = getCurrentUiLocale();
 
             // Add to history
@@ -3809,6 +3839,8 @@
                     const whyWrongText = pickLocalizedExplanationField(item.why_wrong, item.why_wrong_vi || item.why_wrong_en || '', uiLocale);
                     const keyPointText = pickLocalizedExplanationField(item.key_point, item.key_point_vi || item.key_point_en || '', uiLocale);
                     const miniLessonText = pickLocalizedExplanationField(item.mini_lesson, item.mini_lesson_vi || item.mini_lesson_en || '', uiLocale);
+                    const reviewTasks = pickLocalizedArrayField(item.review_tasks, item[`review_tasks_${uiLocale}`] || [], uiLocale);
+                    const extraExamples = Array.isArray(item.extra_examples) ? item.extra_examples : [];
 
                     State.userData.mistakeBook.push({
                         date: new Date().toISOString(),
@@ -3816,12 +3848,22 @@
                         question: optimizedQuestion,
                         feedback: {
                             is_correct: item.is_correct,
+                            why_wrong: item.why_wrong || null,
                             why_wrong_vi: uiLocale === 'vi' ? whyWrongText : '',
                             why_wrong_en: uiLocale === 'en' ? whyWrongText : '',
+                            key_point: item.key_point || null,
                             key_point_vi: uiLocale === 'vi' ? keyPointText : '',
                             key_point_en: uiLocale === 'en' ? keyPointText : '',
+                            mini_lesson: item.mini_lesson || null,
                             mini_lesson_vi: uiLocale === 'vi' ? miniLessonText : '',
-                            mini_lesson_en: uiLocale === 'en' ? miniLessonText : ''
+                            mini_lesson_en: uiLocale === 'en' ? miniLessonText : '',
+                            review_tasks: item.review_tasks || null,
+                            review_tasks_vi: uiLocale === 'vi' ? reviewTasks : [],
+                            review_tasks_en: uiLocale === 'en' ? reviewTasks : [],
+                            extra_examples: extraExamples,
+                            extra_examples_target: extraExamples
+                                .map(ex => typeof ex === 'object' ? (ex.ja || ex.target || '') : ex)
+                                .filter(Boolean)
                         },
                         userAnswer: State.answers[item.id]
                     });
@@ -3933,6 +3975,7 @@
             // Score circle
             // Schema update: summary -> score_summary, score_total -> total_score, score_max -> max_score
             const scoreSummary = feedback.score_summary || feedback.summary || {};
+            const learningSummary = feedback.learning_profile_summary || {};
 
             let scoreValue = scoreSummary.total_score !== undefined ? scoreSummary.total_score : (scoreSummary.score_total !== undefined ? scoreSummary.score_total : null);
             let scoreMax = scoreSummary.max_score !== undefined ? scoreSummary.max_score : (scoreSummary.score_max !== undefined ? scoreSummary.score_max : null);
@@ -3983,16 +4026,24 @@
                 }).join('');
 
             $('#score-by-group').innerHTML = groupsHtml;
-            $('#recommendation').textContent = scoreSummary[`recommendation_${uiLocale}`]
+            const recommendationParts = [
+                scoreSummary[`recommendation_${uiLocale}`]
                 || scoreSummary.recommendation_vi
                 || scoreSummary.recommendation_en
-                || '';
+                || '',
+                learningSummary.learner_summary || ''
+            ].filter(Boolean);
+            $('#recommendation').textContent = recommendationParts.join(' ');
 
             // Weak tags & Improvement card
             const weakAreasCard = document.querySelector('.weak-areas');
-            if (scoreSummary.weak_tags && scoreSummary.weak_tags.length > 0) {
+            const focusTags = Array.from(new Set([
+                ...(Array.isArray(scoreSummary.weak_tags) ? scoreSummary.weak_tags : []),
+                ...(Array.isArray(learningSummary.focus_tags) ? learningSummary.focus_tags : [])
+            ]));
+            if (focusTags && focusTags.length > 0) {
                 if (weakAreasCard) weakAreasCard.classList.remove('hidden');
-                const tagsHtml = scoreSummary.weak_tags.map(tag => `<span class="tag">${tag}</span>`).join('');
+                const tagsHtml = focusTags.map(tag => `<span class="tag">${tag}</span>`).join('');
                 $('#weak-tags').innerHTML = tagsHtml;
             } else {
                 if (weakAreasCard) weakAreasCard.classList.add('hidden');
@@ -4037,7 +4088,8 @@
                 const whyWrongText = pickLocalizedExplanationField(item.why_wrong, item.why_wrong_vi || item.why_wrong_en || '', uiLocale);
                 const keyPointText = pickLocalizedExplanationField(item.key_point, item.key_point_vi || item.key_point_en || '', uiLocale);
                 const miniLessonText = pickLocalizedExplanationField(item.mini_lesson, item.mini_lesson_vi || item.mini_lesson_en || '', uiLocale);
-                const hasExplanations = whyWrongText || keyPointText || miniLessonText || questionData.media?.script_text;
+                const reviewTasks = pickLocalizedArrayField(item.review_tasks, item[`review_tasks_${uiLocale}`] || [], uiLocale);
+                const hasExplanations = whyWrongText || keyPointText || miniLessonText || reviewTasks.length > 0 || questionData.media?.script_text;
 
                 return `
           <div class="review-item ${item.is_correct ? '' : 'incorrect'}">
@@ -4060,10 +4112,14 @@
                     if (idx === userAnswer) classes += ' user-selected';
                     if (idx === correctAnswer) classes += ' correct-answer';
                     if (idx === userAnswer && !item.is_correct) classes += ' wrong-answer';
+                    const choiceBadges = buildChoiceBadges(idx, userAnswer, correctAnswer);
                     return `
                   <div class="${classes}">
                     <span class="choice-letter">${String.fromCharCode(65 + idx)}</span>
-                    <span class="choice-text">${TestUI.escapeHtml(choice)}</span>
+                    <div class="choice-body">
+                      <span class="choice-text">${TestUI.escapeHtml(choice)}</span>
+                      ${choiceBadges ? `<span class="choice-badges">${choiceBadges}</span>` : ''}
+                    </div>
                   </div>
                 `;
                 }).join('')}
@@ -4113,6 +4169,14 @@
                                 }).join('')
                                 : item.extra_examples_target.map(ex => `<li>${TestUI.escapeHtml(ex)}</li>`).join('')
                             }
+                    </ul>
+                  </div>
+                ` : ''}
+                ${reviewTasks.length > 0 ? `
+                  <div class="feedback-section">
+                    <h4>Nên rút kinh nghiệm / ôn lại:</h4>
+                    <ul class="examples-list">
+                      ${reviewTasks.map(task => `<li>${TestUI.escapeHtml(task)}</li>`).join('')}
                     </ul>
                   </div>
                 ` : ''}
@@ -4271,6 +4335,8 @@
                 const whyWrongText = pickLocalizedExplanationField(feedback?.why_wrong, feedback?.why_wrong_vi || feedback?.why_wrong_en || '', getCurrentUiLocale());
                 const keyPointText = pickLocalizedExplanationField(feedback?.key_point, feedback?.key_point_vi || feedback?.key_point_en || '', getCurrentUiLocale());
                 const miniLessonText = pickLocalizedExplanationField(feedback?.mini_lesson, feedback?.mini_lesson_vi || feedback?.mini_lesson_en || '', getCurrentUiLocale());
+                const reviewTasks = pickLocalizedArrayField(feedback?.review_tasks, feedback?.[`review_tasks_${getCurrentUiLocale()}`] || [], getCurrentUiLocale());
+                const extraExamples = Array.isArray(feedback?.extra_examples) ? feedback.extra_examples : [];
                 const userAnswer = item.userAnswer;
                 const correctAnswer = question.answer_index;
 
@@ -4289,10 +4355,14 @@
                     if (cIdx === userAnswer) classes += ' user-selected';
                     if (cIdx === correctAnswer) classes += ' correct-answer';
                     if (cIdx === userAnswer && cIdx !== correctAnswer) classes += ' wrong-answer';
+                    const choiceBadges = buildChoiceBadges(cIdx, userAnswer, correctAnswer);
                     return `
                     <div class="${classes}">
                       <span class="choice-letter">${String.fromCharCode(65 + cIdx)}</span>
-                      <span class="choice-text">${TestUI.escapeHtml(choice)}</span>
+                      <div class="choice-body">
+                        <span class="choice-text">${TestUI.escapeHtml(choice)}</span>
+                        ${choiceBadges ? `<span class="choice-badges">${choiceBadges}</span>` : ''}
+                      </div>
                     </div>
                   `;
                 }).join('')}
@@ -4302,6 +4372,14 @@
                 ${whyWrongText ? `<div class="feedback-section"><h4>Tại sao sai:</h4><p>${TestUI.escapeHtml(whyWrongText).replace(/\n/g, '<br>')}</p></div>` : ''}
                 ${keyPointText ? `<div class="feedback-section"><h4>Điểm ngữ pháp:</h4><p>${TestUI.escapeHtml(keyPointText).replace(/\n/g, '<br>')}</p></div>` : ''}
                 ${miniLessonText ? `<div class="feedback-section"><h4>Bài học nhỏ:</h4><p>${TestUI.escapeHtml(miniLessonText).replace(/\n/g, '<br>')}</p></div>` : ''}
+                ${extraExamples.length > 0 ? `<div class="feedback-section"><h4>Ví dụ thêm:</h4><ul class="examples-list">${extraExamples.map(ex => {
+                    const target = typeof ex === 'object' ? (ex.ja || ex.target || '') : ex;
+                    const meaning = typeof ex === 'object'
+                        ? (ex[getCurrentUiLocale()] || ex.vi || ex.en || '')
+                        : '';
+                    return `<li>${TestUI.escapeHtml(target)}${meaning ? `<div style="font-size: 0.9em; margin-top: 2px; color: var(--text-muted);">${TestUI.escapeHtml(meaning)}</div>` : ''}</li>`;
+                }).join('')}</ul></div>` : ''}
+                ${reviewTasks.length > 0 ? `<div class="feedback-section"><h4>Nên ôn lại:</h4><ul class="examples-list">${reviewTasks.map(task => `<li>${TestUI.escapeHtml(task)}</li>`).join('')}</ul></div>` : ''}
               </div>
             </div>
           </div>
