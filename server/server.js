@@ -1345,10 +1345,19 @@ const SNAPSHOT_RARE_BUCKET_BOOTSTRAP_TARGET = Math.max(
   2,
   Number.parseInt(process.env.SNAPSHOT_RARE_BUCKET_BOOTSTRAP_TARGET || '3', 10)
 );
+const SNAPSHOT_PRIORITY_MAIN_BUCKET_BOOTSTRAP_TARGET = Math.max(
+  2,
+  Number.parseInt(process.env.SNAPSHOT_PRIORITY_MAIN_BUCKET_BOOTSTRAP_TARGET || '3', 10)
+);
 const SNAPSHOT_LISTENING_BUCKET_BOOTSTRAP_TARGET = Math.max(
   SNAPSHOT_RARE_BUCKET_BOOTSTRAP_TARGET,
   Number.parseInt(process.env.SNAPSHOT_LISTENING_BUCKET_BOOTSTRAP_TARGET || '4', 10)
 );
+const BACKGROUND_PREFETCH_FIRST_GROUP_PRIORITY_SLOTS = Math.max(
+  4,
+  Number.parseInt(process.env.BACKGROUND_PREFETCH_FIRST_GROUP_PRIORITY_SLOTS || '8', 10)
+);
+const PRIORITY_MAIN_MONDAI_IDS = new Set(['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8']);
 const snapshotRareBucketBootstrapState = new Map();
 const currentDayRareBucketWarmRuntimeState = {
   entries: new Map(),
@@ -1575,6 +1584,9 @@ function getSnapshotRareBucketBootstrapTarget(group, mondaiDef) {
   const mondaiId = String(mondaiDef?.mondai_id || '').toUpperCase();
   const groupId = String(group?.group_id || '').toLowerCase();
 
+  if (isPriorityMainMondai(group, mondaiDef)) {
+    return SNAPSHOT_PRIORITY_MAIN_BUCKET_BOOTSTRAP_TARGET;
+  }
   if (groupId === 'listening' || mondaiId.startsWith('L')) {
     return SNAPSHOT_LISTENING_BUCKET_BOOTSTRAP_TARGET;
   }
@@ -1673,10 +1685,11 @@ function getBucketWarmPriority(group, mondaiDef) {
   const mondaiId = String(mondaiDef?.mondai_id || '').toUpperCase();
   const groupId = String(group?.group_id || '').toLowerCase();
 
-  if (groupId === 'listening' || mondaiId.startsWith('L')) return 0;
-  if (mondaiId === 'M12') return 1;
-  if (groupId === 'reading') return 2;
-  return 3;
+  if (isPriorityMainMondai(group, mondaiDef)) return 0;
+  if (groupId === 'listening' || mondaiId.startsWith('L')) return 1;
+  if (mondaiId === 'M12') return 2;
+  if (groupId === 'reading') return 3;
+  return 4;
 }
 
 function sortBucketsForWarmup(buckets = []) {
@@ -2690,6 +2703,18 @@ function getInitialReadySlotIds(group) {
   return readyPrefix;
 }
 
+function isPriorityMainMondai(group, mondaiDef) {
+  const groupId = String(group?.group_id || '').toLowerCase();
+  const mondaiId = String(mondaiDef?.mondai_id || '').toUpperCase();
+  return groupId === 'main' && PRIORITY_MAIN_MONDAI_IDS.has(mondaiId);
+}
+
+function getFirstGroupBackgroundPrioritySlotCount(group) {
+  const totalSlots = Array.isArray(group?.mondai_slots) ? group.mondai_slots.length : 0;
+  if (totalSlots <= 0) return getInitialMondaiBufferCount(group);
+  return Math.min(totalSlots, BACKGROUND_PREFETCH_FIRST_GROUP_PRIORITY_SLOTS);
+}
+
 function getCriticalStartPendingSlots(blueprint, pendingSlots) {
   const firstGroup = ensureArray(blueprint?.groups)[0];
   if (!firstGroup) return [];
@@ -2706,7 +2731,8 @@ function sortPendingSlotsForBackgroundPrefetch(blueprint, pendingSlots, excluded
   const groups = ensureArray(blueprint?.groups);
   const groupIndexMap = new Map(groups.map((group, index) => [group?.group_id, index]));
   const excluded = new Set(ensureArray(excludedSlotIds).filter(Boolean));
-  const groupCount = Math.max(groups.length, 1);
+  const firstGroup = groups[0] || null;
+  const firstGroupPriorityLimit = getFirstGroupBackgroundPrioritySlotCount(firstGroup);
 
   return ensureArray(pendingSlots)
     .filter((entry) => !excluded.has(entry?.slot?.slot_id))
@@ -2721,14 +2747,28 @@ function sortPendingSlotsForBackgroundPrefetch(blueprint, pendingSlots, excluded
 
       const leftGroup = groups[leftGroupIndex] || left?.group || null;
       const rightGroup = groups[rightGroupIndex] || right?.group || null;
+      const leftSlotOrdinal = Number(left?.slot?.slot_ordinal || 0);
+      const rightSlotOrdinal = Number(right?.slot?.slot_ordinal || 0);
       const leftInitial = Number(left?.slot?.slot_ordinal || 0) < getInitialMondaiBufferCount(leftGroup);
       const rightInitial = Number(right?.slot?.slot_ordinal || 0) < getInitialMondaiBufferCount(rightGroup);
-      const leftTier = leftInitial ? leftGroupIndex : leftGroupIndex + groupCount;
-      const rightTier = rightInitial ? rightGroupIndex : rightGroupIndex + groupCount;
+      const leftTier = leftGroupIndex === 0 && leftSlotOrdinal < firstGroupPriorityLimit
+        ? 0
+        : leftGroupIndex > 0 && leftInitial
+          ? 1
+          : leftGroupIndex === 0
+            ? 2
+            : 3;
+      const rightTier = rightGroupIndex === 0 && rightSlotOrdinal < firstGroupPriorityLimit
+        ? 0
+        : rightGroupIndex > 0 && rightInitial
+          ? 1
+          : rightGroupIndex === 0
+            ? 2
+            : 3;
 
       if (leftTier !== rightTier) return leftTier - rightTier;
       if (leftGroupIndex !== rightGroupIndex) return leftGroupIndex - rightGroupIndex;
-      return Number(left?.slot?.slot_ordinal || 0) - Number(right?.slot?.slot_ordinal || 0);
+      return leftSlotOrdinal - rightSlotOrdinal;
     });
 }
 
