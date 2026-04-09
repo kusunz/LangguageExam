@@ -1585,6 +1585,10 @@ input:focus-visible,
   border-left-color: var(--error);
 }
 
+.review-item.unanswered {
+  border-left-color: #f59e0b;
+}
+
 .review-item-header {
   display: flex;
   align-items: center;
@@ -1606,6 +1610,10 @@ input:focus-visible,
 
 .review-status.incorrect {
   color: var(--error);
+}
+
+.review-status.unanswered {
+  color: #b45309;
 }
 
 .review-prompt {
@@ -1677,6 +1685,11 @@ input:focus-visible,
   color: #15803d;
 }
 
+.choice-badge-unanswered {
+  background: rgba(245, 158, 11, 0.16);
+  color: #b45309;
+}
+
 .review-choice.user-selected {
   background: rgba(99, 102, 241, 0.15);
 }
@@ -1688,6 +1701,16 @@ input:focus-visible,
 
 .review-choice.correct-answer .choice-letter {
   background: var(--success);
+  color: white;
+}
+
+.review-choice.correct-answer-unanswered {
+  border: 1px solid #f59e0b !important;
+  background-color: rgba(245, 158, 11, 0.10);
+}
+
+.review-choice.correct-answer-unanswered .choice-letter {
+  background: #f59e0b;
   color: white;
 }
 
@@ -2389,7 +2412,11 @@ strong.hl {
   border-left-color: #ef4444;
 }
 
-.review-item:not(.incorrect) {
+.review-item.unanswered {
+  border-left-color: #f59e0b;
+}
+
+.review-item:not(.incorrect):not(.unanswered) {
   border-left-color: #22c55e;
 }
 
@@ -2423,6 +2450,11 @@ strong.hl {
   background: rgba(239, 68, 68, 0.12);
 }
 
+.review-status.unanswered {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.16);
+}
+
 .review-prompt {
   margin-bottom: 10px;
   line-height: 1.6;
@@ -2450,6 +2482,16 @@ strong.hl {
   color: #fff;
 }
 
+.review-choice.correct-answer-unanswered {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: #f59e0b;
+}
+
+.review-choice.correct-answer-unanswered .choice-letter {
+  background: #f59e0b;
+  color: #fff;
+}
+
 .review-choice.wrong-answer {
   background: rgba(239, 68, 68, 0.10);
   border-color: #ef4444;
@@ -2473,6 +2515,11 @@ strong.hl {
   font-size: 0.9rem;
   color: #22c55e;
   font-weight: 500;
+}
+
+.correct-answer-label.unanswered {
+  background: rgba(245, 158, 11, 0.12);
+  color: #b45309;
 }
 
 /* Explanation toggle */

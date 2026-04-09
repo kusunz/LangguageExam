@@ -25,6 +25,7 @@ const {
   runEmbeddingBackfill
 } = require('./providers/embeddings');
 const {
+  extractUniqueMondaiHashes,
   recordServedMondaiHistory,
   selectMondaiFromBucket
 } = require('./exam-history');
@@ -218,6 +219,71 @@ const DEFAULT_MODES = {
   basic: { question_scale: 0.5, time_scale: 0.5 },
   standard: { question_scale: 1.0, time_scale: 1.0 },
   official: { question_scale: 1.0, time_scale: 1.0 }
+};
+
+const DAILY_BANK_LEVELS = ['N5', 'N4', 'N3', 'N2', 'N1'];
+const DAILY_BANK_MODES = ['basic', 'standard', 'official'];
+const DAILY_BANK_RETENTION_DAYS = Math.max(
+  30,
+  Number.parseInt(process.env.DAILY_BANK_RETENTION_DAYS || '30', 10)
+);
+const DAILY_BANK_SET_COUNT = Math.max(
+  5,
+  Number.parseInt(process.env.DAILY_BANK_SET_COUNT || '5', 10)
+);
+const DAILY_BANK_TARGET_PER_BUCKET = Math.max(
+  5,
+  Number.parseInt(process.env.DAILY_BANK_TARGET_PER_BUCKET || '5', 10)
+);
+const DAILY_BANK_WARM_MAX_GENERATE_TOTAL = Math.max(
+  DAILY_BANK_TARGET_PER_BUCKET * 17,
+  Number.parseInt(process.env.DAILY_BANK_WARM_MAX_GENERATE_TOTAL || String(DAILY_BANK_TARGET_PER_BUCKET * 17), 10)
+);
+const DAILY_BANK_RUN_ON_STARTUP = String(process.env.DAILY_BANK_RUN_ON_STARTUP || '1') !== '0';
+const DAILY_BANK_ENABLED = String(process.env.DAILY_BANK_ENABLED || '1') !== '0';
+const DAILY_BANK_SCHEDULE_HOUR = Math.max(
+  0,
+  Math.min(23, Number.parseInt(process.env.DAILY_BANK_SCHEDULE_HOUR || '0', 10))
+);
+const DAILY_BANK_SCHEDULE_MINUTE = Math.max(
+  0,
+  Math.min(59, Number.parseInt(process.env.DAILY_BANK_SCHEDULE_MINUTE || '5', 10))
+);
+
+const DAILY_BANK_VARIANTS = [
+  { key: 'full', title: 'Full Exam', mondaiIds: null },
+  { key: 'vocab_grammar', title: 'Vocabulary & Grammar', mondaiIds: ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7'] },
+  { key: 'vocab', title: 'Vocabulary', mondaiIds: ['M1', 'M2', 'M3', 'M4'] },
+  { key: 'grammar', title: 'Grammar', mondaiIds: ['M5', 'M6', 'M7'] },
+  { key: 'reading', title: 'Reading', mondaiIds: ['M8', 'M9', 'M10', 'M11', 'M12'] },
+  { key: 'listening', title: 'Listening', mondaiIds: ['L1', 'L2', 'L3', 'L4', 'L5'] }
+];
+
+const DAILY_BANK_VARIANT_MAP = new Map(DAILY_BANK_VARIANTS.map((variant) => [variant.key, variant]));
+const DAILY_BANK_EXACT_VARIANT_LOOKUP = new Map(
+  DAILY_BANK_VARIANTS
+    .filter((variant) => Array.isArray(variant.mondaiIds) && variant.mondaiIds.length > 0)
+    .map((variant) => [variant.mondaiIds.slice().sort().join('|'), variant.key])
+);
+const CURRENT_DAY_RARE_BUCKET_WARM_ENABLED = String(process.env.CURRENT_DAY_RARE_BUCKET_WARM_ENABLED || '1') !== '0';
+const CURRENT_DAY_RARE_BUCKET_WARM_ON_STARTUP = String(process.env.CURRENT_DAY_RARE_BUCKET_WARM_ON_STARTUP || '1') !== '0';
+const CURRENT_DAY_RARE_BUCKET_WARM_TARGET_PER_BUCKET = Math.max(
+  1,
+  Number.parseInt(process.env.CURRENT_DAY_RARE_BUCKET_WARM_TARGET_PER_BUCKET || '3', 10)
+);
+const CURRENT_DAY_RARE_BUCKET_WARM_CONCURRENCY = Math.max(
+  1,
+  Math.min(2, Number.parseInt(process.env.CURRENT_DAY_RARE_BUCKET_WARM_CONCURRENCY || '1', 10))
+);
+
+const examSpecTemplateCache = new Map();
+const dailyBankRuntimeState = {
+  running: false,
+  lastRunDateYmd: null,
+  lastStartedAt: null,
+  lastFinishedAt: null,
+  lastResult: null,
+  timer: null
 };
 
 // ============ Auth Endpoints ============
@@ -1275,6 +1341,23 @@ const OPENROUTER_RPM = Math.max(
   1,
   Number.parseInt(process.env.OPENROUTER_RPM || '5', 10)
 );
+const SNAPSHOT_RARE_BUCKET_BOOTSTRAP_TARGET = Math.max(
+  2,
+  Number.parseInt(process.env.SNAPSHOT_RARE_BUCKET_BOOTSTRAP_TARGET || '3', 10)
+);
+const SNAPSHOT_LISTENING_BUCKET_BOOTSTRAP_TARGET = Math.max(
+  SNAPSHOT_RARE_BUCKET_BOOTSTRAP_TARGET,
+  Number.parseInt(process.env.SNAPSHOT_LISTENING_BUCKET_BOOTSTRAP_TARGET || '4', 10)
+);
+const snapshotRareBucketBootstrapState = new Map();
+const currentDayRareBucketWarmRuntimeState = {
+  entries: new Map(),
+  queue: [],
+  activeCount: 0,
+  lastScheduledAt: null,
+  lastFinishedAt: null,
+  lastResult: null
+};
 
 function getEffectiveBlueprintGenerationConcurrency() {
   const rpmBound = Math.max(1, Math.min(OPENROUTER_RPM, 5));
@@ -1355,12 +1438,21 @@ async function generateMondaiForSlotBatch(params) {
     learnerHints
   );
 
+  const generationRunConfig = getMondaiGenerationRunConfig(mondaiBatch);
   const generation = await runJsonTask({
     task: 'generate',
     prompt,
     validateResult: validateMondaiChunkResult,
+    buildRepairPrompt: (context) => buildMondaiChunkRepairPrompt({
+      ...context,
+      examSpec,
+      mode,
+      mondaiBatch
+    }),
     maxTokens: GENERATE_MAX_TOKENS,
-    temperature: 0.8
+    temperature: generationRunConfig.temperature,
+    preferredProviders: generationRunConfig.preferredProviders,
+    preferredStageNames: generationRunConfig.preferredStageNames
   });
 
   const mondaiList = Array.isArray(generation?.result?.mondai) ? generation.result.mondai : [];
@@ -1437,24 +1529,492 @@ async function ensurePoolSnapshot(examSpec, level, dateYmd, plan, mode) {
   // Wait for DB initialization instead of checking boolean
   const ok = await db.initDb();
   if (!ok) return null;
+  const expiresAt = new Date(`${addDaysToDateYmd(dateYmd, DAILY_BANK_RETENTION_DAYS)}T23:59:59.999Z`).toISOString();
 
   // UPSERT Snapshot (race-safe)
   const snapshotRes = await db.query(`
-    INSERT INTO pool_snapshots (exam_id, level, mode, date_ymd)
-    VALUES ($1, $2, $3, $4)
+    INSERT INTO pool_snapshots (exam_id, level, mode, date_ymd, expires_at, params)
+    VALUES ($1, $2, $3, $4, $5, $6::jsonb)
     ON CONFLICT (exam_id, level, mode, date_ymd)
-    DO UPDATE SET exam_id = EXCLUDED.exam_id
+    DO UPDATE SET
+      exam_id = EXCLUDED.exam_id,
+      expires_at = EXCLUDED.expires_at,
+      params = COALESCE(pool_snapshots.params, '{}'::jsonb) || EXCLUDED.params
     RETURNING id
-  `, [examSpec.exam_id, level, mode, dateYmd]);
+  `, [
+    examSpec.exam_id,
+    level,
+    mode,
+    dateYmd,
+    expiresAt,
+    JSON.stringify({
+      plan: plan || 'daily-bank',
+      retention_days: DAILY_BANK_RETENTION_DAYS
+    })
+  ]);
 
   const snapshotId = snapshotRes.rows[0]?.id;
 
   // NOTE: No preroll here - on-demand generation in buildExamBlueprint handles missing items
   // This ensures /api/exam/start returns quickly without blocking Gemini calls
+  if (!['daily-bank', 'warmup', 'startup-rare-warm'].includes(String(plan || '').toLowerCase())) {
+    scheduleCurrentDayRareBucketWarmup({
+      snapshotId,
+      examSpec,
+      level,
+      mode,
+      dateYmd,
+      trigger: plan || 'ensure-pool-snapshot'
+    });
+  }
 
   return snapshotId;
 }
 
+function getSnapshotRareBucketBootstrapTarget(group, mondaiDef) {
+  const mondaiId = String(mondaiDef?.mondai_id || '').toUpperCase();
+  const groupId = String(group?.group_id || '').toLowerCase();
+
+  if (groupId === 'listening' || mondaiId.startsWith('L')) {
+    return SNAPSHOT_LISTENING_BUCKET_BOOTSTRAP_TARGET;
+  }
+  if (mondaiId === 'M12') {
+    return SNAPSHOT_RARE_BUCKET_BOOTSTRAP_TARGET;
+  }
+  return 0;
+}
+
+function getCurrentDayRareBucketWarmTarget(group, mondaiDef) {
+  const bootstrapTarget = getSnapshotRareBucketBootstrapTarget(group, mondaiDef);
+  if (bootstrapTarget <= 0) return 0;
+  return Math.min(bootstrapTarget, CURRENT_DAY_RARE_BUCKET_WARM_TARGET_PER_BUCKET);
+}
+
+async function copyBucketItemsFromRecentSnapshots({ snapshotId, bucketKey, groupId, limit, level = null, primaryType = null }) {
+  const safeLimit = Math.max(0, Number(limit) || 0);
+  if (!snapshotId || !bucketKey || safeLimit <= 0) return 0;
+
+  const insertRes = await db.query(`
+    WITH current_snapshot AS (
+      SELECT exam_id, level, mode
+      FROM pool_snapshots
+      WHERE id = $1
+    ),
+    candidate_hashes AS (
+      SELECT psi.mondai_hash, MAX(src.date_ymd) AS latest_date
+      FROM pool_snapshot_items psi
+      JOIN pool_snapshots src ON src.id = psi.snapshot_id
+      JOIN current_snapshot current
+        ON current.exam_id = src.exam_id
+       AND current.level = src.level
+       AND current.mode = src.mode
+      JOIN mondai_bank mb ON mb.hash = psi.mondai_hash
+      LEFT JOIN pool_snapshot_items existing
+        ON existing.snapshot_id = $1
+       AND existing.bucket_key = $2
+       AND existing.mondai_hash = psi.mondai_hash
+      WHERE psi.bucket_key = $2
+        AND psi.snapshot_id <> $1
+        AND existing.mondai_hash IS NULL
+        AND (src.expires_at IS NULL OR src.expires_at > NOW())
+        AND ($3::text IS NULL OR mb.level = $3 OR mb.level IS NULL)
+        AND ($4::text IS NULL OR mb.primary_type = $4)
+      GROUP BY psi.mondai_hash
+      ORDER BY MAX(src.date_ymd) DESC, psi.mondai_hash ASC
+      LIMIT $5
+    )
+    INSERT INTO pool_snapshot_items (snapshot_id, bucket_key, mondai_hash, group_id)
+    SELECT $1, $2, candidate_hashes.mondai_hash, $6
+    FROM candidate_hashes
+    ON CONFLICT (snapshot_id, bucket_key, mondai_hash) DO NOTHING
+    RETURNING mondai_hash
+  `, [snapshotId, bucketKey, level, primaryType, safeLimit, groupId || null]);
+
+  return Number(insertRes.rowCount || 0);
+}
+
+async function copyBucketItemsFromMondaiBank({
+  snapshotId,
+  bucketKey,
+  groupId,
+  limit,
+  examId,
+  level = null,
+  mondaiId = null,
+  primaryType = null
+}) {
+  const safeLimit = Math.max(0, Number(limit) || 0);
+  if (!snapshotId || !bucketKey || !groupId || !examId || safeLimit <= 0) return 0;
+
+  const insertRes = await db.query(`
+    INSERT INTO pool_snapshot_items (snapshot_id, bucket_key, mondai_hash, group_id)
+    SELECT $1, $2, mb.hash, $3
+    FROM mondai_bank mb
+    LEFT JOIN pool_snapshot_items existing
+      ON existing.snapshot_id = $1
+     AND existing.bucket_key = $2
+     AND existing.mondai_hash = mb.hash
+    WHERE mb.exam_id = $4
+      AND mb.group_id = $3
+      AND ($5::text IS NULL OR mb.level = $5 OR mb.level IS NULL)
+      AND ($6::text IS NULL OR mb.mondai_id = $6)
+      AND ($7::text IS NULL OR mb.primary_type = $7)
+      AND existing.mondai_hash IS NULL
+    ORDER BY mb.updated_at DESC NULLS LAST, mb.created_at DESC NULLS LAST, mb.hash ASC
+    LIMIT $8
+    ON CONFLICT (snapshot_id, bucket_key, mondai_hash) DO NOTHING
+    RETURNING mondai_hash
+  `, [snapshotId, bucketKey, groupId, examId, level, mondaiId, primaryType, safeLimit]);
+
+  return Number(insertRes.rowCount || 0);
+}
+
+function getBucketWarmPriority(group, mondaiDef) {
+  const mondaiId = String(mondaiDef?.mondai_id || '').toUpperCase();
+  const groupId = String(group?.group_id || '').toLowerCase();
+
+  if (groupId === 'listening' || mondaiId.startsWith('L')) return 0;
+  if (mondaiId === 'M12') return 1;
+  if (groupId === 'reading') return 2;
+  return 3;
+}
+
+function sortBucketsForWarmup(buckets = []) {
+  return ensureArray(buckets)
+    .map((bucket, index) => ({ bucket, index }))
+    .sort((left, right) => {
+      const leftPriority = getBucketWarmPriority(left.bucket?.group, left.bucket?.mondaiDef);
+      const rightPriority = getBucketWarmPriority(right.bucket?.group, right.bucket?.mondaiDef);
+      if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+      return left.index - right.index;
+    })
+    .map((entry) => entry.bucket);
+}
+
+function buildRareBucketEntries(examSpec, targetResolver) {
+  const rareBuckets = [];
+
+  for (const group of ensureArray(examSpec?.groups)) {
+    for (const mondaiDef of ensureArray(group?.mondai)) {
+      const targetCount = Number(targetResolver(group, mondaiDef) || 0);
+      if (targetCount <= 0 || !mondaiDef?.types?.[0]) continue;
+      rareBuckets.push({
+        group,
+        mondaiDef,
+        bucketKey: getBucketKey(group.group_id, mondaiDef.mondai_id, mondaiDef.types[0]),
+        targetCount
+      });
+    }
+  }
+
+  return sortBucketsForWarmup(rareBuckets);
+}
+
+async function bootstrapRareBucketsForSnapshot(snapshotId, examSpec, level, mode) {
+  if (!snapshotId || !examSpec) return { copied: 0, buckets: [] };
+
+  const cacheKey = `${snapshotId}:rare-bootstrap`;
+  if (snapshotRareBucketBootstrapState.has(cacheKey)) {
+    return snapshotRareBucketBootstrapState.get(cacheKey);
+  }
+
+  const task = (async () => {
+    const stats = { copied: 0, buckets: [] };
+
+    for (const group of ensureArray(examSpec.groups)) {
+      for (const mondaiDef of ensureArray(group?.mondai)) {
+        const targetCount = getSnapshotRareBucketBootstrapTarget(group, mondaiDef);
+        if (targetCount <= 0 || !mondaiDef?.types?.[0]) continue;
+
+        const bucketKey = getBucketKey(group.group_id, mondaiDef.mondai_id, mondaiDef.types[0]);
+        const countRes = await db.query(
+          'SELECT COUNT(*) FROM pool_snapshot_items WHERE snapshot_id=$1 AND bucket_key=$2',
+          [snapshotId, bucketKey]
+        );
+        const currentCount = Number.parseInt(countRes.rows?.[0]?.count || '0', 10) || 0;
+        const needed = Math.max(0, targetCount - currentCount);
+        if (needed <= 0) continue;
+
+        const copiedFromSnapshots = await copyBucketItemsFromRecentSnapshots({
+          snapshotId,
+          bucketKey,
+          groupId: group.group_id,
+          limit: needed,
+          level,
+          primaryType: mondaiDef.types[0]
+        });
+        const remainingAfterSnapshots = Math.max(0, needed - copiedFromSnapshots);
+        const copiedFromBank = remainingAfterSnapshots > 0
+          ? await copyBucketItemsFromMondaiBank({
+            snapshotId,
+            bucketKey,
+            groupId: group.group_id,
+            limit: remainingAfterSnapshots,
+            examId: examSpec.exam_id,
+            level,
+            mondaiId: mondaiDef.mondai_id,
+            primaryType: mondaiDef.types[0]
+          })
+          : 0;
+        const copied = copiedFromSnapshots + copiedFromBank;
+
+        if (copied > 0) {
+          stats.copied += copied;
+          stats.buckets.push({
+            bucketKey,
+            copied,
+            copiedFromSnapshots,
+            copiedFromBank
+          });
+        }
+      }
+    }
+
+    if (stats.copied > 0) {
+      console.log(`[SnapshotBootstrap] Copied ${stats.copied} rare bucket items into snapshot ${String(snapshotId).slice(0, 8)}...`);
+    }
+
+    return stats;
+  })().catch((error) => {
+    console.warn('[SnapshotBootstrap] Failed:', error?.message || error);
+    return { copied: 0, buckets: [] };
+  });
+
+  snapshotRareBucketBootstrapState.set(cacheKey, task);
+  return task;
+}
+
+async function seedRareBucketsForSnapshot(snapshotId, examSpec, level, mode, dateYmd, options = {}) {
+  if (!snapshotId || !examSpec) {
+    return {
+      ok: false,
+      snapshotId,
+      level,
+      mode,
+      dateYmd,
+      copied: 0,
+      generated: 0,
+      bucketsProcessed: 0,
+      skipped: 0
+    };
+  }
+
+  const startedAt = Date.now();
+  const bootstrapStats = await bootstrapRareBucketsForSnapshot(snapshotId, examSpec, level, mode);
+  const rareBuckets = buildRareBucketEntries(examSpec, getCurrentDayRareBucketWarmTarget);
+  let generated = 0;
+  let bucketsProcessed = 0;
+  let skipped = 0;
+
+  for (const bucket of rareBuckets) {
+    const { group, mondaiDef, bucketKey, targetCount } = bucket;
+    const countRes = await db.query(
+      'SELECT COUNT(*) FROM pool_snapshot_items WHERE snapshot_id=$1 AND bucket_key=$2',
+      [snapshotId, bucketKey]
+    );
+    const currentCount = Number.parseInt(countRes.rows?.[0]?.count || '0', 10) || 0;
+    const needed = Math.max(0, targetCount - currentCount);
+    if (needed <= 0) {
+      skipped += 1;
+      continue;
+    }
+
+    console.log(`[RareWarm] Filling ${bucketKey}: ${currentCount} -> ${currentCount + needed} (target: ${targetCount})`);
+    await generateMondaiForBucket({
+      examSpec,
+      level,
+      mode,
+      group,
+      mondaiDef,
+      bucketKey,
+      snapshotId,
+      count: needed
+    });
+    generated += needed;
+    bucketsProcessed += 1;
+  }
+
+  return {
+    ok: true,
+    snapshotId,
+    exam_id: examSpec.exam_id,
+    level,
+    mode,
+    dateYmd,
+    copied: Number(bootstrapStats?.copied || 0),
+    generated,
+    bucketsProcessed,
+    skipped,
+    targetBuckets: rareBuckets.length,
+    durationMs: Date.now() - startedAt
+  };
+}
+
+function shouldScheduleCurrentDayRareBucketWarmup(dateYmd) {
+  if (!CURRENT_DAY_RARE_BUCKET_WARM_ENABLED || IS_VERCEL) return false;
+  return String(dateYmd || '') === formatDateYmd();
+}
+
+function buildCurrentDayRareBucketWarmKey(examSpec, level, mode, dateYmd) {
+  return [
+    examSpec?.exam_id || 'unknown',
+    String(level || examSpec?.level || '').toUpperCase(),
+    String(mode || '').toLowerCase(),
+    String(dateYmd || '')
+  ].join('|');
+}
+
+function pumpCurrentDayRareBucketWarmQueue() {
+  if (!CURRENT_DAY_RARE_BUCKET_WARM_ENABLED || IS_VERCEL) return;
+
+  while (
+    currentDayRareBucketWarmRuntimeState.activeCount < CURRENT_DAY_RARE_BUCKET_WARM_CONCURRENCY &&
+    currentDayRareBucketWarmRuntimeState.queue.length > 0
+  ) {
+    const key = currentDayRareBucketWarmRuntimeState.queue.shift();
+    const entry = currentDayRareBucketWarmRuntimeState.entries.get(key);
+    if (!entry || entry.status !== 'scheduled') continue;
+
+    entry.status = 'running';
+    entry.startedAt = new Date().toISOString();
+    currentDayRareBucketWarmRuntimeState.activeCount += 1;
+
+    Promise.resolve()
+      .then(async () => {
+        const result = await seedRareBucketsForSnapshot(
+          entry.snapshotId,
+          entry.examSpec,
+          entry.level,
+          entry.mode,
+          entry.dateYmd,
+          { trigger: entry.trigger }
+        );
+        entry.status = 'completed';
+        entry.finishedAt = new Date().toISOString();
+        entry.result = result;
+        currentDayRareBucketWarmRuntimeState.lastFinishedAt = entry.finishedAt;
+        currentDayRareBucketWarmRuntimeState.lastResult = {
+          key,
+          trigger: entry.trigger,
+          result
+        };
+        console.log(
+          `[RareWarm] Completed ${entry.examSpec.exam_id} ${entry.level} ${entry.mode} ${entry.dateYmd}: ` +
+          `copied=${result.copied} generated=${result.generated} processed=${result.bucketsProcessed}`
+        );
+      })
+      .catch((error) => {
+        entry.status = 'failed';
+        entry.finishedAt = new Date().toISOString();
+        entry.error = error?.message || String(error);
+        currentDayRareBucketWarmRuntimeState.lastFinishedAt = entry.finishedAt;
+        currentDayRareBucketWarmRuntimeState.lastResult = {
+          key,
+          trigger: entry.trigger,
+          error: entry.error
+        };
+        console.error(
+          `[RareWarm] Failed ${entry.examSpec.exam_id} ${entry.level} ${entry.mode} ${entry.dateYmd}:`,
+          error?.message || error
+        );
+      })
+      .finally(() => {
+        currentDayRareBucketWarmRuntimeState.activeCount = Math.max(
+          0,
+          currentDayRareBucketWarmRuntimeState.activeCount - 1
+        );
+        pumpCurrentDayRareBucketWarmQueue();
+      });
+  }
+}
+
+function scheduleCurrentDayRareBucketWarmup(params = {}) {
+  const {
+    snapshotId,
+    examSpec,
+    level,
+    mode,
+    dateYmd,
+    trigger = 'ensure-pool-snapshot'
+  } = params;
+
+  if (!snapshotId || !examSpec || !shouldScheduleCurrentDayRareBucketWarmup(dateYmd)) {
+    return null;
+  }
+
+  const key = buildCurrentDayRareBucketWarmKey(examSpec, level, mode, dateYmd);
+  const existing = currentDayRareBucketWarmRuntimeState.entries.get(key);
+  if (
+    existing &&
+    existing.snapshotId === snapshotId &&
+    ['scheduled', 'running', 'completed'].includes(existing.status)
+  ) {
+    return existing;
+  }
+
+  const entry = {
+    key,
+    snapshotId,
+    examSpec: cloneJson(examSpec),
+    level: String(level || examSpec?.level || '').toUpperCase(),
+    mode: String(mode || '').toLowerCase(),
+    dateYmd: String(dateYmd || ''),
+    trigger,
+    status: 'scheduled',
+    scheduledAt: new Date().toISOString(),
+    startedAt: null,
+    finishedAt: null,
+    result: null,
+    error: null
+  };
+
+  currentDayRareBucketWarmRuntimeState.entries.set(key, entry);
+  currentDayRareBucketWarmRuntimeState.queue.push(key);
+  currentDayRareBucketWarmRuntimeState.lastScheduledAt = entry.scheduledAt;
+
+  console.log(`[RareWarm] Scheduled ${entry.examSpec.exam_id} ${entry.level} ${entry.mode} ${entry.dateYmd} via ${trigger}`);
+  pumpCurrentDayRareBucketWarmQueue();
+  return entry;
+}
+
+function summarizeCurrentDayRareBucketWarmState(limit = 10) {
+  const entries = Array.from(currentDayRareBucketWarmRuntimeState.entries.values())
+    .sort((left, right) => String(right.scheduledAt || '').localeCompare(String(left.scheduledAt || '')))
+    .slice(0, limit)
+    .map((entry) => ({
+      key: entry.key,
+      level: entry.level,
+      mode: entry.mode,
+      dateYmd: entry.dateYmd,
+      trigger: entry.trigger,
+      status: entry.status,
+      scheduledAt: entry.scheduledAt,
+      startedAt: entry.startedAt,
+      finishedAt: entry.finishedAt,
+      result: entry.result
+        ? {
+          copied: entry.result.copied,
+          generated: entry.result.generated,
+          bucketsProcessed: entry.result.bucketsProcessed,
+          durationMs: entry.result.durationMs
+        }
+        : null,
+      error: entry.error || null
+    }));
+
+  return {
+    enabled: CURRENT_DAY_RARE_BUCKET_WARM_ENABLED,
+    onStartup: CURRENT_DAY_RARE_BUCKET_WARM_ON_STARTUP,
+    targetPerBucket: CURRENT_DAY_RARE_BUCKET_WARM_TARGET_PER_BUCKET,
+    concurrency: CURRENT_DAY_RARE_BUCKET_WARM_CONCURRENCY,
+    activeCount: currentDayRareBucketWarmRuntimeState.activeCount,
+    queuedCount: currentDayRareBucketWarmRuntimeState.queue.length,
+    lastScheduledAt: currentDayRareBucketWarmRuntimeState.lastScheduledAt,
+    lastFinishedAt: currentDayRareBucketWarmRuntimeState.lastFinishedAt,
+    lastResult: currentDayRareBucketWarmRuntimeState.lastResult,
+    entries
+  };
+}
 /**
  * Batch generate mondai to fill a bucket
  */
@@ -1471,13 +2031,22 @@ async function generateMondaiForBucket(params) {
     const validateMondaiChunkResult = buildMondaiChunkValidator(mondaiBatch, examSpec, mode);
 
     try {
+      const generationRunConfig = getMondaiGenerationRunConfig(mondaiBatch);
       const generation = await runJsonTask({
-        task: 'generate',
-        prompt,
-        validateResult: validateMondaiChunkResult,
-        maxTokens: GENERATE_MAX_TOKENS,
-        temperature: 0.8
-      });
+    task: 'generate',
+    prompt,
+    validateResult: validateMondaiChunkResult,
+    buildRepairPrompt: (context) => buildMondaiChunkRepairPrompt({
+      ...context,
+      examSpec,
+      mode,
+      mondaiBatch
+    }),
+    maxTokens: GENERATE_MAX_TOKENS,
+    temperature: generationRunConfig.temperature,
+    preferredProviders: generationRunConfig.preferredProviders,
+    preferredStageNames: generationRunConfig.preferredStageNames
+  });
       const mondaiList = Array.isArray(generation?.result?.mondai) ? generation.result.mondai : [];
 
       if (mondaiList.length === 0) {
@@ -1570,8 +2139,10 @@ async function warmPool(snapshotId, examSpec, level, mode, dateYmd, opts = {}) {
     }
   }
 
+  const prioritizedBuckets = sortBucketsForWarmup(buckets);
+
   // Process up to maxBuckets
-  for (const bucket of buckets) {
+  for (const bucket of prioritizedBuckets) {
     if (bucketsProcessed >= maxBuckets) break;
     if (generated >= maxGenerateTotal) break;
 
@@ -1628,6 +2199,450 @@ async function warmPool(snapshotId, examSpec, level, mode, dateYmd, opts = {}) {
   return { bucketsProcessed, generated, skipped };
 }
 
+async function publishBlueprintExam(params) {
+  const {
+    examSpec,
+    level,
+    mode,
+    variantKey,
+    bankDateYmd,
+    setNo,
+    snapshotId,
+    blueprint
+  } = params;
+  const title = buildPublishedExamTitle({ level, mode, variantKey, setNo, bankDateYmd });
+  const description = buildPublishedExamDescription({ level, mode, variantKey, bankDateYmd });
+  const expiresAt = new Date(`${addDaysToDateYmd(bankDateYmd, DAILY_BANK_RETENTION_DAYS)}T23:59:59.999Z`).toISOString();
+  const blueprintHashes = extractUniqueMondaiHashes(blueprint);
+  const meta = {
+    variant_key: variantKey,
+    bank_date_ymd: bankDateYmd,
+    set_no: setNo,
+    source_snapshot_id: snapshotId,
+    mondai_hashes: blueprintHashes,
+    generated_at: new Date().toISOString()
+  };
+
+  const publishedRes = await db.query(`
+    INSERT INTO published_exams (
+      exam_id,
+      level,
+      mode,
+      variant_key,
+      set_no,
+      bank_date_ymd,
+      title,
+      description,
+      is_active,
+      blueprint,
+      meta,
+      snapshot_id,
+      expires_at
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9::jsonb, $10::jsonb, $11, $12)
+    ON CONFLICT (exam_id, level, mode, variant_key, bank_date_ymd, set_no)
+    DO UPDATE SET
+      title = EXCLUDED.title,
+      description = EXCLUDED.description,
+      is_active = true,
+      blueprint = EXCLUDED.blueprint,
+      meta = EXCLUDED.meta,
+      snapshot_id = EXCLUDED.snapshot_id,
+      expires_at = EXCLUDED.expires_at
+    RETURNING id
+  `, [
+    examSpec.exam_id,
+    level,
+    mode,
+    variantKey,
+    setNo,
+    bankDateYmd,
+    title,
+    description,
+    JSON.stringify(blueprint),
+    JSON.stringify(meta),
+    snapshotId,
+    expiresAt
+  ]);
+
+  const publishedExamId = publishedRes.rows?.[0]?.id;
+  if (!publishedExamId) {
+    throw new Error(`Failed to publish daily bank exam ${examSpec.exam_id} ${level} ${mode} ${variantKey} #${setNo}`);
+  }
+
+  await db.query('DELETE FROM published_exam_parts WHERE published_exam_id = $1', [publishedExamId]);
+  for (const group of ensureArray(blueprint?.groups)) {
+    const hashes = ensureArray(group?.mondai_slots)
+      .map((slot) => slot?.mondai_hash)
+      .filter(Boolean);
+    await db.query(`
+      INSERT INTO published_exam_parts (published_exam_id, group_id, mondai_hashes, meta)
+      VALUES ($1, $2, $3::jsonb, $4::jsonb)
+    `, [
+      publishedExamId,
+      group.group_id,
+      JSON.stringify(hashes),
+      JSON.stringify({
+        variant_key: variantKey,
+        title_vi: group.title_vi || group.group_id,
+        bank_date_ymd: bankDateYmd
+      })
+    ]);
+  }
+
+  return {
+    id: publishedExamId,
+    title,
+    blueprintHashes
+  };
+}
+
+async function recordPublishedExamServed(options) {
+  const { userId, publishedExamId, instanceKey } = options || {};
+  if (!userId || !publishedExamId) return;
+
+  await db.query(`
+    INSERT INTO user_published_exam_history (
+      user_id,
+      published_exam_id,
+      first_served_at,
+      last_served_at,
+      serve_count,
+      last_instance_key
+    )
+    VALUES ($1, $2, NOW(), NOW(), 1, $3)
+    ON CONFLICT (user_id, published_exam_id)
+    DO UPDATE SET
+      last_served_at = CASE
+        WHEN user_published_exam_history.last_instance_key IS DISTINCT FROM EXCLUDED.last_instance_key THEN NOW()
+        ELSE user_published_exam_history.last_served_at
+      END,
+      serve_count = CASE
+        WHEN user_published_exam_history.last_instance_key IS DISTINCT FROM EXCLUDED.last_instance_key THEN user_published_exam_history.serve_count + 1
+        ELSE user_published_exam_history.serve_count
+      END,
+      last_instance_key = CASE
+        WHEN user_published_exam_history.last_instance_key IS DISTINCT FROM EXCLUDED.last_instance_key THEN EXCLUDED.last_instance_key
+        ELSE user_published_exam_history.last_instance_key
+      END
+  `, [userId, publishedExamId, instanceKey || null]);
+}
+
+async function selectPublishedExamBlueprint(options = {}) {
+  const {
+    userId,
+    examId,
+    level,
+    mode,
+    variantKey,
+    fallbackVariantKeys = [],
+    requestedMondaiIds = null,
+    allowRepeat = false
+  } = options;
+
+  const normalizedRequestedIds = normalizeMondaiIdList(requestedMondaiIds, 64);
+  const candidateVariantKeys = uniqueStrings([
+    ...(variantKey && !String(variantKey).startsWith('custom:') ? [variantKey] : []),
+    ...ensureArray(fallbackVariantKeys),
+    ...inferPublishedVariantCandidates(normalizedRequestedIds)
+  ], DAILY_BANK_VARIANTS.length + 2).filter((key) => key === 'full' || DAILY_BANK_VARIANT_MAP.has(key));
+
+  if (!examId || !level || !mode || candidateVariantKeys.length === 0) {
+    return null;
+  }
+
+  const candidatesRes = await db.query(`
+    SELECT pe.*
+    FROM published_exams pe
+    WHERE pe.exam_id = $1
+      AND pe.level = $2
+      AND pe.mode = $3
+      AND pe.variant_key = ANY($4::text[])
+      AND pe.is_active = true
+      AND (pe.expires_at IS NULL OR pe.expires_at > NOW())
+      AND pe.bank_date_ymd >= $5
+    ORDER BY pe.bank_date_ymd DESC, pe.set_no ASC
+    LIMIT 60
+  `, [
+    examId,
+    level,
+    mode,
+    candidateVariantKeys,
+    addDaysToDateYmd(formatDateYmd(), -DAILY_BANK_RETENTION_DAYS)
+  ]);
+
+  const variantPriority = new Map(candidateVariantKeys.map((key, index) => [key, index]));
+  const candidates = ensureArray(candidatesRes.rows)
+    .map((row) => {
+      const sourceBlueprint = parseJsonb(row.blueprint, null);
+      if (!sourceBlueprint) return null;
+
+      const trimmedBlueprint = normalizedRequestedIds.length > 0
+        ? filterBlueprintByMondaiIds(sourceBlueprint, normalizedRequestedIds)
+        : cloneJson(sourceBlueprint);
+      if (!trimmedBlueprint) return null;
+
+      if (!trimmedBlueprint.meta) trimmedBlueprint.meta = {};
+      trimmedBlueprint.meta.variant_key = variantKey || row.variant_key || trimmedBlueprint.meta.variant_key || null;
+      trimmedBlueprint.meta.source_variant_key = row.variant_key || trimmedBlueprint.meta.source_variant_key || null;
+      if (normalizedRequestedIds.length > 0) {
+        trimmedBlueprint.meta.requested_mondai_ids = normalizedRequestedIds;
+      }
+
+      return {
+        id: row.id,
+        exam_id: row.exam_id,
+        level: row.level,
+        mode: row.mode,
+        variant_key: row.variant_key,
+        set_no: row.set_no,
+        bank_date_ymd: row.bank_date_ymd,
+        blueprint: trimmedBlueprint,
+        meta: parseJsonb(row.meta, {})
+      };
+    })
+    .filter(Boolean);
+
+  if (candidates.length === 0) return null;
+
+  const candidateHashSet = new Set(
+    candidates.flatMap((candidate) => extractUniqueMondaiHashes(candidate.blueprint))
+  );
+  const allCandidateHashes = Array.from(candidateHashSet);
+
+  const [seenExamRes, seenHashRes] = await Promise.all([
+    userId ? db.query(
+      'SELECT published_exam_id, serve_count FROM user_published_exam_history WHERE user_id = $1 AND published_exam_id = ANY($2::uuid[])',
+      [userId, candidates.map((candidate) => candidate.id)]
+    ) : Promise.resolve({ rows: [] }),
+    userId && allCandidateHashes.length > 0 ? db.query(
+      'SELECT mondai_hash FROM user_mondai_history WHERE user_id = $1 AND mondai_hash = ANY($2::text[])',
+      [userId, allCandidateHashes]
+    ) : Promise.resolve({ rows: [] })
+  ]);
+
+  const seenExamCounts = new Map(
+    ensureArray(seenExamRes.rows).map((row) => [row.published_exam_id, Number(row.serve_count || 0)])
+  );
+  const seenHashSet = new Set(ensureArray(seenHashRes.rows).map((row) => row.mondai_hash));
+
+  const ranked = candidates.map((candidate) => {
+    const hashes = extractUniqueMondaiHashes(candidate.blueprint);
+    const overlapCount = hashes.filter((hash) => seenHashSet.has(hash)).length;
+    const servedCount = Number(seenExamCounts.get(candidate.id) || 0);
+    return {
+      ...candidate,
+      hashes,
+      overlapCount,
+      servedCount,
+      variantPriority: variantPriority.has(candidate.variant_key)
+        ? variantPriority.get(candidate.variant_key)
+        : Number.MAX_SAFE_INTEGER
+    };
+  }).sort((left, right) => {
+    if (left.variantPriority !== right.variantPriority) return left.variantPriority - right.variantPriority;
+    if (left.servedCount !== right.servedCount) return left.servedCount - right.servedCount;
+    if (left.overlapCount !== right.overlapCount) return left.overlapCount - right.overlapCount;
+    if (left.bank_date_ymd !== right.bank_date_ymd) return String(right.bank_date_ymd).localeCompare(String(left.bank_date_ymd));
+    return Number(left.set_no || 0) - Number(right.set_no || 0);
+  });
+
+  const unseenExact = allowRepeat ? ranked : ranked.filter((candidate) => candidate.servedCount === 0);
+  const chosen = (unseenExact.length > 0 ? unseenExact : ranked)[0];
+  return chosen || null;
+}
+async function cleanupExpiredDailyBankData(options = {}) {
+  const keepDays = Math.max(1, Number.parseInt(options.keepDays || String(DAILY_BANK_RETENTION_DAYS), 10));
+  const cutoffYmd = addDaysToDateYmd(formatDateYmd(), -keepDays);
+
+  await db.query(
+    `DELETE FROM published_exams
+     WHERE bank_date_ymd IS NOT NULL
+       AND bank_date_ymd < $1`,
+    [cutoffYmd]
+  );
+
+  await db.query(
+    `DELETE FROM pool_snapshot_items
+     WHERE snapshot_id IN (
+       SELECT id FROM pool_snapshots
+       WHERE date_ymd < $1
+          OR (expires_at IS NOT NULL AND expires_at < NOW())
+     )`,
+    [cutoffYmd]
+  );
+
+  await db.query(
+    `DELETE FROM pool_snapshots
+     WHERE date_ymd < $1
+        OR (expires_at IS NOT NULL AND expires_at < NOW())`,
+    [cutoffYmd]
+  );
+
+  return { cutoffYmd, keepDays };
+}
+
+async function warmSnapshotForDailyBank(examSpec, level, mode, dateYmd) {
+  const snapshotId = await ensurePoolSnapshot(examSpec, level, dateYmd, 'daily-bank', mode);
+  if (!snapshotId) {
+    throw new Error(`Failed to ensure snapshot for ${examSpec.exam_id} ${level} ${mode}`);
+  }
+
+  await bootstrapRareBucketsForSnapshot(snapshotId, examSpec, level, mode);
+
+  const bucketCount = ensureArray(examSpec.groups).reduce(
+    (sum, group) => sum + ensureArray(group?.mondai).filter((mondaiDef) => mondaiDef?.types?.[0]).length,
+    0
+  );
+
+  const warmStats = await warmPool(snapshotId, examSpec, level, mode, dateYmd, {
+    targetPerBucket: DAILY_BANK_TARGET_PER_BUCKET,
+    maxBuckets: bucketCount,
+    maxGenerateTotal: Math.max(
+      DAILY_BANK_WARM_MAX_GENERATE_TOTAL,
+      bucketCount * DAILY_BANK_TARGET_PER_BUCKET
+    )
+  });
+
+  return { snapshotId, warmStats };
+}
+
+async function generateDailyBankVariant(params) {
+  const {
+    baseSpec,
+    level,
+    mode,
+    variantKey,
+    dateYmd,
+    snapshotId
+  } = params;
+
+  const variantSpec = buildExamVariantSpec(baseSpec, variantKey);
+  const reservedHashes = new Set();
+  const published = [];
+
+  for (let setNo = 1; setNo <= DAILY_BANK_SET_COUNT; setNo += 1) {
+    const seed = crypto.createHash('sha256')
+      .update(`${variantSpec.exam_id}|${level}|${mode}|${variantKey}|${dateYmd}|${setNo}`)
+      .digest('hex');
+
+    const { blueprint } = await buildExamBlueprint(
+      variantSpec,
+      level,
+      mode,
+      seed,
+      setNo,
+      'daily-bank',
+      snapshotId,
+      {
+        allowRepeat: false,
+        reservedHashes: Array.from(reservedHashes)
+      }
+    );
+
+    if (!blueprint.meta) blueprint.meta = {};
+    blueprint.meta.variant_key = variantKey;
+    blueprint.meta.bank_date_ymd = dateYmd;
+    blueprint.meta.prebuilt_bank = true;
+    blueprint.meta.seed = seed;
+
+    extractUniqueMondaiHashes(blueprint).forEach((hash) => reservedHashes.add(hash));
+    published.push(await publishBlueprintExam({
+      examSpec: variantSpec,
+      level,
+      mode,
+      variantKey,
+      bankDateYmd: dateYmd,
+      setNo,
+      snapshotId,
+      blueprint
+    }));
+  }
+
+  return {
+    variantKey,
+    publishedCount: published.length,
+    publishedExamIds: published.map((entry) => entry.id)
+  };
+}
+
+async function runDailyBankWorkflow(options = {}) {
+  if (dailyBankRuntimeState.running) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: 'already_running',
+      lastRunDateYmd: dailyBankRuntimeState.lastRunDateYmd
+    };
+  }
+
+  dailyBankRuntimeState.running = true;
+  dailyBankRuntimeState.lastStartedAt = new Date().toISOString();
+
+  const dateYmd = String(options.dateYmd || formatDateYmd());
+  const levels = uniqueStrings(options.levels || DAILY_BANK_LEVELS, DAILY_BANK_LEVELS.length);
+  const modes = uniqueStrings(options.modes || DAILY_BANK_MODES, DAILY_BANK_MODES.length);
+  const variantKeys = uniqueStrings(
+    options.variants || DAILY_BANK_VARIANTS.map((variant) => variant.key),
+    DAILY_BANK_VARIANTS.length
+  );
+  const results = [];
+
+  try {
+    if (!(await db.initDb())) {
+      throw new Error('DB unavailable');
+    }
+
+    for (const level of levels) {
+      const baseSpec = await buildDailyBankExamSpec(level);
+
+      for (const mode of modes) {
+        const { snapshotId, warmStats } = await warmSnapshotForDailyBank(baseSpec, level, mode, dateYmd);
+        const variantResults = [];
+
+        for (const variantKey of variantKeys) {
+          variantResults.push(await generateDailyBankVariant({
+            baseSpec,
+            level,
+            mode,
+            variantKey,
+            dateYmd,
+            snapshotId
+          }));
+        }
+
+        results.push({
+          level,
+          mode,
+          snapshotId,
+          warmStats,
+          variants: variantResults
+        });
+      }
+    }
+
+    await cleanupExpiredDailyBankData({ keepDays: DAILY_BANK_RETENTION_DAYS });
+
+    const finalResult = {
+      ok: true,
+      dateYmd,
+      levels,
+      modes,
+      variants: variantKeys,
+      retentionDays: DAILY_BANK_RETENTION_DAYS,
+      setCount: DAILY_BANK_SET_COUNT,
+      targetPerBucket: DAILY_BANK_TARGET_PER_BUCKET,
+      results
+    };
+    dailyBankRuntimeState.lastRunDateYmd = dateYmd;
+    dailyBankRuntimeState.lastFinishedAt = new Date().toISOString();
+    dailyBankRuntimeState.lastResult = finalResult;
+    return finalResult;
+  } finally {
+    dailyBankRuntimeState.running = false;
+  }
+}
+
 async function runTasksWithConcurrency(taskFactories, limit) {
   const tasks = Array.isArray(taskFactories) ? taskFactories : [];
   if (tasks.length === 0) return [];
@@ -1675,6 +2690,48 @@ function getInitialReadySlotIds(group) {
   return readyPrefix;
 }
 
+function getCriticalStartPendingSlots(blueprint, pendingSlots) {
+  const firstGroup = ensureArray(blueprint?.groups)[0];
+  if (!firstGroup) return [];
+
+  const initialBufferCount = getInitialMondaiBufferCount(firstGroup);
+  return ensureArray(pendingSlots).filter((entry) => {
+    const groupId = entry?.group?.group_id;
+    const slotOrdinal = Number(entry?.slot?.slot_ordinal || 0);
+    return groupId === firstGroup.group_id && slotOrdinal < initialBufferCount;
+  });
+}
+
+function sortPendingSlotsForBackgroundPrefetch(blueprint, pendingSlots, excludedSlotIds = []) {
+  const groups = ensureArray(blueprint?.groups);
+  const groupIndexMap = new Map(groups.map((group, index) => [group?.group_id, index]));
+  const excluded = new Set(ensureArray(excludedSlotIds).filter(Boolean));
+  const groupCount = Math.max(groups.length, 1);
+
+  return ensureArray(pendingSlots)
+    .filter((entry) => !excluded.has(entry?.slot?.slot_id))
+    .slice()
+    .sort((left, right) => {
+      const leftGroupIndex = groupIndexMap.has(left?.group?.group_id)
+        ? groupIndexMap.get(left.group.group_id)
+        : Number.MAX_SAFE_INTEGER;
+      const rightGroupIndex = groupIndexMap.has(right?.group?.group_id)
+        ? groupIndexMap.get(right.group.group_id)
+        : Number.MAX_SAFE_INTEGER;
+
+      const leftGroup = groups[leftGroupIndex] || left?.group || null;
+      const rightGroup = groups[rightGroupIndex] || right?.group || null;
+      const leftInitial = Number(left?.slot?.slot_ordinal || 0) < getInitialMondaiBufferCount(leftGroup);
+      const rightInitial = Number(right?.slot?.slot_ordinal || 0) < getInitialMondaiBufferCount(rightGroup);
+      const leftTier = leftInitial ? leftGroupIndex : leftGroupIndex + groupCount;
+      const rightTier = rightInitial ? rightGroupIndex : rightGroupIndex + groupCount;
+
+      if (leftTier !== rightTier) return leftTier - rightTier;
+      if (leftGroupIndex !== rightGroupIndex) return leftGroupIndex - rightGroupIndex;
+      return Number(left?.slot?.slot_ordinal || 0) - Number(right?.slot?.slot_ordinal || 0);
+    });
+}
+
 async function hydratePendingBlueprintSlots(params) {
   const {
     pendingSlots,
@@ -1687,7 +2744,8 @@ async function hydratePendingBlueprintSlots(params) {
     usedHashes,
     userId,
     allowRepeat,
-    learnerHints = null
+    learnerHints = null,
+    concurrencyLimit = getEffectiveOnDemandRequestConcurrency()
   } = params;
 
   if (!Array.isArray(pendingSlots) || pendingSlots.length === 0) {
@@ -1727,7 +2785,7 @@ async function hydratePendingBlueprintSlots(params) {
 
   const generationResults = await runTasksWithConcurrency(
     generationTasks,
-    getEffectiveOnDemandRequestConcurrency()
+    concurrencyLimit
   );
 
   for (const result of generationResults) {
@@ -1798,7 +2856,12 @@ async function hydratePendingBlueprintSlots(params) {
 async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snapshotId, selectionOptions = {}) {
   if (!snapshotId) throw new Error('Snapshot required');
 
-  const { userId = null, allowRepeat = false, learnerHints = null } = selectionOptions;
+  const {
+    userId = null,
+    allowRepeat = false,
+    learnerHints = null,
+    reservedHashes = []
+  } = selectionOptions;
 
   // Seedable RNG
   const rngSeed = `${seed}-${setNo}`;
@@ -1835,7 +2898,7 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
   const qScale = modeConfig.question_scale || 1.0;
 
   // Track used hashes to avoid duplicates across exam
-  const usedHashes = new Set();
+  const usedHashes = new Set(ensureArray(reservedHashes).filter(Boolean));
   const pendingSlots = [];
 
   for (const group of examSpec.groups) {
@@ -1891,23 +2954,22 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
     blueprint.groups.push(groupBlueprint);
   }
 
-  const eagerPendingSlots = pendingSlots.slice(0, BLUEPRINT_EAGER_SLOT_COUNT);
-  const prefetchPendingSlots = pendingSlots.slice(
-    BLUEPRINT_EAGER_SLOT_COUNT,
-    BLUEPRINT_EAGER_SLOT_COUNT + BLUEPRINT_ON_DEMAND_BATCH_SIZE
-  );
-  const deferredPendingSlots = pendingSlots.slice(
-    BLUEPRINT_EAGER_SLOT_COUNT + BLUEPRINT_ON_DEMAND_BATCH_SIZE
+  const criticalPendingSlots = getCriticalStartPendingSlots(blueprint, pendingSlots);
+  const criticalSlotIds = new Set(criticalPendingSlots.map((entry) => entry?.slot?.slot_id).filter(Boolean));
+  const backgroundPendingSlots = sortPendingSlotsForBackgroundPrefetch(
+    blueprint,
+    pendingSlots,
+    Array.from(criticalSlotIds)
   );
 
   let startPrefetchPromise = null;
-  if (prefetchPendingSlots.length > 0) {
-    prefetchPendingSlots.forEach(({ slot }) => {
-      slot.status = 'prefetching';
+  if (backgroundPendingSlots.length > 0) {
+    backgroundPendingSlots.forEach(({ slot }) => {
+      if (!slot?.mondai_hash) slot.status = 'prefetching';
     });
 
     startPrefetchPromise = hydratePendingBlueprintSlots({
-      pendingSlots: prefetchPendingSlots,
+      pendingSlots: backgroundPendingSlots,
       examSpec,
       level,
       mode,
@@ -1917,15 +2979,22 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
       usedHashes,
       userId,
       allowRepeat,
-      learnerHints
+      learnerHints,
+      concurrencyLimit: 1
     }).then(() => {
-      prefetchPendingSlots.forEach(({ slot }) => {
-        if (!slot?.mondai_hash) slot.status = 'deferred';
+      let changed = false;
+      backgroundPendingSlots.forEach(({ slot }) => {
+        if (slot?.mondai_hash) {
+          slot.status = 'ready';
+          changed = true;
+          return;
+        }
+        slot.status = 'deferred';
       });
-      return true;
+      return changed;
     }).catch((error) => {
       console.warn('[Blueprint] Start prefetch wave failed:', error?.message || error);
-      prefetchPendingSlots.forEach(({ slot }) => {
+      backgroundPendingSlots.forEach(({ slot }) => {
         if (!slot?.mondai_hash) slot.status = 'deferred';
       });
       return false;
@@ -1933,7 +3002,7 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
   }
 
   await hydratePendingBlueprintSlots({
-    pendingSlots: eagerPendingSlots,
+    pendingSlots: criticalPendingSlots,
     examSpec,
     level,
     mode,
@@ -1946,8 +3015,8 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
     learnerHints
   });
 
-  deferredPendingSlots.forEach(({ slot }) => {
-    slot.status = 'deferred';
+  criticalPendingSlots.forEach(({ slot }) => {
+    if (slot?.mondai_hash) slot.status = 'ready';
   });
 
   const missingSlots = blueprint.groups.flatMap((group) =>
@@ -2064,9 +3133,10 @@ const GEMINI_TTS_MODELS = [
 ];
 
 const READING_TYPE_SET = new Set(['reading_short', 'reading_mid', 'reading_long', 'reading_compare', 'reading_info']);
-const LISTENING_TYPE_SET = new Set(['listening_dialogue', 'listening_mono', 'listen_respond', 'listen_integration', 'listen_task']);
+const LISTENING_TYPES = ['listening_task', 'listening_main', 'listening_general', 'listening_quick', 'listening_integrated', 'listening_dialogue', 'listening_mono', 'listen_respond', 'listen_integration', 'listen_task'];
+const LISTENING_TYPE_SET = new Set(LISTENING_TYPES);
 const PASSAGE_REQUIRED_TYPE_SET = new Set(['grammar_passage', ...READING_TYPE_SET]);
-const PASSAGE_FORBIDDEN_TYPE_SET = new Set(['kanji', 'vocab_context', 'vocab_synonym', 'vocab_usage', 'grammar_select', 'grammar_order']);
+const PASSAGE_FORBIDDEN_TYPE_SET = new Set(['kanji', 'vocab_context', 'vocab_synonym', 'vocab_usage', 'grammar_select', 'grammar_order', ...LISTENING_TYPES]);
 const ORDER_PATTERN_RE = /^\s*(?:[1-4][\-\s,>]{1,3}){3}[1-4]\s*$/;
 
 function containsForbiddenPromptMarkup(text) {
@@ -2081,6 +3151,92 @@ function looksJapaneseHeavyText(text) {
   return japaneseChars >= 6 && (japaneseChars / Math.max(value.length, 1)) >= 0.2;
 }
 
+function buildMondaiInstructionsFallback(expectedDef) {
+  const expectedTypes = ensureArray(expectedDef?.types);
+  if (expectedTypes.some((type) => LISTENING_TYPE_SET.has(type))) {
+    return 'Nghe nội dung rồi chọn đáp án đúng nhất.';
+  }
+  if (
+    expectedTypes.some((type) => READING_TYPE_SET.has(type)) ||
+    expectedTypes.includes('grammar_passage')
+  ) {
+    return 'Đọc đoạn văn rồi chọn đáp án đúng nhất.';
+  }
+  return 'Chọn đáp án đúng nhất.';
+}
+
+function buildExplainBriefFallback(expectedPrimaryType, expectedTypes = []) {
+  if (ensureArray(expectedTypes).some((type) => LISTENING_TYPE_SET.has(type))) {
+    return 'Nghe kỹ từ khóa trong lời thoại rồi đối chiếu với đáp án phù hợp nhất.';
+  }
+  if (ensureArray(expectedTypes).some((type) => READING_TYPE_SET.has(type))) {
+    return 'Dựa vào chi tiết trong đoạn văn để loại trừ đáp án không khớp.';
+  }
+  if (expectedPrimaryType === 'grammar_order') {
+    return 'Sắp xếp các mảnh theo trật tự tự nhiên rồi đối chiếu với đáp án.';
+  }
+  if (expectedPrimaryType === 'grammar_passage' || expectedPrimaryType === 'grammar_select') {
+    return 'Xác định điểm ngữ pháp cần dùng rồi chọn mẫu phù hợp với ngữ cảnh.';
+  }
+  if (expectedPrimaryType === 'kanji') {
+    return 'Nhìn vào chữ được đánh dấu rồi chọn cách đọc đúng.';
+  }
+  if (String(expectedPrimaryType || '').startsWith('vocab')) {
+    return 'Dựa vào ngữ cảnh và sắc thái nghĩa để chọn từ phù hợp nhất.';
+  }
+  return 'Dựa vào ngữ cảnh và loại câu hỏi để chọn đáp án phù hợp nhất.';
+}
+
+function buildQuestionTagsFallback(expectedPrimaryType, expectedTypes = []) {
+  const tags = [];
+  if (ensureArray(expectedTypes).some((type) => LISTENING_TYPE_SET.has(type))) tags.push('listening');
+  if (ensureArray(expectedTypes).some((type) => READING_TYPE_SET.has(type))) tags.push('reading');
+  if (expectedPrimaryType) tags.push(String(expectedPrimaryType));
+  if (tags.length === 0 && ensureArray(expectedTypes).length > 0) {
+    tags.push(String(expectedTypes[0]));
+  }
+  if (tags.length === 0) tags.push('practice');
+  return uniqueStrings(tags, 3);
+}
+
+function normalizeMondaiBeforeValidation(mondai, expectedDef) {
+  if (!mondai || typeof mondai !== 'object') return;
+
+  const expectedTypes = ensureArray(expectedDef?.types);
+  const primaryType = expectedTypes[0] || null;
+  const isListening = expectedTypes.some((type) => LISTENING_TYPE_SET.has(type));
+
+  if (!mondai.title_vi || looksJapaneseHeavyText(mondai.title_vi)) {
+    mondai.title_vi = String(expectedDef?.title_vi || mondai.title_vi || expectedDef?.mondai_id || 'Bài tập');
+  }
+  if (!mondai.instructions_vi || looksJapaneseHeavyText(mondai.instructions_vi)) {
+    mondai.instructions_vi = buildMondaiInstructionsFallback(expectedDef);
+  }
+
+  if (isListening) {
+    const passageText = String(mondai?.passage?.text || '').trim();
+    const scriptText = String(mondai?.media?.script_text || '').trim();
+    if (!scriptText && passageText) {
+      mondai.media = { ...(mondai.media || {}), script_text: passageText };
+    }
+    if (mondai?.passage && typeof mondai.passage === 'object') {
+      delete mondai.passage.text;
+      if (!String(mondai.passage.title || '').trim()) {
+        delete mondai.passage;
+      }
+    }
+  }
+
+  ensureArray(mondai.items).forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    if (isListening && item.media) {
+      delete item.media;
+    }
+    if (!item.explain_brief || looksJapaneseHeavyText(item.explain_brief)) {
+      item.explain_brief = buildExplainBriefFallback(primaryType, expectedTypes);
+    }
+  });
+}
 function validateQuestionItem(item, options = {}) {
   const errors = [];
   const expectedTypes = Array.isArray(options.expectedTypes) ? options.expectedTypes : [];
@@ -2109,8 +3265,14 @@ function validateQuestionItem(item, options = {}) {
     if (new Set(normalizedChoices).size !== normalizedChoices.length) errors.push('choices_duplicate');
   }
   if (typeof item.answer_index !== 'number' || item.answer_index < 0 || item.answer_index > 3) errors.push('answer_index_invalid');
+  if (!item.explain_brief || typeof item.explain_brief !== 'string' || looksJapaneseHeavyText(item.explain_brief)) {
+    item.explain_brief = buildExplainBriefFallback(expectedPrimaryType, expectedTypes);
+  }
   if (!item.explain_brief || typeof item.explain_brief !== 'string') errors.push('missing_explain_brief');
   if (item.explain_brief && looksJapaneseHeavyText(item.explain_brief)) errors.push('explain_not_vietnamese');
+  if (!Array.isArray(item.tags) || item.tags.length === 0) {
+    item.tags = buildQuestionTagsFallback(expectedPrimaryType, expectedTypes);
+  }
   if (!Array.isArray(item.tags) || item.tags.length === 0) errors.push('missing_tags');
   if (item.media && typeof item.media !== 'object') errors.push('media_invalid');
   if (expectedPrimaryType === 'kanji' && item.prompt && !/\[\[[^\]]+\]\]/.test(item.prompt)) errors.push('kanji_missing_highlight');
@@ -2154,6 +3316,8 @@ function buildMondaiChunkValidator(mondaiToGenerate, examSpec, mode) {
       const isListening = expectedDef?.types?.some((type) => LISTENING_TYPE_SET.has(type));
       const requiresPassage = expectedDef?.types?.some((type) => PASSAGE_REQUIRED_TYPE_SET.has(type));
       const forbidsPassage = expectedDef?.types?.every((type) => PASSAGE_FORBIDDEN_TYPE_SET.has(type));
+
+      normalizeMondaiBeforeValidation(mondai, expectedDef);
 
       if (!mondai.mondai_id || typeof mondai.mondai_id !== 'string') errors.push(`mondai_${expectedIndex}_missing_mondai_id`);
       if (!mondai.title_vi || typeof mondai.title_vi !== 'string') errors.push(`mondai_${expectedIndex}_missing_title_vi`);
@@ -2479,7 +3643,7 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
               ? question.choices[userAnswer]
               : (uiLocale === 'en' ? '(unanswered)' : '(chưa trả lời)'),
             correct_answer: question.choices[question.correct_index],
-            passage_snippet: question.passage ? shortText(question.passage) : ''
+            passage_snippet: question.passage ? shortText(question.passage, 140) : ''
           });
         }
       }
@@ -2502,6 +3666,10 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
       });
 
       if (wrongQuestions.length > 0) {
+        const analysisConfig = getDetailedGradeAnalysisRunConfig({
+          wrongQuestions,
+          totalCount
+        });
         const detailedPrompt = buildDetailedGradeAnalysisPrompt({
           uiLocale,
           examMeta: {
@@ -2514,13 +3682,17 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
           strongTags,
           scoreByGroup,
           userLearningContext: buildUserLearningContext(userData, examMeta, uiLocale),
-          fallbackSummary: analysisSummary
+          fallbackSummary: analysisSummary,
+          responseProfile: analysisConfig.responseProfile
         });
         const analysisResult = await runJsonTask({
           task: 'explain',
           prompt: detailedPrompt,
           validateResult: buildDetailedGradeAnalysisValidator(wrongQuestions.map((question) => question.id)),
-          maxTokens: 8192,
+          maxTokens: analysisConfig.maxTokens,
+          timeoutMs: analysisConfig.timeoutMs,
+          preferredProviders: analysisConfig.preferredProviders,
+          preferredStageNames: analysisConfig.preferredStageNames,
           temperature: 0.2
         });
 
@@ -2690,6 +3862,181 @@ function parseJsonb(value, fallback = {}) {
   } catch {
     return fallback;
   }
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function formatDateYmd(date = new Date()) {
+  const value = new Date(date);
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function addDaysToDateYmd(dateYmd, days) {
+  const date = new Date(`${dateYmd}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + Number(days || 0));
+  return formatDateYmd(date);
+}
+
+async function loadExamBaseSpec(examType = 'jlpt') {
+  const normalizedExamType = String(examType || 'jlpt').toLowerCase();
+  if (examSpecTemplateCache.has(normalizedExamType)) {
+    return cloneJson(examSpecTemplateCache.get(normalizedExamType));
+  }
+
+  const specPath = path.join(__dirname, '../web/public/exams', `${normalizedExamType}_base.json`);
+  const raw = await fs.readFile(specPath, 'utf-8');
+  const spec = JSON.parse(raw);
+  examSpecTemplateCache.set(normalizedExamType, spec);
+  return cloneJson(spec);
+}
+
+async function buildDailyBankExamSpec(level, examType = 'jlpt') {
+  const normalizedLevel = String(level || 'N5').toUpperCase();
+  const baseSpec = await loadExamBaseSpec(examType);
+  return {
+    ...baseSpec,
+    exam_id: `${String(examType || 'jlpt').toLowerCase()}_${normalizedLevel}`,
+    level: normalizedLevel,
+    display_name_vi: `${baseSpec.display_name_vi || String(examType || 'JLPT').toUpperCase()} ${normalizedLevel}`
+  };
+}
+
+function getExamMondaiIds(examSpec) {
+  return ensureArray(examSpec?.groups)
+    .flatMap((group) => ensureArray(group?.mondai).map((mondai) => String(mondai?.mondai_id || '').toUpperCase()))
+    .filter(Boolean);
+}
+
+function filterExamSpecByMondaiIds(examSpec, allowedMondaiIds) {
+  if (!Array.isArray(allowedMondaiIds) || allowedMondaiIds.length === 0) return cloneJson(examSpec);
+
+  const allowed = new Set(allowedMondaiIds.map((item) => String(item || '').toUpperCase()));
+  const filteredSpec = cloneJson(examSpec);
+  filteredSpec.groups = ensureArray(filteredSpec.groups)
+    .map((group) => ({
+      ...group,
+      mondai: ensureArray(group?.mondai).filter((mondai) => allowed.has(String(mondai?.mondai_id || '').toUpperCase()))
+    }))
+    .filter((group) => ensureArray(group.mondai).length > 0);
+
+  if (filteredSpec?.official_time_limits_sec?.groups) {
+    filteredSpec.official_time_limits_sec.groups = ensureArray(filteredSpec.official_time_limits_sec.groups)
+      .filter((group) => filteredSpec.groups.some((entry) => entry.group_id === group.group_id));
+    filteredSpec.official_time_limits_sec.overall_time_sec = ensureArray(filteredSpec.official_time_limits_sec.groups)
+      .reduce((sum, group) => sum + Number(group?.time_sec || 0), 0);
+  }
+
+  return filteredSpec;
+}
+
+function buildExamVariantSpec(examSpec, variantKey) {
+  const variant = DAILY_BANK_VARIANT_MAP.get(variantKey);
+  if (!variant) {
+    throw new Error(`Unsupported daily bank variant: ${variantKey}`);
+  }
+  if (!Array.isArray(variant.mondaiIds) || variant.mondaiIds.length === 0) {
+    return cloneJson(examSpec);
+  }
+  return filterExamSpecByMondaiIds(examSpec, variant.mondaiIds);
+}
+
+function normalizeMondaiIdList(values, limit = 64) {
+  return uniqueStrings(
+    ensureArray(values).map((value) => String(value || '').toUpperCase()),
+    limit
+  ).sort();
+}
+
+function getDailyBankFullVariantMondaiIds() {
+  return normalizeMondaiIdList(
+    DAILY_BANK_VARIANTS.flatMap((variant) => Array.isArray(variant.mondaiIds) ? variant.mondaiIds : []),
+    64
+  );
+}
+
+function getRequestedMondaiIds(examSpec) {
+  return normalizeMondaiIdList(getExamMondaiIds(examSpec), 64);
+}
+
+function inferExamVariantKey(examSpec) {
+  const normalizedIds = getRequestedMondaiIds(examSpec);
+  if (normalizedIds.length === 0) return 'custom:empty';
+
+  const joined = normalizedIds.join('|');
+  if (joined === getDailyBankFullVariantMondaiIds().join('|')) {
+    return 'full';
+  }
+  if (DAILY_BANK_EXACT_VARIANT_LOOKUP.has(joined)) {
+    return DAILY_BANK_EXACT_VARIANT_LOOKUP.get(joined);
+  }
+  return `custom:${joined}`;
+}
+
+function filterBlueprintByMondaiIds(blueprint, allowedMondaiIds) {
+  const normalizedIds = normalizeMondaiIdList(allowedMondaiIds, 64);
+  if (normalizedIds.length === 0) return cloneJson(blueprint);
+
+  const allowed = new Set(normalizedIds);
+  const filteredBlueprint = cloneJson(blueprint);
+  filteredBlueprint.groups = ensureArray(filteredBlueprint?.groups)
+    .map((group) => ({
+      ...group,
+      mondai_slots: ensureArray(group?.mondai_slots)
+        .filter((slot) => allowed.has(String(slot?.mondai_id || '').toUpperCase()))
+    }))
+    .filter((group) => ensureArray(group?.mondai_slots).length > 0);
+
+  if (filteredBlueprint.groups.length === 0) return null;
+  if (!filteredBlueprint.meta) filteredBlueprint.meta = {};
+  filteredBlueprint.meta.requested_mondai_ids = normalizedIds;
+  return filteredBlueprint;
+}
+
+function inferPublishedVariantCandidates(examSpecOrMondaiIds) {
+  const normalizedIds = Array.isArray(examSpecOrMondaiIds)
+    ? normalizeMondaiIdList(examSpecOrMondaiIds, 64)
+    : getRequestedMondaiIds(examSpecOrMondaiIds);
+
+  if (normalizedIds.length === 0) return [];
+
+  const joined = normalizedIds.join('|');
+  const fullJoined = getDailyBankFullVariantMondaiIds().join('|');
+  if (joined === fullJoined) {
+    return ['full'];
+  }
+
+  const exact = DAILY_BANK_EXACT_VARIANT_LOOKUP.get(joined);
+  if (exact) {
+    return exact === 'full' ? ['full'] : [exact, 'full'];
+  }
+
+  const containingKeys = DAILY_BANK_VARIANTS
+    .filter((variant) => variant.key !== 'full' && Array.isArray(variant.mondaiIds))
+    .filter((variant) => {
+      const variantIds = normalizeMondaiIdList(variant.mondaiIds, 64);
+      return normalizedIds.every((id) => variantIds.includes(id));
+    })
+    .sort((left, right) => ensureArray(left.mondaiIds).length - ensureArray(right.mondaiIds).length)
+    .map((variant) => variant.key);
+
+  return uniqueStrings([...containingKeys, 'full'], DAILY_BANK_VARIANTS.length + 1);
+}
+
+function buildPublishedExamTitle({ level, mode, variantKey, setNo, bankDateYmd }) {
+  const variant = DAILY_BANK_VARIANT_MAP.get(variantKey);
+  const variantLabel = variant?.title || variantKey;
+  return `[DailyBank ${bankDateYmd}] JLPT ${level} ${mode} ${variantLabel} #${setNo}`;
+}
+
+function buildPublishedExamDescription({ level, mode, variantKey, bankDateYmd }) {
+  const variant = DAILY_BANK_VARIANT_MAP.get(variantKey);
+  const variantLabel = variant?.title || variantKey;
+  return `Prebuilt daily bank for JLPT ${level} ${mode} ${variantLabel} on ${bankDateYmd}`;
 }
 
 // ============ User Management ============
@@ -3135,7 +4482,7 @@ function buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGener
   // Reading type IDs for special handling
   const readingTypes = ['reading_short', 'reading_mid', 'reading_long', 'reading_compare', 'reading_info'];
   // Listening type IDs
-  const listeningTypes = ['listening_dialogue', 'listening_mono', 'listen_respond', 'listen_integration', 'listen_task'];
+  const listeningTypes = LISTENING_TYPES;
 
   // Current chunk mondai details
   const mondaiInfo = mondaiToGenerate.map((m, idx) => {
@@ -3161,10 +4508,14 @@ function buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGener
       return `  Slot ${promptSlot}: ${m.mondai_id} (${m.title_vi}) | official label: ${officialLabel}
     ${totalQuestions} questions, types: ${m.types.join(', ')}
     ★★★ LISTENING AUDIO RULES ★★★
-    - Put script_text at MONDAI level: mondai.media.script_text (NOT in items)
-    - Use dialogue format: "A: こんにちは\nB: はい、こんにちは" (preferred for multi-voice TTS)
-    - If monologue, still place at mondai.media.script_text
-    - items[].media MUST be null or omitted`;
+    - This is a listening mondai. It MUST include mondai.media.script_text.
+    - Put script_text at MONDAI level only: mondai.media.script_text (NOT in items)
+    - Use natural Japanese audio transcript only. No headers, no explanations inside script_text.
+    - Preferred script format for dialogue: "A: こんにちは\nB: はい、こんにちは"
+    - If monologue, still place the full transcript in mondai.media.script_text
+    - For listening mondai, omit passage.text entirely
+    - items[].media MUST be null or omitted
+    - title_vi, instructions_vi, and every explain_brief MUST stay in Vietnamese`;
     }
 
     return `  Slot ${promptSlot}: ${m.mondai_id} (${m.title_vi}) | official label: ${officialLabel}
@@ -3234,7 +4585,7 @@ ${usedVocabulary.length > 0 ? `Sample Vocabulary: ${usedVocabulary.slice(0, 6).j
       return `- ${m.mondai_id}: include a short passage.text and make all ${totalQuestions} questions depend on that passage context; do not generate isolated grammar questions here.`;
     }
     if (isListening) {
-      return `- ${m.mondai_id}: put all audio script in mondai.media.script_text only; items must not contain item.media; no passage.text for listening mondai.`;
+      return `- ${m.mondai_id}: this is listening content, so put all audio transcript in mondai.media.script_text only; items must not contain item.media; do not create passage.text; keep explain_brief in Vietnamese and keep script_text as natural Japanese audio lines only.`;
     }
     if (primaryType === 'grammar_order') {
       return `- ${m.mondai_id}: each prompt must show 4 numbered fragments (1.-4. or ①-④) and all choices must be order patterns such as "1-3-2-4", not full sentences.`;
@@ -3407,6 +4758,78 @@ QUESTION ID RULES
 GENERATE JSON NOW (NO MARKDOWN):`;
 }
 
+function mondaiBatchIncludesListening(mondaiBatch = []) {
+  return ensureArray(mondaiBatch).some((mondai) =>
+    ensureArray(mondai?.types).some((type) => LISTENING_TYPE_SET.has(type))
+  );
+}
+
+function getMondaiGenerationRunConfig(mondaiBatch = []) {
+  const includesListening = mondaiBatchIncludesListening(mondaiBatch);
+  if (!includesListening) {
+    return {
+      temperature: 0.8,
+      preferredProviders: undefined,
+      preferredStageNames: undefined
+    };
+  }
+
+  return {
+    temperature: 0.6,
+    preferredProviders: ['gemini', 'openrouter'],
+    preferredStageNames: [
+      'gemini-key-a',
+      'gemini-key-b',
+      'gemini-key-a-compat',
+      'gemini-key-b-compat',
+      'openrouter-secondary',
+      'openrouter-primary'
+    ]
+  };
+}
+
+function buildMondaiChunkRepairPrompt({
+  originalPrompt,
+  rawText,
+  validationErrors = [],
+  mondaiBatch = [],
+  examSpec,
+  mode
+}) {
+  const modeConfig = examSpec?.modes?.[mode] || DEFAULT_MODES[mode] || DEFAULT_MODES.official || { question_scale: 1 };
+  const includesListening = mondaiBatchIncludesListening(mondaiBatch);
+  const expectedSummary = ensureArray(mondaiBatch).map((mondaiDef) => {
+    const expectedCount = Math.max(1, Math.round((mondaiDef?.count_official || 1) * (modeConfig.question_scale || 1)));
+    const typeList = ensureArray(mondaiDef?.types).join(', ') || 'unknown';
+    return `- ${mondaiDef?.mondai_id || 'unknown'}: ${expectedCount} questions, types: ${typeList}`;
+  }).join('\n');
+
+  return `You are repairing a generated exam JSON payload for a strict validator.
+
+EXPECTED MONDAI IN THIS BATCH:
+${expectedSummary || '- unknown'}
+
+ORIGINAL TASK:
+${String(originalPrompt || '').slice(0, 12000)}
+
+CURRENT OUTPUT:
+${String(rawText || '').slice(0, 12000)}
+
+VALIDATION ERRORS:
+${validationErrors.length > 0 ? validationErrors.join('\n') : 'invalid_json'}
+
+STRICT REPAIR RULES:
+1. Return valid JSON only.
+2. Preserve the same mondai order and same question counts unless the validator requires a fix.
+3. Keep prompts and choices in ${examSpec?.language || 'ja-JP'} unless the schema says Vietnamese.
+4. title_vi, instructions_vi, and explain_brief must be Vietnamese.
+5. explain_brief must be a short Vietnamese teaching note, not Japanese.
+6. Non-listening mondai must not contain media.script_text.
+${includesListening ? '7. Listening mondai must store the full transcript only at mondai.media.script_text.\n8. Listening mondai must not use passage.text.\n9. items[].media must be null or omitted for listening.\n10. script_text must be natural Japanese transcript lines only, with no Vietnamese notes or headings.' : '7. Do not add script_text unless the mondai is a listening type.'}
+
+FIX THE JSON NOW.`;
+}
+
 function buildGradeTestPrompt(test, answers, uiLocale = 'vi') {
   const locale = normalizeUiLocale(uiLocale);
   const feedbackLanguage = getFeedbackLanguageName(locale);
@@ -3485,6 +4908,27 @@ IMPORTANT:
                               GENERATE JSON NOW:`;
 }
 
+function getDetailedGradeAnalysisRunConfig(options = {}) {
+  const wrongCount = Math.max(0, ensureArray(options.wrongQuestions).length);
+
+  return {
+    maxTokens: wrongCount <= 1 ? 2304 : wrongCount <= 3 ? 3072 : wrongCount <= 6 ? 4608 : 6144,
+    timeoutMs: wrongCount <= 1 ? 45000 : wrongCount <= 3 ? 60000 : 90000,
+    preferredProviders: wrongCount <= 3 ? ['gemini', 'openrouter'] : ['openrouter', 'gemini'],
+    preferredStageNames: wrongCount <= 3
+      ? ['gemini-key-a', 'gemini-key-b', 'gemini-key-a-compat', 'gemini-key-b-compat', 'openrouter-secondary', 'openrouter-primary']
+      : ['openrouter-secondary', 'gemini-key-a', 'gemini-key-b', 'gemini-key-a-compat', 'gemini-key-b-compat', 'openrouter-primary'],
+    responseProfile: {
+      maxStudyPlanSteps: wrongCount <= 3 ? 2 : 3,
+      maxFocusTags: wrongCount <= 3 ? 4 : 6,
+      maxExamplesPerQuestion: wrongCount <= 2 ? 1 : 2,
+      maxReviewTasksPerQuestion: 2,
+      maxPersonalizationHints: 3,
+      maxNextGoals: wrongCount <= 3 ? 2 : 3
+    }
+  };
+}
+
 function buildDetailedGradeAnalysisPrompt({
   uiLocale = 'vi',
   examMeta = {},
@@ -3493,10 +4937,17 @@ function buildDetailedGradeAnalysisPrompt({
   strongTags = [],
   scoreByGroup = {},
   userLearningContext = '',
-  fallbackSummary = {}
+  fallbackSummary = {},
+  responseProfile = {}
 }) {
   const locale = normalizeUiLocale(uiLocale);
   const feedbackLanguage = getFeedbackLanguageName(locale);
+  const maxStudyPlanSteps = Math.max(1, Number(responseProfile.maxStudyPlanSteps || 2));
+  const maxFocusTags = Math.max(1, Number(responseProfile.maxFocusTags || 4));
+  const maxExamplesPerQuestion = Math.max(1, Number(responseProfile.maxExamplesPerQuestion || 1));
+  const maxReviewTasksPerQuestion = Math.max(1, Number(responseProfile.maxReviewTasksPerQuestion || 2));
+  const maxPersonalizationHints = Math.max(1, Number(responseProfile.maxPersonalizationHints || 3));
+  const maxNextGoals = Math.max(1, Number(responseProfile.maxNextGoals || 2));
   const summaryJson = JSON.stringify({
     weak_tags: uniqueStrings(weakTags, 8),
     strong_tags: uniqueStrings(strongTags, 6),
@@ -3538,14 +4989,14 @@ Return RAW JSON ONLY with this schema:
   "summary": {
     "recommendation": "<personalized study recommendation in ${feedbackLanguage}>",
     "learner_summary": "<short diagnostic summary in ${feedbackLanguage}>",
-    "study_plan": ["<step 1>", "<step 2>"],
+    "study_plan": ["<up to ${maxStudyPlanSteps} steps>"],
     "strength_tags": ["<tag>"],
     "weak_tags": ["<tag>"],
-    "focus_tags": ["<tag>"],
+    "focus_tags": ["<up to ${maxFocusTags} tags>"],
     "confusion_patterns": ["<pattern>"],
-    "personalization_hints": ["<how to explain for this learner later>"],
+    "personalization_hints": ["<up to ${maxPersonalizationHints} hints>"],
     "explanation_style": "step_by_step",
-    "next_goals": ["<goal>"]
+    "next_goals": ["<up to ${maxNextGoals} goals>"]
   },
   "question_feedback": {
     "<question_id>": {
@@ -3574,15 +5025,19 @@ Rules:
 - "review_tasks" must be actionable, not abstract.
 - The first review task should be a small action the learner can do in about 2 minutes.
 - The second review task should make the learner produce, compare, or explain something.
+- Return at most ${maxReviewTasksPerQuestion} review tasks per question.
 - "extra_examples" should be short, natural, and directly related to the mistake.
+- Return at most ${maxExamplesPerQuestion} extra examples per question.
 - "extra_examples" should reinforce the same target pattern and avoid introducing adjacent variants or exceptions unless truly necessary.
-- Keep "focus_tags" narrower than "weak_tags".
+- Keep "focus_tags" narrower than "weak_tags" and limit them to ${maxFocusTags}.
+- Limit "study_plan" to ${maxStudyPlanSteps} short steps.
+- Limit "personalization_hints" to ${maxPersonalizationHints} short hints.
+- Limit "next_goals" to ${maxNextGoals} clear goals.
 - "personalization_hints" should help future explanations fit this learner, for example: validate the likely intuition first, then contrast, then give one next-time clue.
 - "explanation_style" must be one of: step_by_step, contrastive, example_first.
 - Prefer short sentences and direct learner-facing language.
 - Output valid JSON only. No markdown. No commentary outside JSON.`;
 }
-
 function buildTtsTextPrompt(text, language) {
   const langName = language === 'ja-JP' ? 'Japanese' : language === 'zh-CN' ? 'Chinese' : 'English';
 
@@ -3781,6 +5236,140 @@ app.post('/api/admin/llm-healthcheck', async (req, res) => {
 
 // ============ Admin Warmup Endpoint ============
 
+function getNextDailyBankRunDelayMs(now = new Date()) {
+  const next = new Date(now);
+  next.setHours(DAILY_BANK_SCHEDULE_HOUR, DAILY_BANK_SCHEDULE_MINUTE, 0, 0);
+  if (next <= now) {
+    next.setDate(next.getDate() + 1);
+  }
+  return next.getTime() - now.getTime();
+}
+
+function scheduleDailyBankWorkflowLoop() {
+  if (!DAILY_BANK_ENABLED || IS_VERCEL) return;
+
+  if (dailyBankRuntimeState.timer) {
+    clearTimeout(dailyBankRuntimeState.timer);
+    dailyBankRuntimeState.timer = null;
+  }
+
+  const delayMs = getNextDailyBankRunDelayMs();
+  dailyBankRuntimeState.timer = setTimeout(async () => {
+    try {
+      await runDailyBankWorkflow({ dateYmd: formatDateYmd() });
+    } catch (error) {
+      console.error('[DailyBank] Scheduled run failed:', error);
+    } finally {
+      scheduleDailyBankWorkflowLoop();
+    }
+  }, delayMs);
+
+  if (typeof dailyBankRuntimeState.timer.unref === 'function') {
+    dailyBankRuntimeState.timer.unref();
+  }
+
+  console.log(`[DailyBank] Next scheduled run in ${Math.round(delayMs / 1000)}s`);
+}
+
+async function maybeRunDailyBankOnStartup() {
+  if (!DAILY_BANK_ENABLED || !DAILY_BANK_RUN_ON_STARTUP) return;
+  if (!(await db.initDb())) return;
+
+  const today = formatDateYmd();
+  const existingRes = await db.query(
+    'SELECT id FROM published_exams WHERE bank_date_ymd = $1 AND is_active = true LIMIT 1',
+    [today]
+  );
+  if (existingRes.rows.length > 0) {
+    dailyBankRuntimeState.lastRunDateYmd = today;
+    return;
+  }
+
+  try {
+    console.log(`[DailyBank] Startup catch-up run for ${today}`);
+    await runDailyBankWorkflow({ dateYmd: today });
+  } catch (error) {
+    console.error('[DailyBank] Startup run failed:', error);
+  }
+}
+
+async function maybeSeedCurrentDayRareBucketsOnStartup() {
+  if (!CURRENT_DAY_RARE_BUCKET_WARM_ENABLED || !CURRENT_DAY_RARE_BUCKET_WARM_ON_STARTUP || IS_VERCEL) return;
+  if (!(await db.initDb())) return;
+
+  const today = formatDateYmd();
+  const taskFactories = [];
+
+  for (const level of DAILY_BANK_LEVELS) {
+    for (const mode of DAILY_BANK_MODES) {
+      taskFactories.push(async () => {
+        const examSpec = await buildDailyBankExamSpec(level);
+        const snapshotId = await ensurePoolSnapshot(examSpec, level, today, 'startup-rare-warm', mode);
+        scheduleCurrentDayRareBucketWarmup({
+          snapshotId,
+          examSpec,
+          level,
+          mode,
+          dateYmd: today,
+          trigger: 'startup-rare-warm'
+        });
+        return { level, mode, snapshotId };
+      });
+    }
+  }
+
+  const scheduled = await runTasksWithConcurrency(taskFactories, CURRENT_DAY_RARE_BUCKET_WARM_CONCURRENCY);
+  const scheduledCount = ensureArray(scheduled).filter((entry) => !!entry?.snapshotId).length;
+  console.log(`[RareWarm] Startup scheduled current-day rare seeding for ${scheduledCount} snapshots on ${today}`);
+}
+
+app.get('/api/admin/daily-bank/status', async (req, res) => {
+  if (!isAuthorizedAdminRequest(req)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  return res.json({
+    enabled: DAILY_BANK_ENABLED,
+    runOnStartup: DAILY_BANK_RUN_ON_STARTUP,
+    retentionDays: DAILY_BANK_RETENTION_DAYS,
+    setCount: DAILY_BANK_SET_COUNT,
+    targetPerBucket: DAILY_BANK_TARGET_PER_BUCKET,
+    levels: DAILY_BANK_LEVELS,
+    modes: DAILY_BANK_MODES,
+    variants: DAILY_BANK_VARIANTS.map((variant) => variant.key),
+    lastRunDateYmd: dailyBankRuntimeState.lastRunDateYmd,
+    lastStartedAt: dailyBankRuntimeState.lastStartedAt,
+    lastFinishedAt: dailyBankRuntimeState.lastFinishedAt,
+    running: dailyBankRuntimeState.running,
+    scheduledHour: DAILY_BANK_SCHEDULE_HOUR,
+    scheduledMinute: DAILY_BANK_SCHEDULE_MINUTE,
+    lastResult: dailyBankRuntimeState.lastResult,
+    currentDayRareWarm: summarizeCurrentDayRareBucketWarmState(8)
+  });
+});
+
+app.post('/api/admin/daily-bank/run', async (req, res) => {
+  if (!isAuthorizedAdminRequest(req)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const result = await runDailyBankWorkflow({
+      dateYmd: req.body?.dateYmd || req.body?.date_ymd || formatDateYmd(),
+      levels: req.body?.levels,
+      modes: req.body?.modes,
+      variants: req.body?.variants
+    });
+    return res.json(result);
+  } catch (error) {
+    console.error('[DailyBank] Manual run failed:', error);
+    if (isTemporaryUnavailableError(error)) {
+      return res.status(503).json(getTemporaryUnavailablePayload(error));
+    }
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 /**
  * GET /api/admin/warmup - Pre-fill pool buckets (for cron/admin use)
  * Authentication: x-warmup-secret header OR ?secret= query param
@@ -3848,6 +5437,8 @@ app.get(['/api/admin/warmup', '/api/admin/warmup/:levelParam/:modeParam'], async
     if (!snapshotId) {
       return res.status(500).json({ error: 'Failed to create snapshot' });
     }
+
+    await bootstrapRareBucketsForSnapshot(snapshotId, examSpec, level, mode);
 
     // Run warmPool with bounded limits
     const stats = await warmPool(snapshotId, examSpec, level, mode, dateYmd, {
@@ -3928,6 +5519,8 @@ app.post('/api/admin/warm-pool', async (req, res) => {
       return res.status(500).json({ error: 'Failed to create snapshot' });
     }
 
+    await bootstrapRareBucketsForSnapshot(snapshotId, examSpec, level, mode);
+
     // Build round-robin bucket list across all groups
     const groupBuckets = examSpec.groups.map(group => {
       return group.mondai.filter(m => m.types?.[0]).map(mondaiDef => ({
@@ -3986,7 +5579,7 @@ app.post('/api/admin/warm-pool', async (req, res) => {
     };
 
     // Process with concurrency limit
-    const bucketsToProcess = interleaved.slice(0, maxBuckets);
+    const bucketsToProcess = sortBucketsForWarmup(interleaved).slice(0, maxBuckets);
     const semaphore = { active: 0, queue: [] };
 
     const acquire = () => new Promise(resolve => {
@@ -4123,7 +5716,7 @@ app.post('/api/admin/embeddings/backfill', handleEmbeddingBackfillRequest);
 /**
  * POST /api/admin/cleanup - Remove old pool snapshots and items
  * Authentication: x-warmup-secret header
- * Body: { keepDays?: number } (default 14)
+ * Body: { keepDays?: number } (default 30)
  */
 app.post('/api/admin/cleanup', async (req, res) => {
   const secret = req.headers['x-warmup-secret'];
@@ -4137,34 +5730,10 @@ app.post('/api/admin/cleanup', async (req, res) => {
       return res.status(503).json({ error: 'DB unavailable' });
     }
 
-    const keepDays = Math.max(1, parseInt(req.body?.keepDays) || 14);
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - keepDays);
-    const cutoffYmd = cutoffDate.toISOString().split('T')[0];
-
-    console.log(`[Cleanup] Removing pool data older than ${cutoffYmd} (${keepDays} days)`);
-
-    // Delete items linked to old snapshots first (FK safety)
-    const itemsRes = await db.query(
-      `DELETE FROM pool_snapshot_items WHERE snapshot_id IN (
-        SELECT id FROM pool_snapshots WHERE date_ymd < $1
-      )`, [cutoffYmd]
-    );
-
-    // Delete the old snapshots
-    const snapsRes = await db.query(
-      'DELETE FROM pool_snapshots WHERE date_ymd < $1', [cutoffYmd]
-    );
-
-    const result = {
-      deletedSnapshots: snapsRes.rowCount || 0,
-      deletedItems: itemsRes.rowCount || 0,
-      cutoffDate: cutoffYmd,
-      keepDays
-    };
-
-    console.log(`[Cleanup] Done: ${result.deletedSnapshots} snapshots, ${result.deletedItems} items removed`);
-    res.json(result);
+    const keepDays = Math.max(1, parseInt(req.body?.keepDays) || DAILY_BANK_RETENTION_DAYS);
+    const result = await cleanupExpiredDailyBankData({ keepDays });
+    console.log(`[Cleanup] Done for cutoff ${result.cutoffYmd} (${result.keepDays} days)`);
+    res.json({ ok: true, ...result });
 
   } catch (err) {
     console.error('[Cleanup] Error:', err);
@@ -4592,6 +6161,9 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
     const plan = user.plan || 'free';
     const level = examSpec.level || examSpec.default_level;
     const learnerHints = buildUserExamGenerationHints(user, { exam_id: examSpec.exam_id, level, mode });
+    const variantKey = inferExamVariantKey(examSpec);
+    const requestedMondaiIds = getRequestedMondaiIds(examSpec);
+    const fallbackVariantKeys = inferPublishedVariantCandidates(requestedMondaiIds).filter((key) => key !== variantKey);
     const repeatAllowed = !!(allow_repeat ?? allowRepeat ?? false);
     const explicitRetake = !!(force_retake ?? forceRetake ?? false);
 
@@ -4637,6 +6209,20 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
       return result.rows[0];
     };
 
+    const trySelectPublishedBlueprint = async () => {
+      if (explicitRetake) return null;
+      return selectPublishedExamBlueprint({
+        userId,
+        examId: examSpec.exam_id,
+        level,
+        mode,
+        variantKey,
+        fallbackVariantKeys,
+        requestedMondaiIds,
+        allowRepeat: repeatAllowed
+      });
+    };
+
     if (forceCreateNew) {
       const MAX_ATTEMPTS = 5;
       let created = false;
@@ -4649,19 +6235,36 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
         finalSetNo = maxRes.rows[0].next_set;
         console.log(`[Exam] New set_no: ${finalSetNo} (attempt ${attempt + 1})`);
 
-        const today = new Date().toISOString().split('T')[0];
-        const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
-        const seed = crypto.randomUUID();
-        const { blueprint: newBlueprint, startPrefetchPromise } = await buildExamBlueprint(
-          examSpec,
-          level,
-          mode,
-          seed,
-          finalSetNo,
-          plan,
-          snapshotId,
-          { userId, allowRepeat: repeatAllowed || explicitRetake, learnerHints }
-        );
+        const today = formatDateYmd();
+        const publishedSelection = await trySelectPublishedBlueprint();
+        let newBlueprint;
+        let startPrefetchPromise = null;
+        let seed = crypto.randomUUID();
+
+        if (publishedSelection?.blueprint) {
+          newBlueprint = cloneJson(publishedSelection.blueprint);
+          if (!newBlueprint.meta) newBlueprint.meta = {};
+          newBlueprint.meta.source = 'published-bank';
+          newBlueprint.meta.published_exam_id = publishedSelection.id;
+          newBlueprint.meta.variant_key = publishedSelection.variant_key || variantKey;
+          newBlueprint.meta.bank_date_ymd = publishedSelection.bank_date_ymd || today;
+          seed = newBlueprint.meta.seed || seed;
+        } else {
+          const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
+          await bootstrapRareBucketsForSnapshot(snapshotId, examSpec, level, mode);
+          const generated = await buildExamBlueprint(
+            examSpec,
+            level,
+            mode,
+            seed,
+            finalSetNo,
+            plan,
+            snapshotId,
+            { userId, allowRepeat: repeatAllowed || explicitRetake, learnerHints }
+          );
+          newBlueprint = generated.blueprint;
+          startPrefetchPromise = generated.startPrefetchPromise;
+        }
         const newInstanceKey = crypto.randomUUID();
 
         try {
@@ -4681,6 +6284,13 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
             instanceKey: newInstanceKey,
             blueprint: newBlueprint
           });
+          if (publishedSelection?.id) {
+            await recordPublishedExamServed({
+              userId,
+              publishedExamId: publishedSelection.id,
+              instanceKey: newInstanceKey
+            });
+          }
 
           instanceKey = newInstanceKey;
           blueprint = newBlueprint;
@@ -4712,19 +6322,36 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
           WHERE instance_key = $1
         `, [instanceKey, JSON.stringify({ cursors: {} })]);
       } else {
-        const today = new Date().toISOString().split('T')[0];
-        const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
-        const seed = crypto.randomUUID();
-        const { blueprint: newBlueprint, startPrefetchPromise } = await buildExamBlueprint(
-          examSpec,
-          level,
-          mode,
-          seed,
-          finalSetNo,
-          plan,
-          snapshotId,
-          { userId, allowRepeat: repeatAllowed || explicitRetake, learnerHints }
-        );
+        const today = formatDateYmd();
+        const publishedSelection = await trySelectPublishedBlueprint();
+        let newBlueprint;
+        let startPrefetchPromise = null;
+        let seed = crypto.randomUUID();
+
+        if (publishedSelection?.blueprint) {
+          newBlueprint = cloneJson(publishedSelection.blueprint);
+          if (!newBlueprint.meta) newBlueprint.meta = {};
+          newBlueprint.meta.source = 'published-bank';
+          newBlueprint.meta.published_exam_id = publishedSelection.id;
+          newBlueprint.meta.variant_key = publishedSelection.variant_key || variantKey;
+          newBlueprint.meta.bank_date_ymd = publishedSelection.bank_date_ymd || today;
+          seed = newBlueprint.meta.seed || seed;
+        } else {
+          const snapshotId = await ensurePoolSnapshot(examSpec, level, today, plan, mode);
+          await bootstrapRareBucketsForSnapshot(snapshotId, examSpec, level, mode);
+          const generated = await buildExamBlueprint(
+            examSpec,
+            level,
+            mode,
+            seed,
+            finalSetNo,
+            plan,
+            snapshotId,
+            { userId, allowRepeat: repeatAllowed || explicitRetake, learnerHints }
+          );
+          newBlueprint = generated.blueprint;
+          startPrefetchPromise = generated.startPrefetchPromise;
+        }
         const newInstanceKey = crypto.randomUUID();
 
         try {
@@ -4744,6 +6371,13 @@ app.post('/api/exam/start', authMiddleware, async (req, res) => {
             instanceKey: newInstanceKey,
             blueprint: newBlueprint
           });
+          if (publishedSelection?.id) {
+            await recordPublishedExamServed({
+              userId,
+              publishedExamId: publishedSelection.id,
+              instanceKey: newInstanceKey
+            });
+          }
 
           instanceKey = newInstanceKey;
           blueprint = newBlueprint;
@@ -4946,12 +6580,15 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
       const correct = answerMap[qId];
       const userAns = Object.prototype.hasOwnProperty.call(answers || {}, qId) ? answers[qId] : null;
       const isCorrect = (userAns === correct);
+      const isUnanswered = userAns === null || userAns === undefined;
       if (isCorrect) correctCount++;
       totalCount++;
       // Return full info for UI highlighting
       byQuestion[qId] = {
         is_correct: isCorrect,
+        is_unanswered: isUnanswered,
         user_index: userAns,
+        user_answer_index: userAns,
         correct_index: correct
       };
     }
@@ -4979,6 +6616,8 @@ app.post('/api/exam/quickgrade', authMiddleware, async (req, res) => {
       score_summary: {
         correct: correctCount,
         total: totalCount,
+        total_score: correctCount,
+        max_score: totalCount,
         percentage: totalCount ? Math.round(correctCount / totalCount * 100) : 0
       },
       by_question: byQuestion
@@ -5101,11 +6740,59 @@ if (require.main === module) {
       console.log(`Language Exam Server running on http://localhost:${PORT}`);
       console.log(`DB Mode: ${DB_MODE} (Strict: ${IS_NEON_MODE})`);
       console.log(`Auth Mode: ${IS_DEMO_MODE ? 'DEMO MODE (no auth required)' : 'Privy (' + PRIVY_APP_ID + ')'}`);
+      console.log(`Daily Bank: ${DAILY_BANK_ENABLED ? (IS_VERCEL ? 'external-cron/admin endpoint' : 'startup+scheduler enabled') : 'disabled'}`);
+      console.log(`Current-Day Rare Warm: ${CURRENT_DAY_RARE_BUCKET_WARM_ENABLED ? (IS_VERCEL ? 'disabled on vercel' : 'enabled') : 'disabled'}`);
     });
+
+    if (!IS_VERCEL) {
+      if (DAILY_BANK_ENABLED) {
+        const dailyBankStartupPromise = maybeRunDailyBankOnStartup();
+        void dailyBankStartupPromise.catch((error) => {
+          console.error('[DailyBank] Startup catch-up failed:', error);
+        });
+        void dailyBankStartupPromise.finally(() => {
+          void maybeSeedCurrentDayRareBucketsOnStartup().catch((error) => {
+            console.error('[RareWarm] Startup scheduling failed:', error);
+          });
+        });
+        scheduleDailyBankWorkflowLoop();
+      } else {
+        void maybeSeedCurrentDayRareBucketsOnStartup().catch((error) => {
+          console.error('[RareWarm] Startup scheduling failed:', error);
+        });
+      }
+    }
   })();
 }
 
 module.exports = app;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

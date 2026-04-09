@@ -11,6 +11,18 @@ const TEMPORARY_UNAVAILABLE_PAYLOAD = {
   message: 'Generation service temporarily unavailable. Please try again later.',
   retryable: true
 };
+const stageCooldownState = new Map();
+const DEFAULT_STAGE_COOLDOWN_MS = parsePositiveInt(process.env.LLM_STAGE_COOLDOWN_MS, 30000);
+const RATE_LIMIT_STAGE_COOLDOWN_MS = parsePositiveInt(process.env.LLM_RATE_LIMIT_STAGE_COOLDOWN_MS, 60000);
+const MISSING_ENDPOINT_STAGE_COOLDOWN_MS = parsePositiveInt(
+  process.env.LLM_MISSING_ENDPOINT_STAGE_COOLDOWN_MS,
+  6 * 60 * 60 * 1000
+);
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 function logRouter(message, data = null) {
   const stamp = new Date().toISOString();
@@ -43,6 +55,95 @@ function isTemporaryUnavailableError(error) {
 
 function getTemporaryUnavailablePayload(error) {
   return error?.payload || { ...TEMPORARY_UNAVAILABLE_PAYLOAD };
+}
+
+function getStageCacheKey(stage) {
+  return [
+    stage?.provider || 'unknown',
+    stage?.name || 'unnamed',
+    stage?.model || 'default',
+    stage?.apiKey ? String(stage.apiKey).slice(-8) : ''
+  ].join('|');
+}
+
+function getStageCooldownEntry(stage) {
+  const cacheKey = getStageCacheKey(stage);
+  const entry = stageCooldownState.get(cacheKey);
+  if (!entry) return null;
+  if (entry.until <= Date.now()) {
+    stageCooldownState.delete(cacheKey);
+    return null;
+  }
+  return entry;
+}
+
+function clearStageCooldown(stage) {
+  stageCooldownState.delete(getStageCacheKey(stage));
+}
+
+function parseRetryDelayMs(message) {
+  const text = String(message || '');
+  let bestMs = 0;
+  const patterns = [
+    /please retry in\s+([0-9.]+)s/gi,
+    /"retryDelay"\s*:\s*"([0-9.]+)s"/gi
+  ];
+
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      const seconds = Number.parseFloat(match[1]);
+      if (Number.isFinite(seconds) && seconds > 0) {
+        bestMs = Math.max(bestMs, Math.ceil(seconds * 1000));
+      }
+    }
+  }
+
+  return bestMs || null;
+}
+
+function getStageCooldownMs(stage, error) {
+  if (!error) return null;
+
+  const message = String(error.message || '');
+  if (
+    stage?.provider === 'openrouter' &&
+    error.status === 404 &&
+    /no endpoints found/i.test(message)
+  ) {
+    return MISSING_ENDPOINT_STAGE_COOLDOWN_MS;
+  }
+
+  if (
+    error.status === 429 ||
+    /quota exceeded|rate limit|resource_exhausted|please retry in/i.test(message)
+  ) {
+    return Math.max(parseRetryDelayMs(message) || 0, RATE_LIMIT_STAGE_COOLDOWN_MS);
+  }
+
+  if (typeof error.status === 'number' && error.status >= 500) {
+    return DEFAULT_STAGE_COOLDOWN_MS;
+  }
+
+  if (error.retryable) {
+    return DEFAULT_STAGE_COOLDOWN_MS;
+  }
+
+  return null;
+}
+
+function markStageCooldown(stage, error) {
+  const cooldownMs = getStageCooldownMs(stage, error);
+  if (!cooldownMs) return null;
+
+  const entry = {
+    until: Date.now() + cooldownMs,
+    cooldownMs,
+    status: error?.status || null,
+    reason: String(error?.message || '').slice(0, 240)
+  };
+  stageCooldownState.set(getStageCacheKey(stage), entry);
+  return entry;
 }
 
 function getTaskModels() {
@@ -126,6 +227,48 @@ function buildProviderStages(taskName) {
   return stages;
 }
 
+function prioritizeStages(stages, options = {}) {
+  const preferredProviders = Array.isArray(options.preferredProviders)
+    ? options.preferredProviders.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
+  const preferredStageNames = Array.isArray(options.preferredStageNames)
+    ? options.preferredStageNames.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
+  const preferredModels = Array.isArray(options.preferredModels)
+    ? options.preferredModels.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
+
+  if (
+    preferredProviders.length === 0 &&
+    preferredStageNames.length === 0 &&
+    preferredModels.length === 0
+  ) {
+    return stages;
+  }
+
+  const providerRank = new Map(preferredProviders.map((value, index) => [value, index]));
+  const stageRank = new Map(preferredStageNames.map((value, index) => [value, index]));
+  const modelRank = new Map(preferredModels.map((value, index) => [value, index]));
+
+  return stages
+    .map((stage, index) => ({ stage, index }))
+    .sort((left, right) => {
+      const leftStageRank = stageRank.has(left.stage.name) ? stageRank.get(left.stage.name) : Number.MAX_SAFE_INTEGER;
+      const rightStageRank = stageRank.has(right.stage.name) ? stageRank.get(right.stage.name) : Number.MAX_SAFE_INTEGER;
+      if (leftStageRank !== rightStageRank) return leftStageRank - rightStageRank;
+
+      const leftProviderRank = providerRank.has(left.stage.provider) ? providerRank.get(left.stage.provider) : Number.MAX_SAFE_INTEGER;
+      const rightProviderRank = providerRank.has(right.stage.provider) ? providerRank.get(right.stage.provider) : Number.MAX_SAFE_INTEGER;
+      if (leftProviderRank !== rightProviderRank) return leftProviderRank - rightProviderRank;
+
+      const leftModelRank = modelRank.has(left.stage.model) ? modelRank.get(left.stage.model) : Number.MAX_SAFE_INTEGER;
+      const rightModelRank = modelRank.has(right.stage.model) ? modelRank.get(right.stage.model) : Number.MAX_SAFE_INTEGER;
+      if (leftModelRank !== rightModelRank) return leftModelRank - rightModelRank;
+
+      return left.index - right.index;
+    })
+    .map((entry) => entry.stage);
+}
 function stripMarkdownFences(text) {
   return String(text || '')
     .replace(/```json/gi, '')
@@ -329,11 +472,18 @@ async function runJsonTask(options) {
     temperature = 0.4,
     timeoutMs,
     fetchImpl = fetch,
-    includeRaw = false
+    includeRaw = false,
+    preferredProviders,
+    preferredStageNames,
+    preferredModels
   } = options || {};
 
   const taskReasoning = buildTaskReasoningOptions(task, options);
-  const stages = buildProviderStages(task);
+  const stages = prioritizeStages(buildProviderStages(task), {
+    preferredProviders,
+    preferredStageNames,
+    preferredModels
+  });
   if (stages.length === 0) {
     throw createTemporaryUnavailableError(
       createRouterError('No LLM providers configured', { retryable: true, code: 'provider_unconfigured' })
@@ -343,6 +493,27 @@ async function runJsonTask(options) {
   let lastRetryableError = null;
 
   for (const stage of stages) {
+    const cooldownEntry = getStageCooldownEntry(stage);
+    if (cooldownEntry) {
+      lastRetryableError = createRouterError(`Stage ${stage.name} cooling down`, {
+        retryable: true,
+        provider: stage.provider,
+        model: stage.model,
+        code: 'stage_cooling_down',
+        retryAfterMs: Math.max(1, cooldownEntry.until - Date.now())
+      });
+      logRouter('stage_skipped_cooldown', {
+        task,
+        stage: stage.name,
+        provider: stage.provider,
+        model: stage.model,
+        status: cooldownEntry.status,
+        cooldownMs: cooldownEntry.cooldownMs,
+        retryAt: new Date(cooldownEntry.until).toISOString()
+      });
+      continue;
+    }
+
     logRouter('stage_start', {
       task,
       stage: stage.name,
@@ -362,13 +533,15 @@ async function runJsonTask(options) {
       });
     } catch (error) {
       if (isRetryableFailure(error)) {
+        const cooldown = markStageCooldown(stage, error);
         lastRetryableError = error;
         logRouter('stage_retryable_failure', {
           task,
           stage: stage.name,
           provider: stage.provider,
           model: stage.model,
-          error: error.message
+          error: error.message,
+          cooldownMs: cooldown?.cooldownMs || null
         });
         continue;
       }
@@ -377,6 +550,7 @@ async function runJsonTask(options) {
 
     const parsed = parseAndValidateJson(response.text, validateResult);
     if (parsed.ok) {
+      clearStageCooldown(stage);
       return {
         result: parsed.value,
         meta: {
@@ -424,6 +598,7 @@ async function runJsonTask(options) {
 
       const repaired = parseAndValidateJson(repairedResponse.text, validateResult);
       if (repaired.ok) {
+        clearStageCooldown(stage);
         return {
           result: repaired.value,
           meta: {
@@ -455,13 +630,15 @@ async function runJsonTask(options) {
       });
     } catch (error) {
       if (isRetryableFailure(error)) {
+        const cooldown = markStageCooldown(stage, error);
         lastRetryableError = error;
         logRouter('repair_retryable_failure', {
           task,
           stage: stage.name,
           provider: stage.provider,
           model: stage.repairModel || stage.model,
-          error: error.message
+          error: error.message,
+          cooldownMs: cooldown?.cooldownMs || null
         });
         continue;
       }
@@ -481,3 +658,5 @@ module.exports = {
   isTemporaryUnavailableError,
   runJsonTask
 };
+
+

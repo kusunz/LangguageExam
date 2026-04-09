@@ -384,13 +384,46 @@
         return fallbackValue.map(item => String(item || '').trim()).filter(Boolean);
     }
 
-    function buildChoiceBadges(idx, userAnswer, correctAnswer) {
+    function hasUserAnswered(userAnswer) {
+        return userAnswer !== null && userAnswer !== undefined;
+    }
+
+    function getReviewAnswerState(isCorrect, userAnswer, locale = getCurrentUiLocale()) {
+        const unanswered = !hasUserAnswered(userAnswer);
+        if (unanswered) {
+            return {
+                isUnanswered: true,
+                itemClass: 'unanswered',
+                statusClass: 'unanswered',
+                statusLabel: locale === 'en' ? 'Unanswered' : 'Chưa làm'
+            };
+        }
+
+        if (isCorrect) {
+            return {
+                isUnanswered: false,
+                itemClass: 'correct',
+                statusClass: 'correct',
+                statusLabel: locale === 'en' ? 'Correct' : '✓ Đúng'
+            };
+        }
+
+        return {
+            isUnanswered: false,
+            itemClass: 'incorrect',
+            statusClass: 'incorrect',
+            statusLabel: locale === 'en' ? 'Incorrect' : '✗ Sai'
+        };
+    }
+
+    function buildChoiceBadges(idx, userAnswer, correctAnswer, options = {}) {
         const badges = [];
+        const isUnanswered = options.isUnanswered ?? !hasUserAnswered(userAnswer);
         if (idx === userAnswer) {
-            badges.push('<span class="choice-badge choice-badge-selected">Bạn chọn</span>');
+            badges.push(`<span class="choice-badge choice-badge-selected">${options.locale === 'en' ? 'Your choice' : 'Bạn chọn'}</span>`);
         }
         if (idx === correctAnswer) {
-            badges.push('<span class="choice-badge choice-badge-correct">Đáp án đúng</span>');
+            badges.push(`<span class="choice-badge ${isUnanswered ? 'choice-badge-unanswered' : 'choice-badge-correct'}">${options.locale === 'en' ? 'Correct answer' : 'Đáp án đúng'}</span>`);
         }
         return badges.join('');
     }
@@ -3516,29 +3549,34 @@
                     State.test.groups.forEach(group => {
                         TestUI.getOrderedMondaiList(group).forEach(mondai => {
                             mondai.items.forEach(item => {
-                                const result = feedback.by_question[item.id];
-                                if (result) {
-                                    const explainBrief = pickLocalizedExplanationField(null, item.explain_brief, uiLocale);
-                                    const resultItem = {
-                                        id: item.id,
-                                        is_correct: result.is_correct,
-                                        user_answer_index: State.answers[item.id],
-                                        correct_index: result.correct_index,
-                                        prompt: item.prompt,
-                                        choices: item.choices,
-                                        tags: item.tags
-                                    };
-                                    if (explainBrief) {
-                                        resultItem.key_point = { [uiLocale]: explainBrief };
-                                        if (uiLocale === 'en') resultItem.key_point_en = explainBrief;
-                                        else resultItem.key_point_vi = explainBrief;
-                                    }
-                                    questionsWithAnswers.push(resultItem);
+                                const result = feedback.by_question?.[item.id] || null;
+                                const userAnswerIndex = result?.user_answer_index ?? result?.user_index ?? State.answers[item.id] ?? null;
+                                const explainBrief = pickLocalizedExplanationField(null, item.explain_brief, uiLocale);
+                                const resultItem = {
+                                    id: item.id,
+                                    is_correct: Boolean(result?.is_correct),
+                                    is_unanswered: !hasUserAnswered(userAnswerIndex),
+                                    user_answer_index: userAnswerIndex,
+                                    correct_index: result?.correct_index ?? null,
+                                    prompt: item.prompt,
+                                    choices: item.choices,
+                                    tags: item.tags
+                                };
+                                if (explainBrief) {
+                                    resultItem.key_point = { [uiLocale]: explainBrief };
+                                    if (uiLocale === 'en') resultItem.key_point_en = explainBrief;
+                                    else resultItem.key_point_vi = explainBrief;
                                 }
+                                questionsWithAnswers.push(resultItem);
                             });
                         });
                     });
                     feedback.by_question = questionsWithAnswers;
+                    feedback.score_summary = {
+                        ...feedback.score_summary,
+                        total_score: feedback.score_summary?.total_score ?? feedback.score_summary?.correct ?? questionsWithAnswers.filter(item => item.is_correct).length,
+                        max_score: feedback.score_summary?.max_score ?? feedback.score_summary?.total ?? questionsWithAnswers.length
+                    };
 
                     State.feedback = feedback;
                     await this.saveToHistory(feedback);
@@ -3588,6 +3626,7 @@
                         const resultItem = {
                             id: item.id,
                             is_correct: isCorrect,
+                            is_unanswered: !hasUserAnswered(userAnswer),
                             user_answer_index: userAnswer !== undefined ? userAnswer : null,
                             correct_index: item.answer_index,
                             tags: item.tags
@@ -3865,7 +3904,7 @@
                                 .map(ex => typeof ex === 'object' ? (ex.ja || ex.target || '') : ex)
                                 .filter(Boolean)
                         },
-                        userAnswer: State.answers[item.id]
+                        userAnswer: item.user_answer_index !== undefined ? item.user_answer_index : (State.answers[item.id] ?? null)
                     });
                 }
             }
@@ -4081,23 +4120,25 @@
 
                 if (!questionData) return '';
 
-                const userAnswer = State.answers[item.id];
+                const userAnswer = item.user_answer_index !== undefined ? item.user_answer_index : (State.answers[item.id] ?? null);
                 const correctAnswer = item.correct_index !== undefined ? item.correct_index : questionData.answer_index;
                 const reviewLabel = questionData.meta?.review_label || questionData.review_label || item.review_label || item.id;
+                const reviewState = getReviewAnswerState(item.is_correct, userAnswer, uiLocale);
 
                 const whyWrongText = pickLocalizedExplanationField(item.why_wrong, item.why_wrong_vi || item.why_wrong_en || '', uiLocale);
                 const keyPointText = pickLocalizedExplanationField(item.key_point, item.key_point_vi || item.key_point_en || '', uiLocale);
                 const miniLessonText = pickLocalizedExplanationField(item.mini_lesson, item.mini_lesson_vi || item.mini_lesson_en || '', uiLocale);
                 const reviewTasks = pickLocalizedArrayField(item.review_tasks, item[`review_tasks_${uiLocale}`] || [], uiLocale);
                 const hasExplanations = whyWrongText || keyPointText || miniLessonText || reviewTasks.length > 0 || questionData.media?.script_text;
+                const showExplanation = !reviewState.isUnanswered && !item.is_correct && hasExplanations;
 
                 return `
-          <div class="review-item ${item.is_correct ? '' : 'incorrect'}">
+          <div class="review-item ${reviewState.itemClass}">
             <div class="review-item-header">
               <span class="review-item-id">${TestUI.escapeHtml(reviewLabel)}</span>
               <div style="display: flex; gap: 8px; align-items: center;">
-                <span class="review-status ${item.is_correct ? 'correct' : 'incorrect'}">
-                    ${item.is_correct ? '✓ Đúng' : '✗ Sai'}
+                <span class="review-status ${reviewState.statusClass}">
+                    ${reviewState.statusLabel}
                 </span>
                 <button onclick="ReviewUI.saveToNotebook('${item.id}')" class="btn btn-xs btn-outline" style="border: 1px solid var(--border); padding: 2px 8px; border-radius: 4px;" title="Lưu vào kho">
                     <i class="fa-solid fa-bookmark"></i>
@@ -4110,9 +4151,9 @@
               ${questionData.choices.map((choice, idx) => {
                     let classes = 'choice review-choice ' + (isJapanese ? '' : 'zh');
                     if (idx === userAnswer) classes += ' user-selected';
-                    if (idx === correctAnswer) classes += ' correct-answer';
-                    if (idx === userAnswer && !item.is_correct) classes += ' wrong-answer';
-                    const choiceBadges = buildChoiceBadges(idx, userAnswer, correctAnswer);
+                    if (idx === correctAnswer) classes += reviewState.isUnanswered ? ' correct-answer-unanswered' : ' correct-answer';
+                    if (idx === userAnswer && !item.is_correct && !reviewState.isUnanswered) classes += ' wrong-answer';
+                    const choiceBadges = buildChoiceBadges(idx, userAnswer, correctAnswer, { isUnanswered: reviewState.isUnanswered, locale: uiLocale });
                     return `
                   <div class="${classes}">
                     <span class="choice-letter">${String.fromCharCode(65 + idx)}</span>
@@ -4126,12 +4167,12 @@
             </div>
             
             ${!item.is_correct && correctAnswer !== undefined ? `
-              <div class="correct-answer-label">
-                ✓ Đáp án đúng: ${String.fromCharCode(65 + correctAnswer)}. ${TestUI.escapeHtml(questionData.choices[correctAnswer] || '')}
+              <div class="correct-answer-label ${reviewState.isUnanswered ? 'unanswered' : ''}">
+                ${reviewState.isUnanswered ? '•' : '✓'} ${uiLocale === 'en' ? 'Correct answer' : 'Đáp án đúng'}: ${String.fromCharCode(65 + correctAnswer)}. ${TestUI.escapeHtml(questionData.choices[correctAnswer] || '')}
               </div>
             ` : ''}
 
-            ${!item.is_correct && hasExplanations ? `
+            ${showExplanation ? `
               <button class="explanation-toggle" onclick="this.classList.toggle('expanded'); this.nextElementSibling.classList.toggle('hidden');">
                 <i class="fa-solid fa-chevron-right toggle-icon"></i> Xem giải thích
               </button>
@@ -4339,6 +4380,7 @@
                 const extraExamples = Array.isArray(feedback?.extra_examples) ? feedback.extra_examples : [];
                 const userAnswer = item.userAnswer;
                 const correctAnswer = question.answer_index;
+                const reviewState = getReviewAnswerState(false, userAnswer, getCurrentUiLocale());
 
                 return `
           <div class="mistake-item" data-idx="${realIdx}">
@@ -4353,9 +4395,9 @@
                 ${question.choices.map((choice, cIdx) => {
                     let classes = 'choice review-choice';
                     if (cIdx === userAnswer) classes += ' user-selected';
-                    if (cIdx === correctAnswer) classes += ' correct-answer';
-                    if (cIdx === userAnswer && cIdx !== correctAnswer) classes += ' wrong-answer';
-                    const choiceBadges = buildChoiceBadges(cIdx, userAnswer, correctAnswer);
+                    if (cIdx === correctAnswer) classes += reviewState.isUnanswered ? ' correct-answer-unanswered' : ' correct-answer';
+                    if (cIdx === userAnswer && cIdx !== correctAnswer && !reviewState.isUnanswered) classes += ' wrong-answer';
+                    const choiceBadges = buildChoiceBadges(cIdx, userAnswer, correctAnswer, { isUnanswered: reviewState.isUnanswered, locale: getCurrentUiLocale() });
                     return `
                     <div class="${classes}">
                       <span class="choice-letter">${String.fromCharCode(65 + cIdx)}</span>
