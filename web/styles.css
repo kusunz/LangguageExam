@@ -256,16 +256,14 @@ body::before {
 }
 
 .logo-icon {
-  width: 80px;
-  height: 80px;
-  background: var(--accent-gradient);
-  border-radius: var(--radius-xl);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 40px;
+  width: min(240px, 72vw);
   margin: 0 auto var(--space-md);
-  box-shadow: var(--shadow-glow);
+}
+
+.logo-icon img {
+  width: 100%;
+  height: auto;
+  display: block;
 }
 
 .logo-section h1 {
