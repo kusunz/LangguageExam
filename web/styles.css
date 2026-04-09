@@ -266,6 +266,18 @@ body::before {
   display: block;
 }
 
+.logo-icon .logo-light {
+  display: none;
+}
+
+[data-theme="light"] .logo-icon .logo-dark {
+  display: none;
+}
+
+[data-theme="light"] .logo-icon .logo-light {
+  display: block;
+}
+
 .logo-section h1 {
   font-size: var(--text-2xl);
   font-weight: 700;
