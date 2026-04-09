@@ -384,6 +384,33 @@
         return fallbackValue.map(item => String(item || '').trim()).filter(Boolean);
     }
 
+    function normalizeText(value, fallback = '') {
+        if (value === null || value === undefined) return fallback;
+        return String(value).trim();
+    }
+
+    function escapeBasicHtml(value, fallback = '') {
+        const div = document.createElement('div');
+        div.textContent = normalizeText(value, fallback);
+        return div.innerHTML;
+    }
+
+    function normalizeFiniteNumber(value, fallback = 0) {
+        const number = Number(value);
+        return Number.isFinite(number) ? number : fallback;
+    }
+
+    function normalizeOptionalIndex(value) {
+        const number = Number(value);
+        return Number.isInteger(number) && number >= 0 ? number : null;
+    }
+
+    function formatSafeDisplayDate(value, options) {
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return '';
+        return date.toLocaleDateString('vi-VN', options);
+    }
+
     function hasUserAnswered(userAnswer) {
         return userAnswer !== null && userAnswer !== undefined;
     }
@@ -470,6 +497,23 @@
             }
         },
 
+        async loginDemo() {
+            const response = await fetch(`${CONFIG.apiBase}/demo-login`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-demo-session-id': getOrCreateDemoBrowserId()
+                }
+            });
+
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({ error: response.statusText }));
+                throw new Error(error.error || 'Không thể tạo phiên demo');
+            }
+
+            return response.json();
+        },
+
         async requestAdmin(endpoint, options = {}) {
             const secret = options.secret || '';
             const response = await fetch(`${CONFIG.apiBase}${endpoint}`, {
@@ -514,7 +558,7 @@
             });
 
             // Client-side storage for Demo User
-            if (State.user?.token === 'demo-token') {
+            if (State.user?.isDemo) {
                 try {
                     const local = localStorage.getItem('demo_userData');
                     if (local) {
@@ -535,7 +579,7 @@
 
         async saveUserData(data) {
             // Client-side storage for Demo User
-            if (State.user?.token === 'demo-token') {
+            if (State.user?.isDemo) {
                 // Save the FULL current state, as 'data' might be partial
                 if (State.userData) {
                     localStorage.setItem('demo_userData', JSON.stringify(State.userData));
@@ -650,7 +694,7 @@
 
         async saveToNotebook(question, note = '', tags = []) {
             // Client-side storage for Demo User
-            if (State.user?.token === 'demo-token') {
+            if (State.user?.isDemo) {
                 try {
                     const local = localStorage.getItem('demo_notebook') || '[]';
                     const notebook = JSON.parse(local);
@@ -679,10 +723,13 @@
                 }
             }
 
-            const token = State.user?.token || 'demo-token';
+            const token = State.user?.token;
             const res = await fetch('/api/notebook', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+                },
                 body: JSON.stringify({ question, note, tags })
             });
             if (!res.ok) throw new Error('Failed to save to notebook');
@@ -691,7 +738,7 @@
 
         async removeFromNotebook(question) {
             // Client-side storage for Demo User
-            if (State.user?.token === 'demo-token') {
+            if (State.user?.isDemo) {
                 try {
                     const local = localStorage.getItem('demo_notebook') || '[]';
                     let notebook = JSON.parse(local);
@@ -702,10 +749,13 @@
                 } catch (e) { console.error('Error removing demo notebook:', e); }
             }
 
-            const token = State.user?.token || 'demo-token';
+            const token = State.user?.token;
             const res = await fetch('/api/notebook', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+                },
                 body: JSON.stringify({ question, action: 'remove' })
             });
             if (!res.ok) throw new Error('Failed to remove from notebook');
@@ -714,16 +764,16 @@
 
         async getNotebook() {
             // Client-side storage for Demo User
-            if (State.user?.token === 'demo-token') {
+            if (State.user?.isDemo) {
                 try {
                     const local = localStorage.getItem('demo_notebook') || '[]';
                     return { items: JSON.parse(local) };
                 } catch (e) { return { items: [] }; }
             }
 
-            const token = State.user?.token || 'demo-token';
+            const token = State.user?.token;
             const res = await fetch('/api/notebook', {
-                headers: { 'Authorization': `Bearer ${token}` }
+                headers: token ? { 'Authorization': `Bearer ${token}` } : {}
             });
             if (!res.ok) throw new Error('Failed to fetch notebook');
             return await res.json();
@@ -810,7 +860,7 @@
                 this.showEmailModal();
             } else {
                 // Demo mode - direct login
-                this.handleAuthSuccess({ email: 'demo@example.com', token: 'demo-token' });
+                await this.loginDemo();
             }
         },
 
@@ -942,6 +992,7 @@
                 State.user = {
                     email: email,
                     token: accessToken,
+                    isDemo: false,
                     privyUser: user
                 };
 
@@ -949,7 +1000,8 @@
 
                 localStorage.setItem('user', JSON.stringify({
                     email: State.user.email,
-                    token: State.user.token
+                    token: State.user.token,
+                    isDemo: false
                 }));
 
                 await this.loadUserData();
@@ -961,20 +1013,31 @@
         },
 
         async loginDemo() {
-            return this.handleAuthSuccess({ email: 'demo@example.com', token: 'demo-token' });
+            const demoSession = await Api.loginDemo();
+            return this.handleAuthSuccess({
+                email: demoSession.email || 'demo@example.com',
+                token: demoSession.token,
+                isDemo: true
+            });
         },
 
         async handleAuthSuccess(user, isRestore = false) {
             this.showAuthLoading(isRestore ? 'Đang khôi phục phiên...' : 'Đang đăng nhập...');
 
             try {
+                const isDemoUser = Boolean(user?.isDemo || user?.token === 'demo-token');
                 State.user = {
                     email: user.email || 'demo@example.com',
-                    token: user.token || 'demo-token'
+                    token: user.token || null,
+                    isDemo: isDemoUser
                 };
 
-                localStorage.setItem('user', JSON.stringify(State.user));
-                if (State.user.token === 'demo-token') {
+                localStorage.setItem('user', JSON.stringify({
+                    email: State.user.email,
+                    token: State.user.token,
+                    isDemo: State.user.isDemo
+                }));
+                if (State.user.isDemo) {
                     localStorage.setItem('demo_session_started_at', new Date().toISOString());
                 }
 
@@ -995,7 +1058,7 @@
                 State.userData = await Api.getUserData();
 
                 // Check nickname (Skip for demo user)
-                if (State.userData && State.userData.nickname === null && State.user.token !== 'demo-token') {
+                if (State.userData && State.userData.nickname === null && !State.user.isDemo) {
                     this.showNicknameModal();
                 }
 
@@ -1089,24 +1152,38 @@
     // ============================================
     const ExamLoader = {
         async loadSpec(examType, level) {
-            // Load base spec for the exam type (e.g., "jlpt" -> "jlpt_base.json")
             const specKey = `${examType}_${level}`;
             if (CONFIG.examSpecs[specKey]) {
                 return CONFIG.examSpecs[specKey];
             }
 
             try {
-                const response = await fetch(`/exams/${examType}_base.json`);
-                if (!response.ok) throw new Error('Exam spec not found');
+                const normalizedLevel = String(level || '').toLowerCase();
+                const candidatePaths = [
+                    `/exams/${examType}_base.json`,
+                    `/exams/${examType}_${normalizedLevel}.json`,
+                    `/exams/${examType}_template.json`
+                ];
 
-                const baseSpec = await response.json();
+                let sourceSpec = null;
+                for (const candidatePath of candidatePaths) {
+                    const response = await fetch(candidatePath);
+                    if (!response.ok) continue;
+                    sourceSpec = await response.json();
+                    break;
+                }
+                if (!sourceSpec) throw new Error('Exam spec not found');
 
-                // Inject the selected level
+                const displayName = sourceSpec.display_name_vi || examType.toUpperCase();
+                const displayNameWithLevel = displayName.toLowerCase().includes(String(level || '').toLowerCase())
+                    ? displayName
+                    : `${displayName} ${level}`;
+
                 const spec = {
-                    ...baseSpec,
+                    ...sourceSpec,
                     exam_id: specKey,
                     level: level,
-                    display_name_vi: `${baseSpec.display_name_vi} ${level}`
+                    display_name_vi: displayNameWithLevel
                 };
 
                 CONFIG.examSpecs[specKey] = spec;
@@ -4052,19 +4129,25 @@
             }
 
             // Score by group
-            const groupsHtml = Object.entries(scoreSummary.score_by_group || {})
+            const scoreGroupNodes = Object.entries(scoreSummary.score_by_group || {})
                 .map(([groupId, score]) => {
                     const group = test.groups.find(g => g.group_id === groupId);
-                    const label = group?.title_vi || groupId;
-                    return `
-            <div class="score-group-item">
-              <span class="score-group-label">${label}</span>
-              <span>${score}</span>
-            </div>
-          `;
-                }).join('');
+                    const label = normalizeText(group?.title_vi || groupId, groupId);
+                    const row = document.createElement('div');
+                    row.className = 'score-group-item';
 
-            $('#score-by-group').innerHTML = groupsHtml;
+                    const labelSpan = document.createElement('span');
+                    labelSpan.className = 'score-group-label';
+                    labelSpan.textContent = label;
+
+                    const scoreSpan = document.createElement('span');
+                    scoreSpan.textContent = normalizeText(score, '0');
+
+                    row.append(labelSpan, scoreSpan);
+                    return row;
+                });
+
+            $('#score-by-group').replaceChildren(...scoreGroupNodes);
             const recommendationParts = [
                 scoreSummary[`recommendation_${uiLocale}`]
                 || scoreSummary.recommendation_vi
@@ -4080,13 +4163,19 @@
                 ...(Array.isArray(scoreSummary.weak_tags) ? scoreSummary.weak_tags : []),
                 ...(Array.isArray(learningSummary.focus_tags) ? learningSummary.focus_tags : [])
             ]));
+            const weakTagsContainer = $('#weak-tags');
             if (focusTags && focusTags.length > 0) {
                 if (weakAreasCard) weakAreasCard.classList.remove('hidden');
-                const tagsHtml = focusTags.map(tag => `<span class="tag">${tag}</span>`).join('');
-                $('#weak-tags').innerHTML = tagsHtml;
+                const tagNodes = focusTags.map((tag) => {
+                    const element = document.createElement('span');
+                    element.className = 'tag';
+                    element.textContent = normalizeText(tag);
+                    return element;
+                });
+                weakTagsContainer.replaceChildren(...tagNodes);
             } else {
                 if (weakAreasCard) weakAreasCard.classList.add('hidden');
-                $('#weak-tags').innerHTML = '';
+                weakTagsContainer.replaceChildren();
             }
 
             // Review list
@@ -4099,7 +4188,7 @@
             const isJapanese = test.meta.language === 'ja-JP';
             const uiLocale = getCurrentUiLocale();
 
-            const html = feedback.by_question.map(item => {
+            const html = feedback.by_question.map((item, itemIndex) => {
                 // Find question data
                 let questionData = null;
                 for (const group of test.groups) {
@@ -4120,8 +4209,12 @@
 
                 if (!questionData) return '';
 
-                const userAnswer = item.user_answer_index !== undefined ? item.user_answer_index : (State.answers[item.id] ?? null);
-                const correctAnswer = item.correct_index !== undefined ? item.correct_index : questionData.answer_index;
+                const userAnswer = normalizeOptionalIndex(
+                    item.user_answer_index !== undefined ? item.user_answer_index : State.answers[item.id]
+                );
+                const correctAnswer = normalizeOptionalIndex(
+                    item.correct_index !== undefined ? item.correct_index : questionData.answer_index
+                );
                 const reviewLabel = questionData.meta?.review_label || questionData.review_label || item.review_label || item.id;
                 const reviewState = getReviewAnswerState(item.is_correct, userAnswer, uiLocale);
 
@@ -4131,6 +4224,7 @@
                 const reviewTasks = pickLocalizedArrayField(item.review_tasks, item[`review_tasks_${uiLocale}`] || [], uiLocale);
                 const hasExplanations = whyWrongText || keyPointText || miniLessonText || reviewTasks.length > 0 || questionData.media?.script_text;
                 const showExplanation = !reviewState.isUnanswered && !item.is_correct && hasExplanations;
+                const explanationId = `review-feedback-${itemIndex}`;
 
                 return `
           <div class="review-item ${reviewState.itemClass}">
@@ -4140,7 +4234,11 @@
                 <span class="review-status ${reviewState.statusClass}">
                     ${reviewState.statusLabel}
                 </span>
-                <button onclick="ReviewUI.saveToNotebook('${item.id}')" class="btn btn-xs btn-outline" style="border: 1px solid var(--border); padding: 2px 8px; border-radius: 4px;" title="Lưu vào kho">
+                <button type="button"
+                        class="btn btn-xs btn-outline review-save-notebook"
+                        data-feedback-index="${itemIndex}"
+                        style="border: 1px solid var(--border); padding: 2px 8px; border-radius: 4px;"
+                        title="Lưu vào kho">
                     <i class="fa-solid fa-bookmark"></i>
                 </button>
               </div>
@@ -4166,17 +4264,20 @@
                 }).join('')}
             </div>
             
-            ${!item.is_correct && correctAnswer !== undefined ? `
+            ${!item.is_correct && correctAnswer !== null ? `
               <div class="correct-answer-label ${reviewState.isUnanswered ? 'unanswered' : ''}">
                 ${reviewState.isUnanswered ? '•' : '✓'} ${uiLocale === 'en' ? 'Correct answer' : 'Đáp án đúng'}: ${String.fromCharCode(65 + correctAnswer)}. ${TestUI.escapeHtml(questionData.choices[correctAnswer] || '')}
               </div>
             ` : ''}
 
             ${showExplanation ? `
-              <button class="explanation-toggle" onclick="this.classList.toggle('expanded'); this.nextElementSibling.classList.toggle('hidden');">
+              <button type="button"
+                      class="explanation-toggle"
+                      aria-expanded="false"
+                      aria-controls="${explanationId}">
                 <i class="fa-solid fa-chevron-right toggle-icon"></i> Xem giải thích
               </button>
-              <div class="review-feedback hidden">
+              <div id="${explanationId}" class="review-feedback hidden">
                 ${whyWrongText ? `
                   <div class="feedback-section">
                     <h4>Tại sao sai:</h4>
@@ -4186,7 +4287,10 @@
                   <div class="feedback-section">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
                       <h4>Điểm ngữ pháp:</h4>
-                      <button onclick="ReviewUI.saveGrammar('${item.id}')" class="btn btn-xs btn-outline" title="Lưu vào sổ tay"><i class="fa-solid fa-floppy-disk"></i> Lưu</button>
+                      <button type="button"
+                              class="btn btn-xs btn-outline review-save-grammar"
+                              data-feedback-index="${itemIndex}"
+                              title="Lưu vào sổ tay"><i class="fa-solid fa-floppy-disk"></i> Lưu</button>
                     </div>
                     <p>${TestUI.escapeHtml(keyPointText).replace(/\n/g, '<br>')}</p>
                   </div>` : ''}
@@ -4227,7 +4331,36 @@
         `;
             }).join('');
 
-            $('#review-list').innerHTML = html;
+            const reviewList = $('#review-list');
+            reviewList.innerHTML = html;
+
+            reviewList.querySelectorAll('.review-save-notebook').forEach((button) => {
+                button.addEventListener('click', () => {
+                    const index = Number.parseInt(button.dataset.feedbackIndex, 10);
+                    const questionId = feedback.by_question?.[index]?.id;
+                    if (questionId) this.saveToNotebook(questionId);
+                });
+            });
+
+            reviewList.querySelectorAll('.review-save-grammar').forEach((button) => {
+                button.addEventListener('click', () => {
+                    const index = Number.parseInt(button.dataset.feedbackIndex, 10);
+                    const questionId = feedback.by_question?.[index]?.id;
+                    if (questionId) this.saveGrammar(questionId);
+                });
+            });
+
+            reviewList.querySelectorAll('.explanation-toggle').forEach((button) => {
+                button.addEventListener('click', () => {
+                    const panel = button.nextElementSibling;
+                    const isExpanded = button.getAttribute('aria-expanded') === 'true';
+                    button.setAttribute('aria-expanded', isExpanded ? 'false' : 'true');
+                    button.classList.toggle('expanded', !isExpanded);
+                    if (panel) {
+                        panel.classList.toggle('hidden', isExpanded);
+                    }
+                });
+            });
         },
 
         saveGrammar(questionId) {
@@ -4306,9 +4439,6 @@
         }
     };
 
-    // Expose for onclick handlers
-    window.ReviewUI = ReviewUI;
-
     // ============================================
     // History UI
     // ============================================
@@ -4327,22 +4457,27 @@
             emptyState.classList.add('hidden');
 
             const html = history.slice().reverse().map((item, idx) => {
-                const date = new Date(item.date).toLocaleDateString('vi-VN', {
+                const date = formatSafeDisplayDate(item?.date, {
                     year: 'numeric',
                     month: 'short',
                     day: 'numeric',
                     hour: '2-digit',
                     minute: '2-digit'
                 });
-                const percentage = Math.round((item.score / item.maxScore) * 100);
+                const score = normalizeFiniteNumber(item?.score, 0);
+                const maxScore = normalizeFiniteNumber(item?.maxScore, 0);
+                const percentage = maxScore > 0 ? Math.round((score / maxScore) * 100) : 0;
+                const examLabel = escapeBasicHtml(normalizeText(item?.exam, 'Exam').toUpperCase());
+                const modeLabel = escapeBasicHtml(normalizeText(item?.mode, ''));
+                const dateLabel = escapeBasicHtml(date || 'Không rõ ngày');
 
                 return `
           <div class="history-item">
             <div class="history-item-header">
-              <span class="history-exam">${item.exam.toUpperCase()} - ${item.mode}</span>
-              <span class="history-date">${date}</span>
+              <span class="history-exam">${examLabel}${modeLabel ? ` - ${modeLabel}` : ''}</span>
+              <span class="history-date">${dateLabel}</span>
             </div>
-            <div class="history-score">${item.score}/${item.maxScore} (${percentage}%)</div>
+            <div class="history-score">${score}/${maxScore} (${percentage}%)</div>
           </div>
         `;
             }).join('');
@@ -4370,29 +4505,37 @@
 
             const html = mistakes.slice().reverse().slice(0, 50).map((item, idx) => {
                 const realIdx = mistakes.length - 1 - idx;
-                const date = new Date(item.date).toLocaleDateString('vi-VN');
-                const question = item.question;
-                const feedback = item.feedback;
+                const date = formatSafeDisplayDate(item?.date) || 'Không rõ ngày';
+                const question = item?.question && typeof item.question === 'object' ? item.question : {};
+                const feedback = item?.feedback && typeof item.feedback === 'object' ? item.feedback : {};
+                const choices = Array.isArray(question.choices) ? question.choices : [];
                 const whyWrongText = pickLocalizedExplanationField(feedback?.why_wrong, feedback?.why_wrong_vi || feedback?.why_wrong_en || '', getCurrentUiLocale());
                 const keyPointText = pickLocalizedExplanationField(feedback?.key_point, feedback?.key_point_vi || feedback?.key_point_en || '', getCurrentUiLocale());
                 const miniLessonText = pickLocalizedExplanationField(feedback?.mini_lesson, feedback?.mini_lesson_vi || feedback?.mini_lesson_en || '', getCurrentUiLocale());
                 const reviewTasks = pickLocalizedArrayField(feedback?.review_tasks, feedback?.[`review_tasks_${getCurrentUiLocale()}`] || [], getCurrentUiLocale());
                 const extraExamples = Array.isArray(feedback?.extra_examples) ? feedback.extra_examples : [];
-                const userAnswer = item.userAnswer;
-                const correctAnswer = question.answer_index;
+                const userAnswer = normalizeOptionalIndex(item?.userAnswer);
+                const correctAnswer = normalizeOptionalIndex(question.answer_index);
                 const reviewState = getReviewAnswerState(false, userAnswer, getCurrentUiLocale());
+                const detailId = `mistake-detail-${realIdx}`;
+                const examLabel = escapeBasicHtml(normalizeText(item?.exam, 'Exam').toUpperCase());
+                const dateLabel = escapeBasicHtml(date);
 
                 return `
           <div class="mistake-item" data-idx="${realIdx}">
-            <div class="mistake-header" onclick="MistakesUI.toggle(${realIdx})">
-              <span class="mistake-meta">${item.exam.toUpperCase()} - ${date}</span>
+            <button type="button"
+                    class="mistake-header"
+                    data-idx="${realIdx}"
+                    aria-expanded="false"
+                    aria-controls="${detailId}">
+              <span class="mistake-meta">${examLabel} - ${dateLabel}</span>
               <i class="fa-solid fa-chevron-down expand-icon"></i>
-            </div>
-            <div class="mistake-prompt">${TestUI.escapeHtml(question.prompt)}</div>
+            </button>
+            <div class="mistake-prompt">${TestUI.escapeHtml(question.prompt || '')}</div>
             
-            <div class="mistake-detail hidden">
+            <div id="${detailId}" class="mistake-detail hidden">
               <div class="choices" style="margin-top: 12px;">
-                ${question.choices.map((choice, cIdx) => {
+                ${choices.map((choice, cIdx) => {
                     let classes = 'choice review-choice';
                     if (cIdx === userAnswer) classes += ' user-selected';
                     if (cIdx === correctAnswer) classes += reviewState.isUnanswered ? ' correct-answer-unanswered' : ' correct-answer';
@@ -4429,6 +4572,9 @@
             }).join('');
 
             container.innerHTML = html;
+            container.querySelectorAll('.mistake-header').forEach((button) => {
+                button.addEventListener('click', () => this.toggle(button.dataset.idx));
+            });
         },
 
         toggle(idx) {
@@ -4436,6 +4582,7 @@
             const item = container.querySelector(`[data-idx="${idx}"]`);
             const detail = item?.querySelector('.mistake-detail');
             const icon = item?.querySelector('.expand-icon');
+            const button = item?.querySelector('.mistake-header');
 
             if (!detail) return;
 
@@ -4444,16 +4591,15 @@
             // Close all others
             container.querySelectorAll('.mistake-detail').forEach(d => d.classList.add('hidden'));
             container.querySelectorAll('.expand-icon').forEach(i => i.style.transform = 'rotate(0deg)');
+            container.querySelectorAll('.mistake-header').forEach(btn => btn.setAttribute('aria-expanded', 'false'));
 
             if (!isExpanded) {
                 detail.classList.remove('hidden');
                 if (icon) icon.style.transform = 'rotate(180deg)';
+                if (button) button.setAttribute('aria-expanded', 'true');
             }
         }
     };
-
-    // Expose for onclick handlers
-    window.MistakesUI = MistakesUI;
 
     // ============================================
     // Grammar Book Module
@@ -4506,14 +4652,14 @@
             }
 
             container.innerHTML = list.slice().reverse().map((item, idx) => `
-                <div class="grammar-item" onclick="GrammarUI.showDetail(${list.length - 1 - idx})">
+                <button type="button" class="grammar-item" data-index="${list.length - 1 - idx}">
                     <h3>${TestUI.escapeHtml(item.point)}</h3>
                     <div class="grammar-meaning">${TestUI.escapeHtml(item.meaning)}</div>
-                </div>
+                </button>
             `).join('');
-
-            // Expose globally for onclick
-            window.GrammarUI = this;
+            container.querySelectorAll('.grammar-item').forEach((button) => {
+                button.addEventListener('click', () => this.showDetail(button.dataset.index));
+            });
         },
 
         showDetail(index) {
@@ -4627,7 +4773,12 @@
         setSummary(lines) {
             const summary = $('#admin-config-summary');
             if (!summary) return;
-            summary.innerHTML = lines.map((line) => `<p>${line}</p>`).join('');
+            const nodes = (Array.isArray(lines) ? lines : []).map((line) => {
+                const paragraph = document.createElement('p');
+                paragraph.textContent = String(line || '');
+                return paragraph;
+            });
+            summary.replaceChildren(...nodes);
         },
 
         renderEnvBlock(config) {
@@ -4660,21 +4811,47 @@
             if (!container) return;
 
             if (!results.length) {
-                container.innerHTML = '';
+                container.replaceChildren();
                 return;
             }
 
-            container.innerHTML = results.map((item) => `
-                <article class="admin-health-item">
-                    <header>
-                        <strong>${item.task} · ${item.provider}</strong>
-                        <span class="status-badge ${item.ok ? 'success' : 'error'}">${item.ok ? 'Pass' : 'Fail'}</span>
-                    </header>
-                    <p class="admin-health-meta">${item.name} · ${item.model}</p>
-                    <p class="admin-health-meta">Latency: ${item.latencyMs}ms${item.status ? ` · HTTP ${item.status}` : ''}${item.retryable ? ' · retryable' : ''}</p>
-                    ${item.error ? `<p class="admin-health-error">${item.error}</p>` : ''}
-                </article>
-            `).join('');
+            const articles = results.map((item) => {
+                const article = document.createElement('article');
+                article.className = 'admin-health-item';
+
+                const header = document.createElement('header');
+                const title = document.createElement('strong');
+                title.textContent = `${String(item?.task || '')} · ${String(item?.provider || '')}`;
+
+                const badge = document.createElement('span');
+                badge.className = `status-badge ${item?.ok ? 'success' : 'error'}`;
+                badge.textContent = item?.ok ? 'Pass' : 'Fail';
+
+                header.append(title, badge);
+
+                const nameMeta = document.createElement('p');
+                nameMeta.className = 'admin-health-meta';
+                nameMeta.textContent = `${String(item?.name || '')} · ${String(item?.model || '')}`;
+
+                const latencyMeta = document.createElement('p');
+                latencyMeta.className = 'admin-health-meta';
+                const statusSuffix = item?.status ? ` · HTTP ${item.status}` : '';
+                const retryableSuffix = item?.retryable ? ' · retryable' : '';
+                latencyMeta.textContent = `Latency: ${Number(item?.latencyMs) || 0}ms${statusSuffix}${retryableSuffix}`;
+
+                article.append(header, nameMeta, latencyMeta);
+
+                if (item?.error) {
+                    const errorLine = document.createElement('p');
+                    errorLine.className = 'admin-health-error';
+                    errorLine.textContent = String(item.error);
+                    article.appendChild(errorLine);
+                }
+
+                return article;
+            });
+
+            container.replaceChildren(...articles);
         },
 
         async loadConfig() {

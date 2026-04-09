@@ -46,6 +46,7 @@ In Vercel Dashboard → Settings → Environment Variables:
 | `NODE_ENV` | `production` | ✅ |
 | `ANSWER_HASH_SECRET` | Long random secret for answer hashing | ✅ |
 | `WARMUP_SECRET` | Long random secret for admin warmup cron endpoints | ✅ |
+| `DEMO_AUTH_SECRET` | Long random secret for signed demo sessions when Privy is enabled | Recommended |
 | `OPENROUTER_API_KEY` | Needed if OpenRouter should generate exams | Optional |
 | `GEMINI_API_KEY_A` | Gemini text generation key | Optional |
 | `GEMINI_API_KEY_B` | Backup Gemini text generation key | Optional |
@@ -55,12 +56,16 @@ In Vercel Dashboard → Settings → Environment Variables:
 | `DEEPGRAM_API_KEY` | Deepgram TTS key | Optional |
 | `PRIVY_APP_ID` | Privy app ID | Optional |
 | `PRIVY_CLIENT_ID` | Privy client ID | Optional |
+| `CORS_ORIGIN` | Single allowed frontend origin if frontend is hosted separately | Optional |
+| `CORS_ORIGINS` | Comma-separated allowed frontend origins if hosting cross-origin | Optional |
 
 ## 4. How It Works
 
 - `vercel.json` routes both `/api/*` and app page requests to the same Express serverless handler
 - Express serves `/exams/*` from `web/public/exams` and the SPA shell from `web/index.html`
 - This keeps the frontend and backend on the same deployment without requiring a separate Vite output folder
+- Same-origin deploys work without extra CORS configuration; only set `CORS_ORIGIN` or `CORS_ORIGINS` if your frontend runs on a different host
+- If Privy is enabled and demo login should remain available, set `DEMO_AUTH_SECRET` so demo sessions stay valid across server restarts and scale-out instances
 
 ## 5. Local Development
 
@@ -82,3 +87,4 @@ After deploy, verify:
 2. Open `/exams/jlpt_base.json` and confirm it returns JSON.
 3. Use demo login and confirm `/api/user-data` returns `200`.
 4. Start one practice session and confirm the first exam spec loads without `404`.
+5. If Privy is enabled, confirm both email login and demo login still work after a fresh deploy.

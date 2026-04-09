@@ -10,7 +10,7 @@ const rateLimit = require('express-rate-limit');
 const fs = require('fs').promises;
 const path = require('path');
 const crypto = require('crypto');
-const { createRemoteJWKSet, jwtVerify } = require('jose');
+const { createRemoteJWKSet, jwtVerify, SignJWT } = require('jose');
 const db = require('./db');
 const {
   buildProviderStages,
@@ -53,12 +53,99 @@ const GENERATE_MAX_TOKENS = Math.max(
   4096,
   Number.parseInt(process.env.LLM_GENERATE_MAX_TOKENS || '16384', 10)
 );
+const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
+const IS_DEMO_MODE = !PRIVY_APP_ID || PRIVY_APP_ID === 'demo-app-id' || PRIVY_APP_ID === '';
+let privyJWKS = null;
+const DEMO_SESSION_HEADER = 'x-demo-session-id';
+const DEMO_USER_PREFIX = 'demo:';
+const DEMO_ACCESS_ISSUER = 'language-exam-demo';
+const DEMO_ACCESS_AUDIENCE = 'language-exam-demo-access';
+const DEMO_ACCESS_SECRET = Buffer.from(
+  process.env.DEMO_AUTH_SECRET || process.env.PRIVY_APP_SECRET || process.env.WARMUP_SECRET || crypto.randomBytes(32).toString('hex'),
+  'utf8'
+);
+let lastDemoCleanupAt = 0;
+const LOCALHOST_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i;
+const CORS_ALLOWED_ORIGINS = new Set(
+  [process.env.CORS_ORIGIN, process.env.CORS_ORIGINS]
+    .filter(Boolean)
+    .flatMap((value) => String(value).split(','))
+    .map((value) => value.trim())
+    .filter(Boolean)
+);
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "base-uri 'self'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
+  "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com data:",
+  "img-src 'self' data: blob:",
+  "media-src 'self' blob: data:",
+  "connect-src 'self' https://auth.privy.io",
+  "frame-src 'self' https://auth.privy.io"
+].join('; ');
+
+function getRequestOriginCandidates(req) {
+  const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+  const host = forwardedHost || req.get('host') || '';
+  if (!host) return [];
+
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  const requestProto = forwardedProto || req.protocol || 'http';
+  return Array.from(new Set([
+    `${requestProto}://${host}`,
+    `https://${host}`,
+    `http://${host}`
+  ]));
+}
+
+function isAllowedCorsOrigin(origin, req) {
+  if (!origin) return true;
+  if (CORS_ALLOWED_ORIGINS.has(origin)) return true;
+  if (process.env.NODE_ENV !== 'production' && LOCALHOST_ORIGIN_RE.test(origin)) return true;
+  return getRequestOriginCandidates(req).includes(origin);
+}
+
+function resolveCorsOptions(req, callback) {
+  const requestOrigin = String(req.get('Origin') || '').trim();
+  const allowOrigin = !requestOrigin || isAllowedCorsOrigin(requestOrigin, req);
+
+  callback(null, {
+    origin: allowOrigin ? (requestOrigin || true) : false,
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'OPTIONS'],
+    allowedHeaders: ['Accept', 'Authorization', 'Content-Type', DEMO_SESSION_HEADER, 'x-warmup-secret'],
+    maxAge: 600,
+    optionsSuccessStatus: 204
+  });
+}
+
+function applySecurityHeaders(req, res, next) {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  const requestProto = forwardedProto || req.protocol || 'http';
+
+  res.setHeader('Content-Security-Policy', CONTENT_SECURITY_POLICY);
+  res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), microphone=()');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+
+  if (requestProto === 'https') {
+    res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  }
+
+  next();
+}
 
 // Trust proxy for Vercel/Cloud deployments (enables correct IP detection for rate limiting)
+app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
 // Middleware
-app.use(cors());
+app.use(cors(resolveCorsOptions));
+app.use(applySecurityHeaders);
 app.use(express.json({ limit: '10mb' }));
 // JSON Parse Error Handler
 app.use((err, req, res, next) => {
@@ -104,14 +191,6 @@ const ttsLimiter = rateLimit({
 const DATA_DIR = IS_VERCEL ? '/tmp/data' : path.join(__dirname, 'data');
 // NOTE: We do NOT use fs.mkdir or local files in this refined architecture.
 
-// Privy JWKS for token verification
-const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
-const IS_DEMO_MODE = !PRIVY_APP_ID || PRIVY_APP_ID === 'demo-app-id' || PRIVY_APP_ID === '';
-let privyJWKS = null;
-const DEMO_SESSION_HEADER = 'x-demo-session-id';
-const DEMO_USER_PREFIX = 'demo:';
-let lastDemoCleanupAt = 0;
-
 // Logging
 // Logging
 function log(level, message, data = null) {
@@ -143,6 +222,34 @@ function getDemoUserFromRequest(req) {
     userId: `${DEMO_USER_PREFIX}${suffix}`,
     email: `demo+${suffix}@example.com`
   };
+}
+
+async function issueDemoAccessToken(demoUser) {
+  return new SignJWT({
+    mode: 'demo',
+    email: demoUser.email
+  })
+    .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
+    .setSubject(demoUser.userId)
+    .setIssuer(DEMO_ACCESS_ISSUER)
+    .setAudience(DEMO_ACCESS_AUDIENCE)
+    .setIssuedAt()
+    .setExpirationTime('24h')
+    .sign(DEMO_ACCESS_SECRET);
+}
+
+async function verifyDemoAccessToken(token) {
+  try {
+    const { payload } = await jwtVerify(token, DEMO_ACCESS_SECRET, {
+      issuer: DEMO_ACCESS_ISSUER,
+      audience: DEMO_ACCESS_AUDIENCE
+    });
+
+    if (payload?.mode !== 'demo') return null;
+    return payload;
+  } catch (_error) {
+    return null;
+  }
 }
 
 async function cleanupExpiredDemoArtifacts(force = false) {
@@ -187,10 +294,17 @@ async function authMiddleware(req, res, next) {
 
   const token = authHeader.substring(7);
 
-  // Allow demo-token as fallback (useful when Privy is configured but user is in demo mode)
   if (token === 'demo-token') {
-    log('INFO', 'Demo token accepted', { path: req.path });
-    req.user = getDemoUserFromRequest(req);
+    log('WARN', 'Rejected demo token outside demo mode', { path: req.path });
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+
+  const demoPayload = await verifyDemoAccessToken(token);
+  if (demoPayload) {
+    req.user = {
+      userId: String(demoPayload.sub || 'demo-user'),
+      email: String(demoPayload.email || 'demo@example.com')
+    };
     return next();
   }
 
@@ -294,6 +408,22 @@ app.get('/api/config', (req, res) => {
     privyAppId: process.env.PRIVY_APP_ID || 'demo-app-id',
     privyClientId: process.env.PRIVY_CLIENT_ID || process.env.PRIVY_APP_ID || 'demo-app-id'
   });
+});
+
+app.post('/api/demo-login', async (req, res) => {
+  try {
+    const demoUser = getDemoUserFromRequest(req);
+    const token = await issueDemoAccessToken(demoUser);
+    res.json({
+      success: true,
+      email: demoUser.email,
+      token,
+      isDemo: true
+    });
+  } catch (error) {
+    console.error('Demo login error:', error);
+    res.status(500).json({ error: 'Failed to create demo session' });
+  }
 });
 
 // Get current user info
@@ -803,7 +933,16 @@ async function loadUserData(userId, email) {
   }
 }
 
-async function saveUserData(userId, data) {
+function createUserDataPersistenceError() {
+  const error = new Error('Database unavailable. User data was not saved.');
+  error.code = 'USER_DATA_NOT_PERSISTED';
+  error.status = 503;
+  return error;
+}
+
+async function saveUserData(userId, data, options = {}) {
+  const { requirePersistence = false } = options;
+
   // Check DB availability via init
   const dbOk = await db.initDb();
 
@@ -815,10 +954,15 @@ async function saveUserData(userId, data) {
   // Skip save if DB unavailable (ephemeral mode)
   if (!dbOk) {
     console.log(`[WARN] DB unavailable, skipping save for user ${userId}`);
-    return;
+    if (requirePersistence) {
+      throw createUserDataPersistenceError();
+    }
+    return { ok: false, persisted: false, reason: 'db_unavailable' };
   }
 
-  if (IS_DEMO_MODE || isDemoUserId(userId)) return;
+  if (IS_DEMO_MODE || isDemoUserId(userId)) {
+    return { ok: true, persisted: false, reason: 'demo_user' };
+  }
 
   // Filter out heavy objects like ttsCache to prevent DB bloat
   const normalizedData = normalizeUserDataShape(data);
@@ -835,6 +979,8 @@ async function saveUserData(userId, data) {
       [JSON.stringify(jsonData), userId]
     );
   }
+
+  return { ok: true, persisted: true, reason: 'database' };
 }
 
 // Helper: Manage Sessions (Max 1 session per user - new login forces logout of previous)
@@ -1032,11 +1178,20 @@ app.put('/api/user-data', authMiddleware, async (req, res) => {
       settings: req.body?.settings ? { ...currentData.settings, ...incomingData.settings } : currentData.settings,
       learningProfile: mergePersistedLearningProfile(currentData.learningProfile, req.body?.learningProfile)
     };
-    await saveUserData(req.user.userId, newData);
-    res.json({ success: true });
+    const saveResult = await saveUserData(req.user.userId, newData, {
+      requirePersistence: !IS_DEMO_MODE && !isDemoUserId(req.user.userId)
+    });
+    res.json({
+      success: true,
+      persisted: Boolean(saveResult?.persisted),
+      storage: saveResult?.reason === 'demo_user' ? 'client-local' : 'database'
+    });
   } catch (err) {
     console.error('Save user data error:', err);
-    res.status(500).json({ error: 'Failed to save user data' });
+    res.status(err.status || 500).json({
+      error: err.status === 503 ? err.message : 'Failed to save user data',
+      code: err.code || 'USER_DATA_SAVE_FAILED'
+    });
   }
 });
 
@@ -3946,6 +4101,50 @@ async function buildDailyBankExamSpec(level, examType = 'jlpt') {
   };
 }
 
+function inferExamTypeFromExamId(examId = 'jlpt') {
+  const normalizedExamId = String(examId || 'jlpt').trim().toLowerCase();
+  const [examType] = normalizedExamId.split(/[_-]/);
+  return examType || 'jlpt';
+}
+
+async function loadCanonicalExamSpec(examId = 'jlpt', level = 'N5') {
+  const examType = inferExamTypeFromExamId(examId);
+  const normalizedLevel = String(level || 'N5').toUpperCase();
+
+  try {
+    return await buildDailyBankExamSpec(normalizedLevel, examType);
+  } catch (baseSpecErr) {
+    const candidateFiles = [
+      `${examType}_${normalizedLevel.toLowerCase()}.json`,
+      `${examType}_template.json`
+    ];
+    let lastError = baseSpecErr;
+
+    for (const fileName of candidateFiles) {
+      try {
+        const specPath = path.join(__dirname, '../web/public/exams', fileName);
+        const raw = await fs.readFile(specPath, 'utf-8');
+        const sourceSpec = JSON.parse(raw);
+        const displayName = sourceSpec.display_name_vi || examType.toUpperCase();
+        const displayNameWithLevel = displayName.toLowerCase().includes(normalizedLevel.toLowerCase())
+          ? displayName
+          : `${displayName} ${normalizedLevel}`;
+
+        return {
+          ...sourceSpec,
+          exam_id: `${examType}_${normalizedLevel}`,
+          level: normalizedLevel,
+          display_name_vi: displayNameWithLevel
+        };
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    throw lastError;
+  }
+}
+
 function getExamMondaiIds(examSpec) {
   return ensureArray(examSpec?.groups)
     .flatMap((group) => ensureArray(group?.mondai).map((mondai) => String(mondai?.mondai_id || '').toUpperCase()))
@@ -4086,6 +4285,36 @@ function buildPublishedExamDescription({ level, mode, variantKey, bankDateYmd })
 // In-memory TTS cache with LRU eviction (max 50 entries, ~50MB assuming 1MB per audio)
 const TTS_CACHE = new Map();
 const TTS_CACHE_MAX = 50;
+const TTS_LANGUAGE_DEFAULT = 'ja-JP';
+
+function normalizeTtsLanguage(language) {
+  const value = String(language || '').trim().toLowerCase();
+  if (!value) return TTS_LANGUAGE_DEFAULT;
+  if (value === 'ja' || value.startsWith('ja-')) return 'ja-JP';
+  if (value === 'zh' || value === 'cmn' || value.startsWith('zh-') || value.startsWith('cmn-')) return 'zh-CN';
+  if (value === 'en' || value.startsWith('en-')) return 'en-US';
+  return TTS_LANGUAGE_DEFAULT;
+}
+
+function getTtsLanguageName(language) {
+  const normalized = normalizeTtsLanguage(language);
+  if (normalized === 'ja-JP') return 'Japanese';
+  if (normalized === 'zh-CN') return 'Chinese';
+  return 'English';
+}
+
+function getDefaultDeepgramVoice(language) {
+  const normalized = normalizeTtsLanguage(language);
+  if (normalized === 'ja-JP') return 'aura-2-fujin-ja';
+  return 'aura-2-thalia-en';
+}
+
+function getDefaultGeminiVoice(language) {
+  const normalized = normalizeTtsLanguage(language);
+  if (normalized === 'ja-JP') return 'ja-JP-Neural2-B';
+  if (normalized === 'zh-CN') return 'cmn-CN-Wavenet-A';
+  return 'en-US-Wavenet-A';
+}
 
 function generateTextHash(text, language, voice) {
   return crypto.createHash('md5').update(`${text}|${language}|${voice || 'default'}`).digest('hex');
@@ -4124,8 +4353,14 @@ function isDialogue(text) {
 
 // Available Deepgram Aura-2 voices: alternating male/female for dialogue
 const TTS_VOICES = {
-  male: ['aura-2-fujin-ja', 'aura-2-ebisu-ja', 'aura-2-thalia-en'],
-  female: ['aura-2-izanami-ja', 'aura-2-uzume-ja', 'aura-2-ama-ja', 'aura-2-apollo-en'],
+  japanese: {
+    male: ['aura-2-fujin-ja', 'aura-2-ebisu-ja'],
+    female: ['aura-2-izanami-ja', 'aura-2-uzume-ja', 'aura-2-ama-ja']
+  },
+  fallback: {
+    male: ['aura-2-thalia-en'],
+    female: ['aura-asteria-en', 'aura-2-apollo-en']
+  }
 };
 
 // Parse dialogue text into segments with speaker labels
@@ -4175,12 +4410,14 @@ function parseDialogue(text) {
 
 // Get voice for speaker (smart assignment based on speaker index)
 function getVoiceForSpeaker(segment, language) {
+  const normalizedLanguage = normalizeTtsLanguage(language);
   if (segment.speaker === '__narrator__') {
-    return language === 'ja-JP' ? 'aura-2-fujin-ja' : 'aura-asteria-en';
+    return getDefaultDeepgramVoice(normalizedLanguage);
   }
 
   const isMale = segment.speakerIndex % 2 === 0;
-  const voicePool = isMale ? TTS_VOICES.male : TTS_VOICES.female;
+  const voiceSet = normalizedLanguage === 'ja-JP' ? TTS_VOICES.japanese : TTS_VOICES.fallback;
+  const voicePool = isMale ? voiceSet.male : voiceSet.female;
   const voiceIndex = Math.floor(segment.speakerIndex / 2) % voicePool.length;
   return voicePool[voiceIndex];
 }
@@ -4213,6 +4450,7 @@ async function generateDeepgramAudio(text, voice) {
 app.post('/api/tts/stream', authMiddleware, ttsLimiter, async (req, res) => {
   try {
     const { text, language } = req.body;
+    const normalizedLanguage = normalizeTtsLanguage(language);
 
     if (!text || text.trim() === '') {
       return res.status(400).json({ error: 'Text is required' });
@@ -4233,7 +4471,7 @@ app.post('/api/tts/stream', authMiddleware, ttsLimiter, async (req, res) => {
     // Generate and stream each segment
     for (let i = 0; i < segments.length; i++) {
       const segment = segments[i];
-      const voice = getVoiceForSpeaker(segment, language || 'ja-JP');
+      const voice = getVoiceForSpeaker(segment, normalizedLanguage);
       log('INFO', `TTS [${i + 1}/${segments.length}] "${segment.text.slice(0, 30)}..." with ${voice}`);
 
       try {
@@ -4244,7 +4482,7 @@ app.post('/api/tts/stream', authMiddleware, ttsLimiter, async (req, res) => {
         } catch (deepgramErr) {
           // Fallback: Gemini TTS
           log('WARN', `Deepgram failed for segment ${i}, falling back to Gemini: ${deepgramErr.message}`);
-          audio = await generateGeminiTTS(segment.text, language || 'ja-JP');
+          audio = await generateGeminiTTS(segment.text, normalizedLanguage);
         }
 
         const base64Audio = audio.toString('base64');
@@ -4284,11 +4522,11 @@ app.post('/api/tts', authMiddleware, ttsLimiter, async (req, res) => {
     }
 
     const textIsDialogue = isDialogue(text);
-    const lang = language || 'ja-JP';
+    const lang = normalizeTtsLanguage(language);
 
     // For non-dialogue: check cache first
     if (!textIsDialogue) {
-      const defaultVoice = lang === 'ja-JP' ? 'aura-2-fujin-ja' : 'aura-2-thalia-en';
+      const defaultVoice = getDefaultDeepgramVoice(lang);
       const cacheKey = generateTextHash(text, lang, voice || defaultVoice);
       const cachedAudio = getTTSFromCache(cacheKey);
 
@@ -4323,7 +4561,7 @@ app.post('/api/tts', authMiddleware, ttsLimiter, async (req, res) => {
         } else {
           // Non-dialogue: single voice, single segment
           log('INFO', 'TTS: Single segment mode (non-dialogue)');
-          const defaultVoice = voice || (lang === 'ja-JP' ? 'aura-2-fujin-ja' : 'aura-2-thalia-en');
+          const defaultVoice = voice || getDefaultDeepgramVoice(lang);
           audioBuffer = await generateDeepgramAudio(text, defaultVoice);
 
           // Cache the result
@@ -4331,7 +4569,7 @@ app.post('/api/tts', authMiddleware, ttsLimiter, async (req, res) => {
           setTTSCache(cacheKey, audioBuffer);
         }
       } else if (ttsProvider === 'gemini') {
-        audioBuffer = await generateGeminiTTS(text, language, speed, voice);
+        audioBuffer = await generateGeminiTTS(text, lang, speed, voice);
       } else {
         return res.status(400).json({ error: 'Use browser TTS on client side' });
       }
@@ -4339,9 +4577,9 @@ app.post('/api/tts', authMiddleware, ttsLimiter, async (req, res) => {
       log('WARN', `Primary TTS (${ttsProvider}) failed, trying fallback:`, { error: primaryErr.message });
       // Fallback logic
       if (ttsProvider === 'deepgram') {
-        audioBuffer = await generateGeminiTTS(text, language, speed, voice);
+        audioBuffer = await generateGeminiTTS(text, lang, speed, voice);
       } else {
-        const defaultVoice = voice || (lang === 'ja-JP' ? 'aura-2-fujin-ja' : 'aura-2-thalia-en');
+        const defaultVoice = voice || getDefaultDeepgramVoice(lang);
         audioBuffer = await generateDeepgramAudio(text, defaultVoice);
       }
     }
@@ -4360,8 +4598,9 @@ app.post('/api/tts', authMiddleware, ttsLimiter, async (req, res) => {
 
 // Gemini TTS with model fallback
 async function generateGeminiTTS(text, language, speed = 1.0, voice) {
-  const languageCode = language === 'ja-JP' ? 'ja-JP' : language === 'zh-CN' ? 'cmn-CN' : 'en-US';
-  const voiceName = voice || (language === 'ja-JP' ? 'ja-JP-Neural2-B' : 'cmn-CN-Wavenet-A');
+  const normalizedLanguage = normalizeTtsLanguage(language);
+  const languageCode = normalizedLanguage === 'ja-JP' ? 'ja-JP' : normalizedLanguage === 'zh-CN' ? 'cmn-CN' : 'en-US';
+  const voiceName = voice || getDefaultGeminiVoice(normalizedLanguage);
 
   // Try Gemini TTS models in order
   for (const model of GEMINI_TTS_MODELS) {
@@ -5079,7 +5318,7 @@ Rules:
 - Output valid JSON only. No markdown. No commentary outside JSON.`;
 }
 function buildTtsTextPrompt(text, language) {
-  const langName = language === 'ja-JP' ? 'Japanese' : language === 'zh-CN' ? 'Chinese' : 'English';
+  const langName = getTtsLanguageName(language);
 
   return `Convert the following ${langName} text into TTS-optimized text for natural speech synthesis.
 
@@ -5102,7 +5341,7 @@ function buildTtsTextPrompt(text, language) {
 }
 
 function getAdminSecretFromRequest(req) {
-  return req.headers['x-warmup-secret'] || req.query.secret || req.body?.secret;
+  return req.headers['x-warmup-secret'];
 }
 
 function isAuthorizedAdminRequest(req) {
@@ -5412,14 +5651,14 @@ app.post('/api/admin/daily-bank/run', async (req, res) => {
 
 /**
  * GET /api/admin/warmup - Pre-fill pool buckets (for cron/admin use)
- * Authentication: x-warmup-secret header OR ?secret= query param
+ * Authentication: x-warmup-secret header
  * Params: exam_id, level, mode, date_ymd, target, max_buckets, max_gen
  */
 app.get(['/api/admin/warmup', '/api/admin/warmup/:levelParam/:modeParam'], async (req, res) => {
   const startTime = Date.now();
 
   // Authenticate via secret
-  const secret = req.headers['x-warmup-secret'] || req.query.secret;
+  const secret = getAdminSecretFromRequest(req);
   const expectedSecret = process.env.WARMUP_SECRET;
 
   if (!expectedSecret || secret !== expectedSecret) {
@@ -5451,18 +5690,16 @@ app.get(['/api/admin/warmup', '/api/admin/warmup/:levelParam/:modeParam'], async
     const dateYmd = req.query.date_ymd || new Date().toISOString().split('T')[0];
     const maxGenerateTotal = parseInt(req.query.max_gen) || 20;
 
-    // Load real exam spec from file (includes listening/reading)
+    // Load the same canonical spec shape the client uses in normal runtime.
     let examSpec;
     try {
-      const specPath = path.join(__dirname, '../web/public/exams', `${examId}.json`);
-      const raw = await fs.readFile(specPath, 'utf-8');
-      examSpec = JSON.parse(raw);
-      examSpec.level = level; // Override level from param
+      examSpec = await loadCanonicalExamSpec(examId, level);
     } catch (specErr) {
-      console.warn(`[Warmup] Could not load ${examId}.json, using fallback spec`);
+      const fallbackExamType = inferExamTypeFromExamId(examId);
+      console.warn(`[Warmup] Could not load canonical spec for ${examId} ${level}, using fallback spec`);
       examSpec = {
-        exam_id: examId, level, language: 'ja-JP',
-        display_name_vi: `JLPT ${level}`, modes: DEFAULT_MODES,
+        exam_id: `${fallbackExamType}_${String(level || 'N2').toUpperCase()}`, level, language: 'ja-JP',
+        display_name_vi: `${fallbackExamType.toUpperCase()} ${level}`, modes: DEFAULT_MODES,
         groups: [{
           group_id: 'vocab', title_vi: 'Từ vựng',
           mondai: [{ mondai_id: 'M1', title_vi: 'Hán tự', count_official: 5, types: ['kanji_reading'] }]
@@ -5470,7 +5707,7 @@ app.get(['/api/admin/warmup', '/api/admin/warmup/:levelParam/:modeParam'], async
       };
     }
 
-    console.log(`[Warmup] Starting for ${examId} ${level} ${mode} on ${dateYmd}`);
+    console.log(`[Warmup] Starting for ${examSpec.exam_id} ${level} ${mode} on ${dateYmd}`);
 
     // Ensure snapshot exists
     const snapshotId = await ensurePoolSnapshot(examSpec, level, dateYmd, 'warmup', mode);
@@ -5518,7 +5755,7 @@ app.post('/api/admin/warm-pool', async (req, res) => {
   const startTime = Date.now();
 
   // Authenticate via secret header
-  const secret = req.headers['x-warmup-secret'];
+  const secret = getAdminSecretFromRequest(req);
   const expectedSecret = process.env.WARMUP_SECRET;
   if (!expectedSecret || secret !== expectedSecret) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -5539,20 +5776,17 @@ app.post('/api/admin/warm-pool', async (req, res) => {
       maxConcurrency = 2
     } = req.body || {};
 
-    // Load real exam spec from file
+    // Load the same canonical spec shape the client uses in normal runtime.
     let examSpec;
     try {
-      const specPath = path.join(__dirname, '../web/public/exams', `${exam_id}.json`);
-      const raw = await fs.readFile(specPath, 'utf-8');
-      examSpec = JSON.parse(raw);
-      examSpec.level = level;
+      examSpec = await loadCanonicalExamSpec(exam_id, level);
     } catch (specErr) {
-      return res.status(400).json({ error: `Exam spec ${exam_id}.json not found` });
+      return res.status(400).json({ error: `Exam spec unavailable for ${exam_id} ${level}` });
     }
 
     if (!examSpec.modes) examSpec.modes = DEFAULT_MODES;
 
-    console.log(`[WarmPool] Starting for ${exam_id} ${level} ${mode} on ${date_ymd} (target=${targetPerBucket}, maxBuckets=${maxBuckets}, concurrency=${maxConcurrency})`);
+    console.log(`[WarmPool] Starting for ${examSpec.exam_id} ${level} ${mode} on ${date_ymd} (target=${targetPerBucket}, maxBuckets=${maxBuckets}, concurrency=${maxConcurrency})`);
 
     const snapshotId = await ensurePoolSnapshot(examSpec, level, date_ymd, 'warmup', mode);
     if (!snapshotId) {
@@ -5668,11 +5902,11 @@ app.post('/api/admin/warm-pool', async (req, res) => {
 
 /**
  * GET|POST /api/admin/embeddings/backfill - Backfill missing embeddings in controlled batches
- * Authentication: x-warmup-secret header OR ?secret= query param
+ * Authentication: x-warmup-secret header
  * Params/Body: batch_size?, max_batches?, max_items_per_request?, max_chars_per_request?
  */
 async function handleEmbeddingBackfillRequest(req, res) {
-  const secret = req.headers['x-warmup-secret'] || req.query.secret || req.body?.secret;
+  const secret = getAdminSecretFromRequest(req);
   const expectedSecret = process.env.WARMUP_SECRET;
   if (!expectedSecret || secret !== expectedSecret) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -5759,7 +5993,7 @@ app.post('/api/admin/embeddings/backfill', handleEmbeddingBackfillRequest);
  * Body: { keepDays?: number } (default 30)
  */
 app.post('/api/admin/cleanup', async (req, res) => {
-  const secret = req.headers['x-warmup-secret'];
+  const secret = getAdminSecretFromRequest(req);
   const expectedSecret = process.env.WARMUP_SECRET;
   if (!expectedSecret || secret !== expectedSecret) {
     return res.status(401).json({ error: 'Unauthorized' });
