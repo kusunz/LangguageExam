@@ -62,6 +62,39 @@ async function query(text, params = []) {
 
 let initPromise = null;
 
+async function ensureCriticalSchema() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS user_mondai_history (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id TEXT NOT NULL,
+      mondai_hash TEXT NOT NULL REFERENCES mondai_bank(hash) ON DELETE CASCADE,
+      first_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+      last_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+      serve_count INTEGER DEFAULT 1,
+      last_instance_key TEXT,
+      UNIQUE(user_id, mondai_hash)
+    )
+  `);
+
+  await query(`
+    ALTER TABLE user_mondai_history
+      ADD COLUMN IF NOT EXISTS first_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS last_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS serve_count INTEGER DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS last_instance_key TEXT
+  `);
+
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_user_mondai_history_user
+    ON user_mondai_history(user_id, last_served_at)
+  `);
+
+  await query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_user_mondai_history_unique
+    ON user_mondai_history(user_id, mondai_hash)
+  `);
+}
+
 async function initDb() {
   if (initPromise) return initPromise;
 
@@ -75,6 +108,7 @@ async function initDb() {
       // Fast connectivity check using wrapper
       await query('SELECT 1 AS test');
       console.log('[DB] Connection OK');
+      await ensureCriticalSchema();
 
       // Only run migrations if explicitly requested via env var
       // Default: DO NOT run migrations (assume manual SQL or production setup)
@@ -181,10 +215,15 @@ async function initDb() {
           prompt_hash TEXT,
           model TEXT,
           params JSONB,
+          expires_at TIMESTAMPTZ DEFAULT (CURRENT_TIMESTAMP + INTERVAL '30 days'),
           UNIQUE(exam_id, level, mode, date_ymd)
         )`,
         `CREATE INDEX IF NOT EXISTS idx_pool_snapshots_lookup
           ON pool_snapshots(exam_id, level, mode, date_ymd)`,
+        `DO $$ BEGIN
+            CREATE INDEX IF NOT EXISTS idx_pool_snapshots_expiry
+            ON pool_snapshots(expires_at);
+          EXCEPTION WHEN undefined_column THEN NULL; WHEN others THEN NULL; END $$`,
 
 
         // Mondai bank table (V2)
@@ -228,6 +267,8 @@ async function initDb() {
           exam_id TEXT NOT NULL,
           level TEXT NOT NULL,
           mode TEXT NOT NULL,
+          plan TEXT,
+          seed TEXT,
           set_no INTEGER NOT NULL,
           blueprint JSONB NOT NULL,
           delivery_state JSONB,
@@ -238,6 +279,10 @@ async function initDb() {
         )`,
         `CREATE INDEX IF NOT EXISTS idx_instances_user ON exam_instances_cache(user_id)`,
         `CREATE INDEX IF NOT EXISTS idx_instances_expires ON exam_instances_cache(expires_at)`,
+        `CREATE INDEX IF NOT EXISTS idx_instances_lookup
+          ON exam_instances_cache(user_id, exam_id, level, mode, set_no)`,
+        `CREATE INDEX IF NOT EXISTS idx_instances_resume
+          ON exam_instances_cache(user_id, exam_id, level, mode, created_at DESC)`,
 
         // Attempts table (V2: added status, summary for quickgrade)
         `CREATE TABLE IF NOT EXISTS attempts (
@@ -256,6 +301,22 @@ async function initDb() {
         )`,
         `CREATE INDEX IF NOT EXISTS idx_attempts_user ON attempts(user_id)`,
         `CREATE INDEX IF NOT EXISTS idx_attempts_instance ON attempts(instance_key)`,
+
+        // User mondai history table (anti-repeat)
+        `CREATE TABLE IF NOT EXISTS user_mondai_history (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id TEXT NOT NULL,
+          mondai_hash TEXT NOT NULL REFERENCES mondai_bank(hash) ON DELETE CASCADE,
+          first_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+          last_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+          serve_count INTEGER DEFAULT 1,
+          last_instance_key TEXT,
+          UNIQUE(user_id, mondai_hash)
+        )`,
+        `CREATE INDEX IF NOT EXISTS idx_user_mondai_history_user
+          ON user_mondai_history(user_id, last_served_at)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_user_mondai_history_unique
+          ON user_mondai_history(user_id, mondai_hash)`,
 
         // Coupons table
         `CREATE TABLE IF NOT EXISTS coupons (
@@ -295,12 +356,28 @@ async function initDb() {
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           exam_id TEXT NOT NULL,
           level TEXT NOT NULL,
+          mode TEXT,
+          variant_key TEXT,
+          set_no INTEGER,
+          bank_date_ymd TEXT,
           title TEXT NOT NULL,
           description TEXT,
           is_active BOOLEAN DEFAULT true,
+          blueprint JSONB,
+          meta JSONB,
+          snapshot_id UUID REFERENCES pool_snapshots(id) ON DELETE SET NULL,
+          expires_at TIMESTAMPTZ DEFAULT (CURRENT_TIMESTAMP + INTERVAL '30 days'),
           created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-          UNIQUE(exam_id, level, title)
+          UNIQUE(exam_id, level, mode, variant_key, bank_date_ymd, set_no)
         )`,
+        `DO $$ BEGIN
+            CREATE INDEX IF NOT EXISTS idx_published_exams_lookup
+            ON published_exams(exam_id, level, mode, variant_key, bank_date_ymd);
+          EXCEPTION WHEN undefined_column THEN NULL; WHEN others THEN NULL; END $$`,
+        `DO $$ BEGIN
+            CREATE INDEX IF NOT EXISTS idx_published_exams_expiry
+            ON published_exams(expires_at);
+          EXCEPTION WHEN undefined_column THEN NULL; WHEN others THEN NULL; END $$`,
 
         // Published exam parts table
         `CREATE TABLE IF NOT EXISTS published_exam_parts (
@@ -312,6 +389,20 @@ async function initDb() {
         )`,
         `CREATE INDEX IF NOT EXISTS idx_published_parts_exam ON published_exam_parts(published_exam_id)`,
 
+        // User published exam history table
+        `CREATE TABLE IF NOT EXISTS user_published_exam_history (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id TEXT NOT NULL,
+          published_exam_id UUID NOT NULL REFERENCES published_exams(id) ON DELETE CASCADE,
+          first_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+          last_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+          serve_count INTEGER DEFAULT 1,
+          last_instance_key TEXT,
+          UNIQUE(user_id, published_exam_id)
+        )`,
+        `CREATE INDEX IF NOT EXISTS idx_user_published_exam_history_user
+          ON user_published_exam_history(user_id, last_served_at)`,
+
         /* ================= SELF-HEALING MIGRATIONS (Safe ALTERs) ================= */
         /* Ensures existing tables (from prior deployments) get new columns */
 
@@ -319,6 +410,23 @@ async function initDb() {
           -- pool_snapshots: ensure date_ymd exists (TEXT)
           BEGIN
             ALTER TABLE pool_snapshots ADD COLUMN IF NOT EXISTS date_ymd TEXT;
+            ALTER TABLE pool_snapshots ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'ready';
+            ALTER TABLE pool_snapshots ADD COLUMN IF NOT EXISTS seed BIGINT;
+            ALTER TABLE pool_snapshots ADD COLUMN IF NOT EXISTS prompt_hash TEXT;
+            ALTER TABLE pool_snapshots ADD COLUMN IF NOT EXISTS model TEXT;
+            ALTER TABLE pool_snapshots ADD COLUMN IF NOT EXISTS params JSONB;
+            ALTER TABLE pool_snapshots ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ DEFAULT (CURRENT_TIMESTAMP + INTERVAL '30 days');
+            CREATE INDEX IF NOT EXISTS idx_pool_snapshots_lookup ON pool_snapshots(exam_id, level, mode, date_ymd);
+            CREATE INDEX IF NOT EXISTS idx_pool_snapshots_expiry ON pool_snapshots(expires_at);
+            ALTER TABLE pool_snapshots
+              ADD CONSTRAINT pool_snapshots_exam_level_mode_date_unique
+              UNIQUE (exam_id, level, mode, date_ymd);
+          EXCEPTION WHEN duplicate_object THEN NULL; WHEN others THEN NULL; END;
+
+          BEGIN
+            ALTER TABLE pool_snapshots
+              ADD CONSTRAINT pool_snapshots_exam_level_mode_date_ymd_key
+              UNIQUE (exam_id, level, mode, date_ymd);
           EXCEPTION WHEN others THEN NULL; END;
           
            -- mondai_bank: ensure estimated_cost and other new cols
@@ -330,28 +438,89 @@ async function initDb() {
             ALTER TABLE mondai_bank ADD COLUMN IF NOT EXISTS base_type TEXT;
           EXCEPTION WHEN others THEN NULL; END;
 
-          -- exam_instances_cache: ensure answer_keys
+          -- exam_instances_cache: ensure answer_keys + runtime columns
           BEGIN
             ALTER TABLE exam_instances_cache ADD COLUMN IF NOT EXISTS answer_keys JSONB;
+            ALTER TABLE exam_instances_cache ADD COLUMN IF NOT EXISTS plan TEXT;
+            ALTER TABLE exam_instances_cache ADD COLUMN IF NOT EXISTS seed TEXT;
+            CREATE INDEX IF NOT EXISTS idx_instances_lookup ON exam_instances_cache(user_id, exam_id, level, mode, set_no);
+            CREATE INDEX IF NOT EXISTS idx_instances_resume ON exam_instances_cache(user_id, exam_id, level, mode, created_at DESC);
           EXCEPTION WHEN others THEN NULL; END;
 
-          -- attempts: ensure status, summary, answers_hash columns for quickgrade (V2)
+          -- attempts: ensure status, summary, answers_hash, ai_grade columns for V2 grading
           BEGIN
             ALTER TABLE attempts ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'started';
             ALTER TABLE attempts ADD COLUMN IF NOT EXISTS summary JSONB;
             ALTER TABLE attempts ADD COLUMN IF NOT EXISTS answers_hash TEXT;
+            ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ai_grade JSONB;
           EXCEPTION WHEN others THEN NULL; END;
 
           -- attempts: add unique constraint if missing (for UPSERT)
           BEGIN
             ALTER TABLE attempts ADD CONSTRAINT attempts_user_instance_unique UNIQUE (user_id, instance_key);
           EXCEPTION WHEN duplicate_object THEN NULL; WHEN others THEN NULL; END;
+
+          -- user_mondai_history: ensure anti-repeat columns and constraint
+          BEGIN
+            CREATE TABLE IF NOT EXISTS user_mondai_history (
+              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              user_id TEXT NOT NULL,
+              mondai_hash TEXT NOT NULL REFERENCES mondai_bank(hash) ON DELETE CASCADE,
+              first_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+              last_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+              serve_count INTEGER DEFAULT 1,
+              last_instance_key TEXT,
+              UNIQUE(user_id, mondai_hash)
+            );
+            ALTER TABLE user_mondai_history ADD COLUMN IF NOT EXISTS first_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+            ALTER TABLE user_mondai_history ADD COLUMN IF NOT EXISTS last_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+            ALTER TABLE user_mondai_history ADD COLUMN IF NOT EXISTS serve_count INTEGER DEFAULT 1;
+            ALTER TABLE user_mondai_history ADD COLUMN IF NOT EXISTS last_instance_key TEXT;
+            CREATE INDEX IF NOT EXISTS idx_user_mondai_history_user ON user_mondai_history(user_id, last_served_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_user_mondai_history_unique ON user_mondai_history(user_id, mondai_hash);
+          EXCEPTION WHEN others THEN NULL; END;
+
+          -- published_exams + daily bank support columns
+          BEGIN
+            ALTER TABLE published_exams ADD COLUMN IF NOT EXISTS mode TEXT;
+            ALTER TABLE published_exams ADD COLUMN IF NOT EXISTS variant_key TEXT;
+            ALTER TABLE published_exams ADD COLUMN IF NOT EXISTS set_no INTEGER;
+            ALTER TABLE published_exams ADD COLUMN IF NOT EXISTS bank_date_ymd TEXT;
+            ALTER TABLE published_exams ADD COLUMN IF NOT EXISTS blueprint JSONB;
+            ALTER TABLE published_exams ADD COLUMN IF NOT EXISTS meta JSONB;
+            ALTER TABLE published_exams ADD COLUMN IF NOT EXISTS snapshot_id UUID;
+            ALTER TABLE published_exams ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ DEFAULT (CURRENT_TIMESTAMP + INTERVAL '30 days');
+            CREATE INDEX IF NOT EXISTS idx_published_exams_lookup ON published_exams(exam_id, level, mode, variant_key, bank_date_ymd);
+            CREATE INDEX IF NOT EXISTS idx_published_exams_expiry ON published_exams(expires_at);
+            ALTER TABLE published_exams DROP CONSTRAINT IF EXISTS published_exams_exam_id_level_title_key;
+            ALTER TABLE published_exams ADD CONSTRAINT published_exams_daily_variant_unique UNIQUE (exam_id, level, mode, variant_key, bank_date_ymd, set_no);
+          EXCEPTION WHEN duplicate_object THEN NULL; WHEN others THEN NULL; END;
+
+          -- user published exam history
+          BEGIN
+            CREATE TABLE IF NOT EXISTS user_published_exam_history (
+              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              user_id TEXT NOT NULL,
+              published_exam_id UUID NOT NULL REFERENCES published_exams(id) ON DELETE CASCADE,
+              first_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+              last_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+              serve_count INTEGER DEFAULT 1,
+              last_instance_key TEXT,
+              UNIQUE(user_id, published_exam_id)
+            );
+            ALTER TABLE user_published_exam_history ADD COLUMN IF NOT EXISTS first_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+            ALTER TABLE user_published_exam_history ADD COLUMN IF NOT EXISTS last_served_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+            ALTER TABLE user_published_exam_history ADD COLUMN IF NOT EXISTS serve_count INTEGER DEFAULT 1;
+            ALTER TABLE user_published_exam_history ADD COLUMN IF NOT EXISTS last_instance_key TEXT;
+            CREATE INDEX IF NOT EXISTS idx_user_published_exam_history_user ON user_published_exam_history(user_id, last_served_at);
+          EXCEPTION WHEN others THEN NULL; END;
           
         END $$;`
       ];
 
-      const combined = migrations.join(';\n');
-      await query(combined);
+      for (const statement of migrations) {
+        await query(statement);
+      }
 
       console.log('[DB] Migrations complete');
       return true;
@@ -386,4 +555,5 @@ module.exports = {
   IS_VERCEL,
   driverType
 };
+
 

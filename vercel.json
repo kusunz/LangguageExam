@@ -1,22 +1,32 @@
 {
     "version": 2,
+    "functions": {
+        "api/index.js": {
+            "includeFiles": "web/**",
+            "maxDuration": 300
+        }
+    },
     "crons": [
         {
-            "path": "/api/admin/warmup?level=N2&mode=basic",
+            "path": "/api/admin/warmup/n2/basic",
             "schedule": "10 0 * * *"
         },
         {
-            "path": "/api/admin/warmup?level=N2&mode=standard",
+            "path": "/api/admin/warmup/n2/standard",
             "schedule": "15 0 * * *"
         },
         {
-            "path": "/api/admin/warmup?level=N2&mode=official",
+            "path": "/api/admin/warmup/n2/official",
             "schedule": "20 0 * * *"
         }
     ],
     "rewrites": [
         {
             "source": "/api/(.*)",
+            "destination": "/api/index.js"
+        },
+        {
+            "source": "/(.*)",
             "destination": "/api/index.js"
         }
     ]

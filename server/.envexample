@@ -5,22 +5,71 @@
 PORT=3000
 NODE_ENV=development
 
+# Database
+DATABASE_URL=postgres://user:password@host:5432/dbname
+DB_MODE=auto
+DB_RUN_MIGRATIONS=0
+
 # Privy Auth (https://console.privy.io)
 PRIVY_APP_ID=your-privy-app-id
 PRIVY_APP_SECRET=your-privy-app-secret
+PRIVY_CLIENT_ID=your-privy-client-id
 
-# LLM Providers (at least one required)
-OPENAI_API_KEY=your-openai-api-key
-GEMINI_API_KEY=your-gemini-api-key
+# Demo session signing (recommended when Privy is enabled)
+DEMO_AUTH_SECRET=your-long-random-demo-auth-secret
+
+# Optional cross-origin allowlist for separate frontend origins
+# Leave empty when frontend and backend are deployed on the same host
+CORS_ORIGIN=
+CORS_ORIGINS=
+
+# OpenRouter-first LLM routing
+OPENROUTER_API_KEY=your-openrouter-api-key
+OPENROUTER_API_BASE=https://openrouter.ai/api/v1
+OPENROUTER_MODEL_GENERATE_PRIMARY=qwen/qwen3.6-plus-preview:free
+OPENROUTER_MODEL_GENERATE_SECONDARY=nvidia/nemotron-3-super-120b-a12b:free
+OPENROUTER_MODEL_REPAIR_PRIMARY=nvidia/nemotron-3-nano-30b-a3b:free
+OPENROUTER_MODEL_REPAIR_SECONDARY=arcee-ai/trinity-large-preview:free
+OPENROUTER_MODEL_EXPLAIN_PRIMARY=qwen/qwen3.6-plus-preview:free
+OPENROUTER_MODEL_EXPLAIN_SECONDARY=nvidia/nemotron-3-super-120b-a12b:free
+OPENROUTER_GENERATE_REASONING_MAX_TOKENS=1024
+LLM_GENERATE_MAX_TOKENS=16384
+LLM_TIMEOUT_MS=120000
+# Effective blueprint generation concurrency = min(BLUEPRINT_GENERATION_CONCURRENCY, OPENROUTER_RPM, 5)
+OPENROUTER_RPM=5
+BLUEPRINT_GENERATION_CONCURRENCY=4
+BLUEPRINT_EAGER_SLOT_COUNT=2
+BLUEPRINT_ON_DEMAND_BATCH_SIZE=2
+BLUEPRINT_ON_DEMAND_REQUEST_CONCURRENCY=2
+
+# Gemini fallback text generation
+GEMINI_API_KEY_A=your-gemini-api-key-a
+GEMINI_API_KEY_B=your-gemini-api-key-b
+GEMINI_MODEL_FALLBACK=gemini-3.1-flash-lite-preview
+GEMINI_MODEL_FALLBACK_COMPAT=gemini-2.5-flash-lite
+
+# Legacy Gemini compatibility
+GEMINI_API_KEY=your-legacy-gemini-api-key
+
+# Gemini embeddings (VECTOR(768))
+GEMINI_EMBEDDING_KEY_A=your-gemini-embedding-key-a
+GEMINI_EMBEDDING_KEY_B=your-gemini-embedding-key-b
+GEMINI_EMBEDDING_MODEL_PRIMARY=gemini-embedding-001
+GEMINI_EMBEDDING_MODEL_SECONDARY=
+GEMINI_EMBEDDING_MODEL=gemini-embedding-001
+GEMINI_EMBEDDING_OUTPUT_DIM=768
+EMBEDDING_BACKFILL_BATCH_SIZE=24
+EMBEDDING_BATCH_MAX_ITEMS=6
+EMBEDDING_BATCH_MAX_CHARS=24000
 
 # TTS Providers (optional, browser TTS as fallback)
 DEEPGRAM_API_KEY=your-deepgram-api-key
-
-# Default LLM provider: openai | gemini
-DEFAULT_LLM_PROVIDER=gemini
 
 # Default TTS mode: auto | gemini | deepgram | browser
 DEFAULT_TTS_MODE=auto
 
 # Warmup endpoint secret (admin access for cron jobs)
 WARMUP_SECRET=your-secure-warmup-secret
+
+# Security
+ANSWER_HASH_SECRET=change-me-in-production

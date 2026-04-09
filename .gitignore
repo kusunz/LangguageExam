@@ -36,6 +36,17 @@ server/server.log
 
 # Private project notes
 .project-notes.md
-test-v2.js
-test-api.js
-check.ps1
+
+# Local scripts
+*.ps1
+
+# Local test helpers
+test-*.js
+server/test-*.js
+
+# Test output and scratch files
+server/test-results.txt
+check_output.txt
+test-output.txt
+test-v2-out.txt
+temp_snippet.txt
