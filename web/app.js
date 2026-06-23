@@ -821,7 +821,12 @@
                 const meData = await Api.getMe();
                 
                 // Real or validated demo user
-                if (!State.user) State.user = { email: meData.email, isDemo: false };
+                const isDemoBackend = this.config?.guestMode || (meData.userId && meData.userId.startsWith('demo:'));
+                if (!State.user) {
+                    State.user = { email: meData.email, isDemo: isDemoBackend };
+                } else if (isDemoBackend) {
+                    State.user.isDemo = true;
+                }
                 State.user.userId = meData.userId;
                 State.user.email = meData.email;
                 
