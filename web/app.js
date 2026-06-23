@@ -960,9 +960,15 @@
             localStorage.removeItem('user');
             
             const returnUrl = encodeURIComponent(window.location.origin);
-            // Assume logout URL is by replacing /login with /logout
             const loginUrl = this.config?.dasunLoginUrl || 'https://dasun.app/login';
-            const logoutUrl = loginUrl.replace('/login', '/logout') + '?return_to=' + returnUrl;
+            let logoutUrl = loginUrl.replace('/login', '/logout') + '?return_to=' + returnUrl;
+            
+            // Extract CSRF token from cookie to satisfy central auth
+            const match = document.cookie.match(new RegExp('(^| )dash_csrf_token=([^;]+)'));
+            if (match) {
+                logoutUrl += '&logout_token=' + match[2];
+            }
+            
             window.location.href = logoutUrl;
         },
 
@@ -5016,6 +5022,7 @@
         init();
     }
 })();
+
 
 
 
