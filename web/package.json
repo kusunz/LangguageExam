@@ -13,7 +13,6 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@privy-io/js-sdk-core": "^0.58.5",
     "vite": "^7.3.1"
   }
 }

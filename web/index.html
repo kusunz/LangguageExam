@@ -5,7 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="Ứng dụng luyện thi JLPT N2, HSK - Tạo đề thi ngẫu nhiên 100% bằng AI">
-  <title>Luyện Thi Ngoại Ngữ | Language Exam Practice</title>
+  <title>Luyện Thi Ngoại Ngữ | Dasun</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link
@@ -18,14 +18,17 @@
 </head>
 
 <body>
-  <div id="app">
+  <div id="app" class="shell-frame">
+    <!-- Shell backdrops -->
+    <div class="shell-backdrop shell-backdrop--one"></div>
+    <div class="shell-backdrop shell-backdrop--two"></div>
     <!-- Login Screen -->
     <section id="login-screen" class="screen active">
       <div class="login-container">
         <div class="logo-section">
           <div class="logo-icon">
-            <img class="logo-dark" src="/icon-logo2-hozi-mono.png" alt="dasun logo">
-            <img class="logo-light" src="/icon-logo2-hozi.png" alt="dasun logo">
+            <img class="logo-dark" src="/icon-logo2-hozi-mono.png" alt="Dasun logo">
+            <img class="logo-light" src="/icon-logo2-hozi.png" alt="Dasun logo">
           </div>
           <h1>Luyện Thi Ngoại Ngữ</h1>
           <p class="subtitle">JLPT • HSK • Và nhiều hơn nữa</p>
@@ -34,8 +37,8 @@
           <h2>Đăng nhập</h2>
           <p class="login-desc">Đăng nhập để lưu tiến trình và xem lịch sử ôn tập</p>
           <button id="btn-email-login" class="btn btn-primary btn-lg">
-            <span class="btn-icon"><i class="fa-solid fa-envelope"></i></span>
-            Đăng nhập bằng Email
+            <span class="btn-icon"><i class="fa-solid fa-right-to-bracket"></i></span>
+            Đăng nhập với Dasun
           </button>
           <div class="login-divider">
             <span>hoặc</span>
@@ -44,15 +47,15 @@
             Dùng thử không đăng nhập
           </button>
         </div>
-        <p class="login-footer">Bảo mật bởi Privy • Không cần mật khẩu</p>
+        <p class="login-footer">Bảo mật bởi Dasun • Đăng nhập an toàn</p>
       </div>
     </section>
 
     <!-- Home Screen -->
     <section id="home-screen" class="screen">
-      <header class="app-header glass">
+      <header class="app-header glass shell-topbar">
         <div class="header-left">
-          <div class="logo-small"><img src="/icon-logo2.png" alt="dasun logo"></div>
+          <div class="logo-small"><img src="/icon-logo2.png" alt="Dasun logo"></div>
           <span class="header-title">Luyện Thi</span>
         </div>
         <div class="header-right">
@@ -64,7 +67,7 @@
         </div>
       </header>
 
-      <main class="home-content">
+      <main class="home-content shell-main__content">
         <div class="welcome-section">
           <h2>Chào mừng trở lại!</h2>
           <p id="last-activity"></p>
@@ -244,7 +247,7 @@
 
     <!-- Test Screen -->
     <section id="test-screen" class="screen">
-      <header class="test-header glass">
+      <header class="test-header glass shell-topbar">
         <div class="timer-bar">
           <div class="timer overall-timer">
             <span class="timer-label">Tổng</span>
@@ -266,7 +269,7 @@
         <button id="btn-submit-group" class="btn btn-secondary">Nộp phần này</button>
       </div>
 
-      <main class="test-content">
+      <main class="test-content shell-main__content">
         <div class="mondai-header">
           <h2 id="mondai-title">Chữ Hán (Kanji)</h2>
           <p id="mondai-instructions" class="instructions"></p>

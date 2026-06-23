@@ -10,10 +10,9 @@ DATABASE_URL=postgres://user:password@host:5432/dbname
 DB_MODE=auto
 DB_RUN_MIGRATIONS=0
 
-# Privy Auth (https://console.privy.io)
-PRIVY_APP_ID=your-privy-app-id
-PRIVY_APP_SECRET=your-privy-app-secret
-PRIVY_CLIENT_ID=your-privy-client-id
+# Central Auth Introspection
+SESSION_INTROSPECT_URL=https://dasun.app/api/internal/session/introspect
+DASUN_LOGIN_URL=https://dasun.app/login
 
 # Demo session signing (recommended when Privy is enabled)
 DEMO_AUTH_SECRET=your-long-random-demo-auth-secret
@@ -26,12 +25,12 @@ CORS_ORIGINS=
 # OpenRouter-first LLM routing
 OPENROUTER_API_KEY=your-openrouter-api-key
 OPENROUTER_API_BASE=https://openrouter.ai/api/v1
-OPENROUTER_MODEL_GENERATE_PRIMARY=qwen/qwen3.6-plus-preview:free
-OPENROUTER_MODEL_GENERATE_SECONDARY=nvidia/nemotron-3-super-120b-a12b:free
-OPENROUTER_MODEL_REPAIR_PRIMARY=nvidia/nemotron-3-nano-30b-a3b:free
-OPENROUTER_MODEL_REPAIR_SECONDARY=arcee-ai/trinity-large-preview:free
-OPENROUTER_MODEL_EXPLAIN_PRIMARY=qwen/qwen3.6-plus-preview:free
-OPENROUTER_MODEL_EXPLAIN_SECONDARY=nvidia/nemotron-3-super-120b-a12b:free
+OPENROUTER_MODEL_GENERATE_PRIMARY=google/gemma-4-26b-a4b-it
+OPENROUTER_MODEL_GENERATE_SECONDARY=google/gemma-4-31b-it
+OPENROUTER_MODEL_REPAIR_PRIMARY=google/gemma-4-26b-a4b-it
+OPENROUTER_MODEL_REPAIR_SECONDARY=google/gemma-4-31b-it
+OPENROUTER_MODEL_EXPLAIN_PRIMARY=google/gemma-4-26b-a4b-it
+OPENROUTER_MODEL_EXPLAIN_SECONDARY=google/gemma-4-31b-it
 OPENROUTER_GENERATE_REASONING_MAX_TOKENS=1024
 LLM_GENERATE_MAX_TOKENS=16384
 LLM_TIMEOUT_MS=120000
@@ -45,7 +44,7 @@ BLUEPRINT_ON_DEMAND_REQUEST_CONCURRENCY=2
 # Gemini fallback text generation
 GEMINI_API_KEY_A=your-gemini-api-key-a
 GEMINI_API_KEY_B=your-gemini-api-key-b
-GEMINI_MODEL_FALLBACK=gemini-3.1-flash-lite-preview
+GEMINI_MODEL_FALLBACK=gemini-3.1-flash-lite
 GEMINI_MODEL_FALLBACK_COMPAT=gemini-2.5-flash-lite
 
 # Legacy Gemini compatibility

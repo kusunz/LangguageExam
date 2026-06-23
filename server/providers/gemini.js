@@ -2,7 +2,7 @@ const { createProviderError } = require('./openrouter');
 
 const DEFAULT_TIMEOUT_MS = Number.parseInt(process.env.LLM_TIMEOUT_MS || '120000', 10);
 const DEFAULT_GEMINI_MODEL_FALLBACK =
-  process.env.GEMINI_MODEL_FALLBACK || 'gemini-3.1-flash-lite-preview';
+  process.env.GEMINI_MODEL_FALLBACK || 'gemini-3.1-flash-lite';
 const DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT =
   Object.prototype.hasOwnProperty.call(process.env, 'GEMINI_MODEL_FALLBACK_COMPAT')
     ? process.env.GEMINI_MODEL_FALLBACK_COMPAT

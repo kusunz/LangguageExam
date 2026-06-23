@@ -10,7 +10,7 @@ const rateLimit = require('express-rate-limit');
 const fs = require('fs').promises;
 const path = require('path');
 const crypto = require('crypto');
-const { createRemoteJWKSet, jwtVerify, SignJWT } = require('jose');
+const { jwtVerify, SignJWT } = require('jose');
 const db = require('./db');
 const {
   buildProviderStages,
@@ -53,15 +53,14 @@ const GENERATE_MAX_TOKENS = Math.max(
   4096,
   Number.parseInt(process.env.LLM_GENERATE_MAX_TOKENS || '16384', 10)
 );
-const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
-const IS_DEMO_MODE = !PRIVY_APP_ID || PRIVY_APP_ID === 'demo-app-id' || PRIVY_APP_ID === '';
-let privyJWKS = null;
+const SESSION_INTROSPECT_URL = process.env.SESSION_INTROSPECT_URL || 'https://dasun.app/api/internal/session/introspect';
+const IS_DEMO_MODE = !process.env.SESSION_INTROSPECT_URL;
 const DEMO_SESSION_HEADER = 'x-demo-session-id';
 const DEMO_USER_PREFIX = 'demo:';
 const DEMO_ACCESS_ISSUER = 'language-exam-demo';
 const DEMO_ACCESS_AUDIENCE = 'language-exam-demo-access';
 const DEMO_ACCESS_SECRET = Buffer.from(
-  process.env.DEMO_AUTH_SECRET || process.env.PRIVY_APP_SECRET || process.env.WARMUP_SECRET || crypto.randomBytes(32).toString('hex'),
+  process.env.DEMO_AUTH_SECRET || process.env.WARMUP_SECRET || crypto.randomBytes(32).toString('hex'),
   'utf8'
 );
 let lastDemoCleanupAt = 0;
@@ -84,8 +83,8 @@ const CONTENT_SECURITY_POLICY = [
   "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com data:",
   "img-src 'self' data: blob:",
   "media-src 'self' blob: data:",
-  "connect-src 'self' https://auth.privy.io",
-  "frame-src 'self' https://auth.privy.io"
+  "connect-src 'self' https://dasun.app",
+  "frame-src 'self' https://dasun.app"
 ].join('; ');
 
 function getRequestOriginCandidates(req) {
@@ -234,7 +233,7 @@ async function issueDemoAccessToken(demoUser) {
     .setIssuer(DEMO_ACCESS_ISSUER)
     .setAudience(DEMO_ACCESS_AUDIENCE)
     .setIssuedAt()
-    .setExpirationTime('24h')
+    .setExpirationTime('72h')
     .sign(DEMO_ACCESS_SECRET);
 }
 
@@ -259,22 +258,15 @@ async function cleanupExpiredDemoArtifacts(force = false) {
   if (!(await db.initDb())) return;
 
   try {
-    await db.query(`DELETE FROM attempts WHERE (user_id = 'demo-user' OR user_id LIKE 'demo:%') AND started_at < NOW() - INTERVAL '1 day'`);
-    await db.query(`DELETE FROM exam_instances_cache WHERE (user_id = 'demo-user' OR user_id LIKE 'demo:%') AND created_at < NOW() - INTERVAL '1 day'`);
-    await db.query(`DELETE FROM sessions WHERE (user_id = 'demo-user' OR user_id LIKE 'demo:%') AND created_at < NOW() - INTERVAL '1 day'`);
-    await db.query(`DELETE FROM users WHERE (id = 'demo-user' OR id LIKE 'demo:%') AND COALESCE(last_login_at, created_at, NOW()) < NOW() - INTERVAL '1 day'`);
+    await db.query(`DELETE FROM attempts WHERE (user_id = 'demo-user' OR user_id LIKE 'demo:%') AND started_at < NOW() - INTERVAL '3 days'`);
+    await db.query(`DELETE FROM exam_instances_cache WHERE (user_id = 'demo-user' OR user_id LIKE 'demo:%') AND created_at < NOW() - INTERVAL '3 days'`);
+    await db.query(`DELETE FROM sessions WHERE (user_id = 'demo-user' OR user_id LIKE 'demo:%') AND created_at < NOW() - INTERVAL '3 days'`);
+    await db.query(`DELETE FROM users WHERE (id = 'demo-user' OR id LIKE 'demo:%') AND COALESCE(last_login_at, created_at, NOW()) < NOW() - INTERVAL '3 days'`);
   } catch (error) {
     console.warn('[DemoCleanup] Failed:', error.message);
   }
 }
-async function getPrivyJWKS() {
-  if (!privyJWKS && !IS_DEMO_MODE) {
-    privyJWKS = createRemoteJWKSet(
-      new URL('https://auth.privy.io/api/v1/apps/' + PRIVY_APP_ID + '/jwks.json')
-    );
-  }
-  return privyJWKS;
-}
+
 
 // Auth middleware
 async function authMiddleware(req, res, next) {
@@ -284,48 +276,61 @@ async function authMiddleware(req, res, next) {
     return next();
   }
 
+  // 1. Check for guest/demo Bearer token
   const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.substring(7);
 
-  // No auth header - reject
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    log('WARN', 'Missing auth header', { path: req.path });
-    return res.status(401).json({ error: 'Missing authorization token' });
+    if (token === 'demo-token') {
+      log('WARN', 'Rejected demo token outside demo mode', { path: req.path });
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    const demoPayload = await verifyDemoAccessToken(token);
+    if (demoPayload) {
+      req.user = {
+        userId: String(demoPayload.sub || 'demo-user'),
+        email: String(demoPayload.email || 'demo@example.com')
+      };
+      return next();
+    }
   }
 
-  const token = authHeader.substring(7);
-
-  if (token === 'demo-token') {
-    log('WARN', 'Rejected demo token outside demo mode', { path: req.path });
-    return res.status(401).json({ error: 'Invalid token' });
-  }
-
-  const demoPayload = await verifyDemoAccessToken(token);
-  if (demoPayload) {
-    req.user = {
-      userId: String(demoPayload.sub || 'demo-user'),
-      email: String(demoPayload.email || 'demo@example.com')
-    };
-    return next();
-  }
-
-  // Try Privy verification
+  // 2. Central session introspection via cookie
   try {
-    const jwks = await getPrivyJWKS();
-    const { payload } = await jwtVerify(token, jwks, {
-      issuer: 'privy.io',
-      audience: PRIVY_APP_ID
+    const sessionCookie = req.headers.cookie;
+    if (!sessionCookie) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    const introspectUrl = SESSION_INTROSPECT_URL;
+    const response = await fetch(introspectUrl, {
+      method: 'GET',
+      headers: {
+        'Cookie': sessionCookie,
+        'Content-Type': 'application/json'
+      }
     });
 
-    // Extract user info from Privy token
-    const userId = crypto.createHash('sha256').update(payload.sub).digest('hex').substring(0, 16);
-    const email = payload.email || payload.sub;
+    if (!response.ok) {
+      log('WARN', 'Introspection failed', { status: response.status });
+      return res.status(401).json({ error: 'Invalid session' });
+    }
 
-    log('INFO', 'Privy auth success', { userId, email });
-    req.user = { userId, email };
+    const sessionData = await response.json();
+    if (!sessionData || !sessionData.user || !sessionData.user.id) {
+      log('WARN', 'Invalid introspection payload');
+      return res.status(401).json({ error: 'Invalid session' });
+    }
+
+    req.user = {
+      userId: sessionData.user.id,
+      email: sessionData.user.email || 'user@example.com'
+    };
     next();
   } catch (err) {
-    log('ERROR', 'Auth error', { error: err.message, tokenLength: token.length });
-    return res.status(401).json({ error: 'Invalid token' });
+    log('ERROR', 'Auth introspection error', { error: err.message });
+    return res.status(401).json({ error: 'Auth service error' });
   }
 }
 
@@ -405,8 +410,8 @@ const dailyBankRuntimeState = {
 // Get public config (no auth required)
 app.get('/api/config', (req, res) => {
   res.json({
-    privyAppId: process.env.PRIVY_APP_ID || 'demo-app-id',
-    privyClientId: process.env.PRIVY_CLIENT_ID || process.env.PRIVY_APP_ID || 'demo-app-id'
+    dasunLoginUrl: process.env.DASUN_LOGIN_URL || 'https://dasun.app/login',
+    guestMode: IS_DEMO_MODE
   });
 });
 
@@ -7013,7 +7018,7 @@ if (require.main === module) {
     app.listen(PORT, () => {
       console.log(`Language Exam Server running on http://localhost:${PORT}`);
       console.log(`DB Mode: ${DB_MODE} (Strict: ${IS_NEON_MODE})`);
-      console.log(`Auth Mode: ${IS_DEMO_MODE ? 'DEMO MODE (no auth required)' : 'Privy (' + PRIVY_APP_ID + ')'}`);
+      console.log(`Auth Mode: ${IS_DEMO_MODE ? 'DEMO MODE (no auth required)' : 'Central Introspection: ' + SESSION_INTROSPECT_URL}`);
       console.log(`Daily Bank: ${DAILY_BANK_ENABLED ? (IS_VERCEL ? 'external-cron/admin endpoint' : 'startup+scheduler enabled') : 'disabled'}`);
       console.log(`Current-Day Rare Warm: ${CURRENT_DAY_RARE_BUCKET_WARM_ENABLED ? (IS_VERCEL ? 'disabled on vercel' : 'enabled') : 'disabled'}`);
     });
@@ -7040,6 +7045,8 @@ if (require.main === module) {
 }
 
 module.exports = app;
+
+
 
 
 

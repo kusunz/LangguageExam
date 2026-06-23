@@ -492,7 +492,7 @@
                 }
                 return response;
             } catch (err) {
-                console.error('API Error:', err);
+                if (err.message !== 'Session expired. Please login again.') { console.error('API Error:', err); }
                 throw err;
             }
         },
@@ -784,59 +784,62 @@
     // Auth Module (Privy SDK Integration)
     // ============================================
     const Auth = {
-        privy: null,
-        pendingEmail: null,
+        config: null,
 
         async init() {
-            // Get Privy config from server first
-            let config = { privyAppId: 'demo-app-id' };
             try {
                 const configRes = await fetch('/api/config');
-                config = await configRes.json();
-                // console.log('Privy config loaded'); // Security: Do not log config object
+                this.config = await configRes.json();
             } catch (err) {
                 console.error('Failed to load config:', err);
-            }
-
-            // Only try to initialize Privy SDK if configured
-            if (config.privyAppId && config.privyAppId !== 'demo-app-id') {
-                console.log('Initializing Privy SDK...');
-                try {
-                    // Use bundled Privy SDK from main.js
-                    const { Privy, LocalStorage } = window.PrivySDK || {};
-
-                    if (!Privy) {
-                        throw new Error('Privy SDK not loaded. Make sure to run via Vite.');
-                    }
-
-                    this.privy = new Privy({
-                        appId: config.privyAppId,
-                        clientId: config.privyClientId,
-                        storage: LocalStorage ? new LocalStorage() : undefined
-                    });
-                    console.log('Privy SDK initialized successfully');
-                    console.log('Privy.auth methods:', this.privy.auth ? Object.keys(this.privy.auth) : 'none');
-                } catch (err) {
-                    console.error('Privy SDK init failed:', err);
-                    showToast('Không thể khởi tạo Privy. Sử dụng chế độ demo.', 'warning');
-                    this.privy = null;
-                }
-            } else {
-                console.log('Privy not configured, using demo mode');
+                this.config = { dasunLoginUrl: 'https://dasun.app/login', guestMode: false };
             }
 
             clearExpiredDemoSessionIfNeeded();
 
-            // Check for saved demo session
-            const savedUser = localStorage.getItem('user');
-            if (savedUser) {
-                try {
-                    const user = JSON.parse(savedUser);
-                    await this.handleAuthSuccess(user, true);
-                    return;
-                } catch (e) {
-                    localStorage.removeItem('user');
+            // Check if user is already authenticated via cookie/central auth or demo token
+            try {
+                this.showAuthLoading('Đang kiểm tra phiên...');
+                
+                // First see if there's a demo session saved
+                const savedUserStr = localStorage.getItem('user');
+                let savedUser = null;
+                if (savedUserStr) {
+                    try { savedUser = JSON.parse(savedUserStr); } catch(e){}
                 }
+
+                if (savedUser && savedUser.isDemo && savedUser.token) {
+                    // Try to restore demo
+                    State.user = {
+                        email: savedUser.email,
+                        token: savedUser.token,
+                        isDemo: true
+                    };
+                }
+
+                // Call /api/me to verify session
+                const meData = await Api.getMe();
+                
+                // Real or validated demo user
+                if (!State.user) State.user = { email: meData.email, isDemo: false };
+                State.user.userId = meData.userId;
+                State.user.email = meData.email;
+                
+                if (!State.user.isDemo) {
+                     localStorage.setItem('user', JSON.stringify({ email: State.user.email, isDemo: false }));
+                }
+
+                await this.loadUserData();
+                this.updateUI();
+                showScreen('home-screen');
+            } catch (err) {
+                console.log('Not authenticated or session expired:', err);
+                // Clear state
+                State.user = null;
+                localStorage.removeItem('user');
+                showScreen('login-screen');
+            } finally {
+                this.hideAuthLoading();
             }
         },
 
@@ -855,195 +858,34 @@
         },
 
         async loginWithEmail() {
-            if (this.privy) {
-                // Show email modal
-                this.showEmailModal();
-            } else {
-                // Demo mode - direct login
-                await this.loginDemo();
-            }
-        },
-
-        showEmailModal() {
-            const modal = $('#email-modal');
-            const input = $('#email-input');
-            const error = $('#email-error');
-            let cleanupModal = () => { };
-            const closeModal = () => cleanupModal();
-
-            cleanupModal = openModal(modal, {
-                initialFocus: input,
-                onRequestClose: closeModal
-            });
-            input.value = '';
-            input.removeAttribute('aria-invalid');
-            error.classList.add('hidden');
-            input.oninput = () => {
-                error.classList.add('hidden');
-                input.removeAttribute('aria-invalid');
-            };
-
-            // Set up handlers
-            $('#btn-send-otp').onclick = async () => {
-                const email = input.value.trim();
-                if (!email || !email.includes('@')) {
-                    error.textContent = 'Vui lòng nhập email hợp lệ';
-                    error.classList.remove('hidden');
-                    input.setAttribute('aria-invalid', 'true');
-                    return;
-                }
-
-                try {
-                    input.removeAttribute('aria-invalid');
-                    $('#btn-send-otp').disabled = true;
-                    $('#btn-send-otp').textContent = 'Đang gửi...';
-
-                    await this.privy.auth.email.sendCode(email);
-                    this.pendingEmail = email;
-                    closeModal();
-                    this.showOTPModal(email);
-                } catch (err) {
-                    error.textContent = 'Không thể gửi OTP: ' + err.message;
-                    error.classList.remove('hidden');
-                    input.setAttribute('aria-invalid', 'true');
-                } finally {
-                    $('#btn-send-otp').disabled = false;
-                    $('#btn-send-otp').textContent = 'Gửi mã OTP';
-                }
-            };
-
-            $('#btn-cancel-email').onclick = () => {
-                closeModal();
-            };
-        },
-
-        showOTPModal(email) {
-            const modal = $('#otp-modal');
-            const input = $('#otp-input');
-            const error = $('#otp-error');
-            const display = $('#otp-email-display');
-            let cleanupModal = () => { };
-            const closeModal = () => cleanupModal();
-
-            cleanupModal = openModal(modal, {
-                initialFocus: input,
-                onRequestClose: () => {
-                    this.pendingEmail = null;
-                    closeModal();
-                }
-            });
-            display.textContent = `Nhập mã OTP đã gửi đến ${email}`;
-            input.value = '';
-            input.removeAttribute('aria-invalid');
-            error.classList.add('hidden');
-            input.oninput = () => {
-                error.classList.add('hidden');
-                input.removeAttribute('aria-invalid');
-            };
-
-            // Set up handlers
-            $('#btn-verify-otp').onclick = async () => {
-                const code = input.value.trim();
-                if (!code || code.length !== 6) {
-                    error.textContent = 'Vui lòng nhập mã 6 số';
-                    error.classList.remove('hidden');
-                    input.setAttribute('aria-invalid', 'true');
-                    return;
-                }
-
-                try {
-                    input.removeAttribute('aria-invalid');
-                    $('#btn-verify-otp').disabled = true;
-                    $('#btn-verify-otp').textContent = 'Đang xác thực...';
-                    this.showAuthLoading('Đang xác thực OTP...');
-
-                    const session = await this.privy.auth.email.loginWithCode(this.pendingEmail, code);
-                    closeModal();
-                    await this.handlePrivySession(session);
-                } catch (err) {
-                    this.hideAuthLoading();
-                    error.textContent = 'Mã OTP không đúng hoặc đã hết hạn';
-                    error.classList.remove('hidden');
-                    input.setAttribute('aria-invalid', 'true');
-                } finally {
-                    $('#btn-verify-otp').disabled = false;
-                    $('#btn-verify-otp').textContent = 'Xác nhận';
-                }
-            };
-
-            $('#btn-cancel-otp').onclick = () => {
-                this.pendingEmail = null;
-                closeModal();
-            };
-        },
-
-        async handlePrivySession(session) {
-            console.log('Privy session received:', session);
-
-            try {
-                // Extract user info from session
-                const user = session.user;
-                const accessToken = session.token || session.privy_access_token;
-
-                // Get email from linked_accounts
-                const emailAccount = user.linked_accounts?.find(acc => acc.type === 'email');
-                const email = emailAccount?.address || user.email?.address || 'user@privy.io';
-
-                State.user = {
-                    email: email,
-                    token: accessToken,
-                    isDemo: false,
-                    privyUser: user
-                };
-
-                console.log('User logged in:', State.user.email);
-
-                localStorage.setItem('user', JSON.stringify({
-                    email: State.user.email,
-                    token: State.user.token,
-                    isDemo: false
-                }));
-
-                await this.loadUserData();
-                this.updateUI();
-                showScreen('home-screen');
-            } finally {
-                this.hideAuthLoading();
-            }
+            const returnUrl = encodeURIComponent(window.location.href);
+            const loginUrl = (this.config?.dasunLoginUrl || 'https://dasun.app/login') + '?return_to=' + returnUrl;
+            window.location.href = loginUrl;
         },
 
         async loginDemo() {
-            const demoSession = await Api.loginDemo();
-            return this.handleAuthSuccess({
-                email: demoSession.email || 'demo@example.com',
-                token: demoSession.token,
-                isDemo: true
-            });
-        },
-
-        async handleAuthSuccess(user, isRestore = false) {
-            this.showAuthLoading(isRestore ? 'Đang khôi phục phiên...' : 'Đang đăng nhập...');
-
+            this.showAuthLoading('Đang bắt đầu dùng thử...');
             try {
-                const isDemoUser = Boolean(user?.isDemo || user?.token === 'demo-token');
+                const demoSession = await Api.loginDemo();
                 State.user = {
-                    email: user.email || 'demo@example.com',
-                    token: user.token || null,
-                    isDemo: isDemoUser
+                    email: demoSession.email || 'demo@example.com',
+                    token: demoSession.token,
+                    isDemo: true
                 };
 
                 localStorage.setItem('user', JSON.stringify({
                     email: State.user.email,
                     token: State.user.token,
-                    isDemo: State.user.isDemo
+                    isDemo: true
                 }));
-                if (State.user.isDemo) {
-                    localStorage.setItem('demo_session_started_at', new Date().toISOString());
-                }
+                localStorage.setItem('demo_session_started_at', new Date().toISOString());
 
                 await this.loadUserData();
                 this.updateUI();
                 showScreen('home-screen');
+            } catch (err) {
+                console.error('Demo login failed', err);
+                showToast('Không thể tạo phiên dùng thử', 'error');
             } finally {
                 this.hideAuthLoading();
             }
@@ -1051,10 +893,6 @@
 
         async loadUserData() {
             try {
-                const meData = await Api.getMe();
-                State.user.userId = meData.userId;
-                State.user.email = meData.email;
-
                 State.userData = await Api.getUserData();
 
                 // Check nickname (Skip for demo user)
@@ -1098,52 +936,39 @@
                     closeModal();
                 } catch (err) {
                     console.error('Save nickname error:', err);
-                    showToast('Lỗi lưu biệt danh', 'error');
+                    showToast('Không thể lưu tên', 'error');
                 }
             };
 
             btnSave.onclick = () => {
                 const name = input.value.trim();
-                if (name) {
-                    input.removeAttribute('aria-invalid');
-                    saveNickname(name);
+                if (!name) {
+                    input.setAttribute('aria-invalid', 'true');
                     return;
                 }
-                input.setAttribute('aria-invalid', 'true');
-                input.focus();
+                saveNickname(name);
             };
 
             btnSkip.onclick = () => {
-                saveNickname(State.user.email);
+                saveNickname(State.user.email.split('@')[0]);
             };
         },
 
-        async logout() {
-            resetAppState('logout');
-
-            if (this.privy) {
-                try {
-                    await this.privy.auth.logout();
-                } catch (e) {
-                    // Expected if session already expired or user logged out elsewhere
-                    console.log('Privy session cleanup:', e.message || 'already logged out');
-                }
-            }
+        logout() {
+            State.user = null;
+            State.userData = null;
+            localStorage.removeItem('user');
+            
+            const returnUrl = encodeURIComponent(window.location.origin);
+            // Assume logout URL is by replacing /login with /logout
+            const loginUrl = this.config?.dasunLoginUrl || 'https://dasun.app/login';
+            const logoutUrl = loginUrl.replace('/login', '/logout') + '?return_to=' + returnUrl;
+            window.location.href = logoutUrl;
         },
 
         updateUI() {
-            if (State.user) {
-                $('#user-email').textContent = State.user.email;
-
-                // Update last activity
-                if (State.userData?.history?.length > 0) {
-                    const last = State.userData.history[State.userData.history.length - 1];
-                    const date = new Date(last.date).toLocaleDateString('vi-VN');
-                    $('#last-activity').textContent = `Lần cuối: ${last.exam} - ${date}`;
-                } else {
-                    $('#last-activity').textContent = 'Chưa có lịch sử làm bài';
-                }
-            }
+            if (!State.user) return;
+            $('#user-email').textContent = State.user.isDemo ? 'Khách (Demo)' : (State.userData?.nickname || State.user.email);
         }
     };
 
@@ -4083,6 +3908,30 @@
     // Review UI
     // ============================================
     const ReviewUI = {
+        syncScoreGradient() {
+            const ring = $('#score-ring');
+            if (!ring) return;
+
+            const svg = ring.closest('svg');
+            if (!svg) return;
+
+            let gradient = svg.querySelector('#scoreGradient');
+            if (!gradient) {
+                const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+                defs.innerHTML = '<linearGradient id="scoreGradient" x1="0%" y1="0%" x2="100%" y2="0%"></linearGradient>';
+                svg.insertBefore(defs, svg.firstChild);
+                gradient = svg.querySelector('#scoreGradient');
+            }
+
+            const styles = getComputedStyle(document.documentElement);
+            const start = styles.getPropertyValue('--accent-primary').trim() || '#d9ac42';
+            const end = styles.getPropertyValue('--accent-secondary').trim() || '#f0c869';
+            gradient.innerHTML = `
+          <stop offset="0%" style="stop-color:${start}"/>
+          <stop offset="100%" style="stop-color:${end}"/>
+        `;
+        },
+
         render() {
             const feedback = State.feedback;
             const test = State.test;
@@ -4115,18 +3964,7 @@
             ring.style.strokeDasharray = circumference;
             ring.style.strokeDashoffset = circumference - (percentage / 100) * circumference;
 
-            // Add gradient def if not exists
-            const svg = ring.closest('svg');
-            if (!svg.querySelector('#scoreGradient')) {
-                const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-                defs.innerHTML = `
-          <linearGradient id="scoreGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" style="stop-color:#6366f1"/>
-            <stop offset="100%" style="stop-color:#8b5cf6"/>
-          </linearGradient>
-        `;
-                svg.insertBefore(defs, svg.firstChild);
-            }
+            this.syncScoreGradient();
 
             // Score by group
             const scoreGroupNodes = Object.entries(scoreSummary.score_by_group || {})
@@ -4729,13 +4567,18 @@
                 html.removeAttribute('data-theme');
             }
             this.updateToggleButton();
+            if (typeof ReviewUI !== 'undefined' && ReviewUI.syncScoreGradient) {
+                ReviewUI.syncScoreGradient();
+            }
         },
 
         updateToggleButton() {
             const btn = $('#btn-theme-toggle');
             if (btn) {
+                const nextThemeLabel = this.currentTheme === 'dark' ? 'Chuyển sang chế độ sáng' : 'Chuyển sang chế độ tối';
                 btn.innerHTML = this.currentTheme === 'dark' ? '<i class="fa-solid fa-sun"></i>' : '<i class="fa-solid fa-moon"></i>';
-                btn.title = this.currentTheme === 'dark' ? 'Chuyển sang chế độ sáng' : 'Chuyển sang chế độ tối';
+                btn.title = nextThemeLabel;
+                btn.setAttribute('aria-label', nextThemeLabel);
             }
         }
     };

@@ -150,21 +150,21 @@ function getTaskModels() {
   return {
     generate: {
       openrouterPrimary:
-        process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || 'qwen/qwen3.6-plus-preview:free',
+        process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || 'google/gemma-4-26b-a4b-it',
       openrouterSecondary:
-        process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || 'nvidia/nemotron-3-super-120b-a12b:free'
+        process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || 'google/gemma-4-31b-it'
     },
     repair: {
       openrouterPrimary:
-        process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || 'nvidia/nemotron-3-nano-30b-a3b:free',
+        process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || 'google/gemma-4-26b-a4b-it',
       openrouterSecondary:
-        process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || 'arcee-ai/trinity-large-preview:free'
+        process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || 'google/gemma-4-31b-it'
     },
     explain: {
       openrouterPrimary:
-        process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || 'qwen/qwen3.6-plus-preview:free',
+        process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || 'google/gemma-4-26b-a4b-it',
       openrouterSecondary:
-        process.env.OPENROUTER_MODEL_EXPLAIN_SECONDARY || 'nvidia/nemotron-3-super-120b-a12b:free'
+        process.env.OPENROUTER_MODEL_EXPLAIN_SECONDARY || 'google/gemma-4-31b-it'
     }
   };
 }
@@ -177,25 +177,6 @@ function buildProviderStages(taskName) {
 
   if (!taskConfig) {
     throw createRouterError(`Unsupported LLM task: ${taskName}`, { status: 500, retryable: false });
-  }
-
-  if (process.env.OPENROUTER_API_KEY) {
-    if (taskConfig.openrouterPrimary) {
-      stages.push({
-        name: 'openrouter-primary',
-        provider: 'openrouter',
-        model: taskConfig.openrouterPrimary,
-        repairModel: repairConfig.openrouterPrimary
-      });
-    }
-    if (taskConfig.openrouterSecondary) {
-      stages.push({
-        name: 'openrouter-secondary',
-        provider: 'openrouter',
-        model: taskConfig.openrouterSecondary,
-        repairModel: repairConfig.openrouterSecondary
-      });
-    }
   }
 
   const geminiStages = getGeminiTextKeyStages();
@@ -220,6 +201,25 @@ function buildProviderStages(taskName) {
         model: DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
         repairModel: DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
         apiKey: keyStage.apiKey
+      });
+    }
+  }
+
+  if (process.env.OPENROUTER_API_KEY) {
+    if (taskConfig.openrouterPrimary) {
+      stages.push({
+        name: 'openrouter-primary',
+        provider: 'openrouter',
+        model: taskConfig.openrouterPrimary,
+        repairModel: repairConfig.openrouterPrimary
+      });
+    }
+    if (taskConfig.openrouterSecondary) {
+      stages.push({
+        name: 'openrouter-secondary',
+        provider: 'openrouter',
+        model: taskConfig.openrouterSecondary,
+        repairModel: repairConfig.openrouterSecondary
       });
     }
   }
