@@ -955,6 +955,11 @@
         },
 
         logout() {
+            if (State.user && State.user.isDemo) {
+                resetAppState('logout');
+                return;
+            }
+
             State.user = null;
             State.userData = null;
             localStorage.removeItem('user');
