@@ -45,8 +45,8 @@
 
   /* Text */
   --text-primary: var(--ds-text);
-  --text-secondary: #d2c4ad;
-  --text-muted: var(--ds-text-muted);
+  --text-secondary: #e6dac3; /* Brightened for contrast */
+  --text-muted: #c8b89e; /* Brightened from #b6a58a for contrast */
   --text-inverse: #19130a;
 
   /* Input/Field specific */
@@ -737,6 +737,8 @@ input:focus-visible,
   transition: all var(--transition-fast);
   gap: var(--space-xs);
   min-height: 80px;
+  color: var(--text-secondary);
+  font-family: inherit;
 }
 
 .section-option:hover {
@@ -792,6 +794,8 @@ input:focus-visible,
   text-align: left;
   transition: all var(--transition-fast);
   width: 100%;
+  color: var(--text-secondary);
+  font-family: inherit;
 }
 
 .mode-card.selected {
