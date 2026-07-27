@@ -1,14 +1,15 @@
-const { callOpenRouter } = require('./openrouter');
+const { callOpenRouter } = require("./openrouter");
 const {
   DEFAULT_GEMINI_MODEL_FALLBACK,
   DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
   callGeminiText,
   getGeminiTextKeyStages
-} = require('./gemini');
+} = require("./gemini");
+const { getRoleConfig } = require("./prompt-roles");
 
 const TEMPORARY_UNAVAILABLE_PAYLOAD = {
-  error: 'llm_temporarily_unavailable',
-  message: 'Generation service temporarily unavailable. Please try again later.',
+  error: "llm_temporarily_unavailable",
+  message: "Generation service temporarily unavailable. Please try again later.",
   retryable: true
 };
 const stageCooldownState = new Map();
@@ -20,14 +21,14 @@ const MISSING_ENDPOINT_STAGE_COOLDOWN_MS = parsePositiveInt(
 );
 
 function parsePositiveInt(value, fallback) {
-  const parsed = Number.parseInt(String(value ?? ''), 10);
+  const parsed = Number.parseInt(String(value ?? ""), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function logRouter(message, data = null) {
   const stamp = new Date().toISOString();
   try {
-    console.log(`[${stamp}] [LLM_ROUTER] ${message}${data ? ' ' + JSON.stringify(data) : ''}`);
+    console.log(`[${stamp}] [LLM_ROUTER] ${message}${data ? " " + JSON.stringify(data) : ""}`);
   } catch (error) {
     console.log(`[${stamp}] [LLM_ROUTER] ${message}`);
   }
@@ -59,11 +60,11 @@ function getTemporaryUnavailablePayload(error) {
 
 function getStageCacheKey(stage) {
   return [
-    stage?.provider || 'unknown',
-    stage?.name || 'unnamed',
-    stage?.model || 'default',
-    stage?.apiKey ? String(stage.apiKey).slice(-8) : ''
-  ].join('|');
+    stage?.provider || "unknown",
+    stage?.name || "unnamed",
+    stage?.model || "default",
+    stage?.apiKey ? String(stage.apiKey).slice(-8) : ""
+  ].join("|");
 }
 
 function getStageCooldownEntry(stage) {
@@ -82,7 +83,7 @@ function clearStageCooldown(stage) {
 }
 
 function parseRetryDelayMs(message) {
-  const text = String(message || '');
+  const text = String(message || "");
   let bestMs = 0;
   const patterns = [
     /please retry in\s+([0-9.]+)s/gi,
@@ -105,9 +106,9 @@ function parseRetryDelayMs(message) {
 function getStageCooldownMs(stage, error) {
   if (!error) return null;
 
-  const message = String(error.message || '');
+  const message = String(error.message || "");
   if (
-    stage?.provider === 'openrouter' &&
+    stage?.provider === "openrouter" &&
     error.status === 404 &&
     /no endpoints found/i.test(message)
   ) {
@@ -121,7 +122,7 @@ function getStageCooldownMs(stage, error) {
     return Math.max(parseRetryDelayMs(message) || 0, RATE_LIMIT_STAGE_COOLDOWN_MS);
   }
 
-  if (typeof error.status === 'number' && error.status >= 500) {
+  if (typeof error.status === "number" && error.status >= 500) {
     return DEFAULT_STAGE_COOLDOWN_MS;
   }
 
@@ -140,7 +141,7 @@ function markStageCooldown(stage, error) {
     until: Date.now() + cooldownMs,
     cooldownMs,
     status: error?.status || null,
-    reason: String(error?.message || '').slice(0, 240)
+    reason: String(error?.message || "").slice(0, 240)
   };
   stageCooldownState.set(getStageCacheKey(stage), entry);
   return entry;
@@ -149,22 +150,17 @@ function markStageCooldown(stage, error) {
 function getTaskModels() {
   return {
     generate: {
-      openrouterPrimary:
-        process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || 'google/gemma-4-26b-a4b-it',
-      openrouterSecondary:
-        process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || 'google/gemma-4-31b-it'
+      openrouterPrimary: process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || "nvidia/nemotron-3-super-120b-a12b:free",
+      openrouterSecondary: process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || "nvidia/nemotron-3-nano-30b-a3b:free",
+      openrouterRouter: process.env.OPENROUTER_MODEL_GENERATE_ROUTER || "openrouter/free"
     },
     repair: {
-      openrouterPrimary:
-        process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || 'google/gemma-4-26b-a4b-it',
-      openrouterSecondary:
-        process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || 'google/gemma-4-31b-it'
+      openrouterPrimary: process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || "nvidia/nemotron-3-nano-30b-a3b:free",
+      openrouterSecondary: process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || "openrouter/free"
     },
     explain: {
-      openrouterPrimary:
-        process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || 'google/gemma-4-26b-a4b-it',
-      openrouterSecondary:
-        process.env.OPENROUTER_MODEL_EXPLAIN_SECONDARY || 'google/gemma-4-31b-it'
+      openrouterPrimary: process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || "nvidia/nemotron-3-super-120b-a12b:free",
+      openrouterSecondary: process.env.OPENROUTER_MODEL_EXPLAIN_SECONDARY || "nvidia/nemotron-3-nano-30b-a3b:free"
     }
   };
 }
@@ -173,17 +169,60 @@ function buildProviderStages(taskName) {
   const taskModels = getTaskModels();
   const taskConfig = taskModels[taskName];
   const repairConfig = taskModels.repair;
+  const roleConfig = getRoleConfig(taskName);
   const stages = [];
 
-  if (!taskConfig) {
-    throw createRouterError(`Unsupported LLM task: ${taskName}`, { status: 500, retryable: false });
+  // OpenRouter stages FIRST (primary provider)
+  if (process.env.OPENROUTER_API_KEY) {
+    const isFreeModel = (model) => model && model.includes(":free");
+    const routerModel = isFreeModel(taskConfig.openrouterRouter);
+
+    if (taskConfig.openrouterPrimary) {
+      const primaryIsFree = isFreeModel(taskConfig.openrouterPrimary);
+      stages.push({
+        name: "openrouter-primary",
+        provider: "openrouter",
+        model: taskConfig.openrouterPrimary,
+        repairModel: repairConfig.openrouterPrimary,
+        useReasoning: primaryIsFree,
+        systemPrompt: roleConfig.system,
+        temperature: roleConfig.temperature,
+        maxTokens: roleConfig.maxTokens
+      });
+    }
+    if (taskConfig.openrouterSecondary) {
+      const secondaryIsFree = isFreeModel(taskConfig.openrouterSecondary);
+      stages.push({
+        name: "openrouter-secondary",
+        provider: "openrouter",
+        model: taskConfig.openrouterSecondary,
+        repairModel: repairConfig.openrouterSecondary,
+        useReasoning: secondaryIsFree,
+        systemPrompt: roleConfig.system,
+        temperature: roleConfig.temperature,
+        maxTokens: roleConfig.maxTokens
+      });
+    }
+    if (taskConfig.openrouterRouter) {
+      stages.push({
+        name: "openrouter-router",
+        provider: "openrouter",
+        model: taskConfig.openrouterRouter,
+        repairModel: repairConfig.openrouterSecondary,
+        useReasoning: routerModel,
+        systemPrompt: roleConfig.system,
+        temperature: roleConfig.temperature,
+        maxTokens: roleConfig.maxTokens
+      });
+    }
   }
 
+  // Gemini stages as FALLBACK
   const geminiStages = getGeminiTextKeyStages();
   for (const keyStage of geminiStages) {
     stages.push({
       name: keyStage.name,
-      provider: 'gemini',
+      provider: "gemini",
       model: DEFAULT_GEMINI_MODEL_FALLBACK,
       repairModel: DEFAULT_GEMINI_MODEL_FALLBACK,
       apiKey: keyStage.apiKey
@@ -197,29 +236,10 @@ function buildProviderStages(taskName) {
     for (const keyStage of geminiStages) {
       stages.push({
         name: `${keyStage.name}-compat`,
-        provider: 'gemini',
+        provider: "gemini",
         model: DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
         repairModel: DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
         apiKey: keyStage.apiKey
-      });
-    }
-  }
-
-  if (process.env.OPENROUTER_API_KEY) {
-    if (taskConfig.openrouterPrimary) {
-      stages.push({
-        name: 'openrouter-primary',
-        provider: 'openrouter',
-        model: taskConfig.openrouterPrimary,
-        repairModel: repairConfig.openrouterPrimary
-      });
-    }
-    if (taskConfig.openrouterSecondary) {
-      stages.push({
-        name: 'openrouter-secondary',
-        provider: 'openrouter',
-        model: taskConfig.openrouterSecondary,
-        repairModel: repairConfig.openrouterSecondary
       });
     }
   }
@@ -229,13 +249,13 @@ function buildProviderStages(taskName) {
 
 function prioritizeStages(stages, options = {}) {
   const preferredProviders = Array.isArray(options.preferredProviders)
-    ? options.preferredProviders.map((value) => String(value || '').trim()).filter(Boolean)
+    ? options.preferredProviders.map((value) => String(value || "").trim()).filter(Boolean)
     : [];
   const preferredStageNames = Array.isArray(options.preferredStageNames)
-    ? options.preferredStageNames.map((value) => String(value || '').trim()).filter(Boolean)
+    ? options.preferredStageNames.map((value) => String(value || "").trim()).filter(Boolean)
     : [];
   const preferredModels = Array.isArray(options.preferredModels)
-    ? options.preferredModels.map((value) => String(value || '').trim()).filter(Boolean)
+    ? options.preferredModels.map((value) => String(value || "").trim()).filter(Boolean)
     : [];
 
   if (
@@ -269,10 +289,11 @@ function prioritizeStages(stages, options = {}) {
     })
     .map((entry) => entry.stage);
 }
+
 function stripMarkdownFences(text) {
-  return String(text || '')
-    .replace(/```json/gi, '')
-    .replace(/```/g, '')
+  return String(text || "")
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
     .trim();
 }
 
@@ -293,7 +314,7 @@ function extractJsonFragment(text) {
       continue;
     }
 
-    if (char === '\\') {
+    if (char === "\\") {
       escape = true;
       continue;
     }
@@ -304,8 +325,8 @@ function extractJsonFragment(text) {
     }
 
     if (inString) continue;
-    if (char === '{' || char === '[') depth += 1;
-    if (char === '}' || char === ']') depth -= 1;
+    if (char === "{" || char === "[") depth += 1;
+    if (char === "}" || char === "]") depth -= 1;
 
     if (depth === 0) {
       return cleaned.slice(start, index + 1);
@@ -318,9 +339,9 @@ function extractJsonFragment(text) {
 function normalizeValidationErrors(validationResult) {
   if (!validationResult) return [];
   if (validationResult === true) return [];
-  if (validationResult === false) return ['validation_failed'];
-  if (typeof validationResult === 'string') return [validationResult];
-  if (!Array.isArray(validationResult)) return ['validation_failed'];
+  if (validationResult === false) return ["validation_failed"];
+  if (typeof validationResult === "string") return [validationResult];
+  if (!Array.isArray(validationResult)) return ["validation_failed"];
   return validationResult.filter(Boolean).map((item) => String(item));
 }
 
@@ -335,20 +356,20 @@ function parseAndValidateJson(text, validateResult) {
       ok: false,
       rawText: text,
       fragment,
-      validationErrors: ['invalid_json'],
+      validationErrors: ["invalid_json"],
       error: createRouterError(`Invalid JSON response: ${error.message}`, {
         retryable: true,
-        code: 'invalid_json'
+        code: "invalid_json"
       })
     };
   }
 
-  if (typeof validateResult === 'function') {
+  if (typeof validateResult === "function") {
     let validationErrors;
     try {
       validationErrors = normalizeValidationErrors(validateResult(parsedValue));
     } catch (error) {
-      validationErrors = [error.message || 'validation_failed'];
+      validationErrors = [error.message || "validation_failed"];
     }
 
     if (validationErrors.length > 0) {
@@ -358,9 +379,9 @@ function parseAndValidateJson(text, validateResult) {
         fragment,
         parsedValue,
         validationErrors,
-        error: createRouterError(`Schema validation failed: ${validationErrors.join(', ')}`, {
+        error: createRouterError(`Schema validation failed: ${validationErrors.join(", ")}`, {
           retryable: true,
-          code: 'schema_invalid',
+          code: "schema_invalid",
           validationErrors
         })
       };
@@ -379,11 +400,11 @@ function parseAndValidateJson(text, validateResult) {
 function buildTaskReasoningOptions(task, options = {}) {
   const explicitReasoning = options.reasoning;
   if (explicitReasoning === null) return undefined;
-  if (explicitReasoning && typeof explicitReasoning === 'object') return explicitReasoning;
+  if (explicitReasoning && typeof explicitReasoning === "object") return explicitReasoning;
 
-  if (task !== 'generate') return undefined;
+  if (task !== "generate") return undefined;
 
-  const budget = Number.parseInt(process.env.OPENROUTER_GENERATE_REASONING_MAX_TOKENS || '512', 10);
+  const budget = Number.parseInt(process.env.OPENROUTER_GENERATE_REASONING_MAX_TOKENS || "1024", 10);
   if (!Number.isFinite(budget) || budget <= 0) return undefined;
 
   return {
@@ -399,31 +420,30 @@ function buildDefaultRepairPrompt(context) {
     validationErrors = []
   } = context;
 
-  return `You are repairing a JSON response for a strict downstream parser.
+  return `You are a JSON repair specialist. Fix invalid JSON while preserving original intent.
 
 ORIGINAL TASK:
-${String(originalPrompt || '').slice(0, 12000)}
+${String(originalPrompt || "").slice(0, 12000)}
 
 CURRENT OUTPUT:
-${String(rawText || '').slice(0, 12000)}
+${String(rawText || "").slice(0, 12000)}
 
 VALIDATION ERRORS:
-${validationErrors.length > 0 ? validationErrors.join('\n') : 'invalid_json'}
+${validationErrors.length > 0 ? validationErrors.join("\n") : "invalid_json"}
 
 RULES:
-1. Return valid JSON only.
-2. Preserve the original meaning unless a field must change to satisfy JSON/schema validity.
-3. Do not add commentary or markdown.
-4. If a value is missing, infer the smallest valid fix.
-
-FIX THE JSON NOW.`;
+1. Output ONLY valid JSON - no markdown, no explanation
+2. Fix syntax errors: missing quotes, trailing commas, unclosed brackets
+3. Preserve all original fields and values where possible
+4. If a value is missing, infer the minimal valid fix
+5. Maintain the original schema structure`;
 }
 
 function isRetryableFailure(error) {
   if (!error) return false;
   if (error.retryable) return true;
   if (error.status === 402 || error.status === 429) return true;
-  if (typeof error.status === 'number' && error.status >= 500) return true;
+  if (typeof error.status === "number" && error.status >= 500) return true;
   return false;
 }
 
@@ -436,10 +456,13 @@ async function invokeStage(stage, prompt, options) {
     timeoutMs: options.timeoutMs,
     reasoning: options.reasoning,
     fetchImpl: options.fetchImpl,
-    includeRaw: options.includeRaw
+    includeRaw: options.includeRaw,
+    // OpenRouter-specific
+    useReasoning: stage.useReasoning,
+    systemPrompt: stage.systemPrompt
   };
 
-  if (stage.provider === 'openrouter') {
+  if (stage.provider === "openrouter") {
     return callOpenRouter(requestOptions);
   }
 
@@ -452,7 +475,10 @@ async function invokeStage(stage, prompt, options) {
 async function invokeRepairStage(stage, prompt, options) {
   const repairStage = {
     ...stage,
-    model: stage.repairModel || stage.model
+    model: stage.repairModel || stage.model,
+    // Repair always uses json_object mode, no reasoning
+    useReasoning: false,
+    systemPrompt: getRoleConfig("repair").system
   };
 
   return invokeStage(repairStage, prompt, {
@@ -486,7 +512,7 @@ async function runJsonTask(options) {
   });
   if (stages.length === 0) {
     throw createTemporaryUnavailableError(
-      createRouterError('No LLM providers configured', { retryable: true, code: 'provider_unconfigured' })
+      createRouterError("No LLM providers configured", { retryable: true, code: "provider_unconfigured" })
     );
   }
 
@@ -499,10 +525,10 @@ async function runJsonTask(options) {
         retryable: true,
         provider: stage.provider,
         model: stage.model,
-        code: 'stage_cooling_down',
+        code: "stage_cooling_down",
         retryAfterMs: Math.max(1, cooldownEntry.until - Date.now())
       });
-      logRouter('stage_skipped_cooldown', {
+      logRouter("stage_skipped_cooldown", {
         task,
         stage: stage.name,
         provider: stage.provider,
@@ -514,7 +540,7 @@ async function runJsonTask(options) {
       continue;
     }
 
-    logRouter('stage_start', {
+    logRouter("stage_start", {
       task,
       stage: stage.name,
       provider: stage.provider,
@@ -535,7 +561,7 @@ async function runJsonTask(options) {
       if (isRetryableFailure(error)) {
         const cooldown = markStageCooldown(stage, error);
         lastRetryableError = error;
-        logRouter('stage_retryable_failure', {
+        logRouter("stage_retryable_failure", {
           task,
           stage: stage.name,
           provider: stage.provider,
@@ -562,7 +588,7 @@ async function runJsonTask(options) {
       };
     }
 
-    const repairPrompt = typeof buildRepairPrompt === 'function'
+    const repairPrompt = typeof buildRepairPrompt === "function"
       ? buildRepairPrompt({
         task,
         stage,
@@ -580,7 +606,7 @@ async function runJsonTask(options) {
         validationErrors: parsed.validationErrors
       });
 
-    logRouter('repair_start', {
+    logRouter("repair_start", {
       task,
       stage: stage.name,
       provider: stage.provider,
@@ -614,14 +640,14 @@ async function runJsonTask(options) {
         `Invalid JSON after repair from ${stage.provider} ${stage.repairModel || stage.model}`,
         {
           retryable: true,
-          code: 'invalid_json_after_repair',
+          code: "invalid_json_after_repair",
           provider: stage.provider,
           model: stage.repairModel || stage.model,
           validationErrors: repaired.validationErrors
         }
       );
 
-      logRouter('repair_invalid_after_pass', {
+      logRouter("repair_invalid_after_pass", {
         task,
         stage: stage.name,
         provider: stage.provider,
@@ -632,7 +658,7 @@ async function runJsonTask(options) {
       if (isRetryableFailure(error)) {
         const cooldown = markStageCooldown(stage, error);
         lastRetryableError = error;
-        logRouter('repair_retryable_failure', {
+        logRouter("repair_retryable_failure", {
           task,
           stage: stage.name,
           provider: stage.provider,
@@ -658,5 +684,3 @@ module.exports = {
   isTemporaryUnavailableError,
   runJsonTask
 };
-
-
