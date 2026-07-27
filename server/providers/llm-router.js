@@ -103,10 +103,23 @@ function parseRetryDelayMs(message) {
   return bestMs || null;
 }
 
+function isCompatModel(stage) {
+  return stage?.name?.includes("-compat") === true;
+}
+
 function getStageCooldownMs(stage, error) {
   if (!error) return null;
 
   const message = String(error.message || "");
+
+  // Skip compat models entirely on 503 (model overloaded)
+  if (
+    error.status === 503 &&
+    isCompatModel(stage)
+  ) {
+    return MISSING_ENDPOINT_STAGE_COOLDOWN_MS;
+  }
+
   if (
     stage?.provider === "openrouter" &&
     error.status === 404 &&
