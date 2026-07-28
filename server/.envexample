@@ -22,38 +22,38 @@ DEMO_AUTH_SECRET=your-long-random-demo-auth-secret
 CORS_ORIGIN=
 CORS_ORIGINS=
 
-# OpenRouter-first LLM routing (PRIMARY: free models with reasoning)
+# OpenRouter LLM routing (PRIMARY - Nemotron free models with reasoning)
 OPENROUTER_API_KEY=your-openrouter-api-key
 OPENROUTER_API_BASE=https://openrouter.ai/api/v1
 
-# Generate (exam creation) - Quality priority
-OPENROUTER_MODEL_GENERATE_PRIMARY=nvidia/nemotron-3-super-120b-a12b:free
-OPENROUTER_MODEL_GENERATE_SECONDARY=nvidia/nemotron-3-nano-30b-a3b:free
-OPENROUTER_MODEL_GENERATE_ROUTER=openrouter/free
+# Generate (exam creation) - Quality priority chain
+OPENROUTER_MODEL_GENERATE_PRIMARY=nvidia/nemotron-3-ultra-550b-a55b:free
+OPENROUTER_MODEL_GENERATE_SECONDARY=nvidia/nemotron-3-super-120b-a12b:free
+OPENROUTER_MODEL_GENERATE_TERTIARY=nvidia/nemotron-3-nano-30b-a3b:free
 
 # Repair (JSON fix) - Speed priority
 OPENROUTER_MODEL_REPAIR_PRIMARY=nvidia/nemotron-3-nano-30b-a3b:free
 OPENROUTER_MODEL_REPAIR_SECONDARY=openrouter/free
 
-# Explain (grading/feedback) - Quality priority
-OPENROUTER_MODEL_EXPLAIN_PRIMARY=nvidia/nemotron-3-super-120b-a12b:free
-OPENROUTER_MODEL_EXPLAIN_SECONDARY=nvidia/nemotron-3-nano-30b-a3b:free
+# Explain (grading/feedback) - Quality priority chain
+OPENROUTER_MODEL_EXPLAIN_PRIMARY=nvidia/nemotron-3-ultra-550b-a55b:free
+OPENROUTER_MODEL_EXPLAIN_SECONDARY=nvidia/nemotron-3-super-120b-a12b:free
+OPENROUTER_MODEL_EXPLAIN_TERTIARY=nvidia/nemotron-3-nano-30b-a3b:free
 
 OPENROUTER_GENERATE_REASONING_MAX_TOKENS=1024
 LLM_GENERATE_MAX_TOKENS=16384
 LLM_TIMEOUT_MS=120000
-# Effective blueprint generation concurrency = min(BLUEPRINT_GENERATION_CONCURRENCY, OPENROUTER_RPM, 5)
 OPENROUTER_RPM=5
 BLUEPRINT_GENERATION_CONCURRENCY=4
 BLUEPRINT_EAGER_SLOT_COUNT=2
 BLUEPRINT_ON_DEMAND_BATCH_SIZE=2
 BLUEPRINT_ON_DEMAND_REQUEST_CONCURRENCY=2
 
-# Gemini fallback text generation (SECONDARY: reliable json_object mode)
+# Gemini fallback text generation (SECONDARY - reliable json_object mode)
 GEMINI_API_KEY_A=your-gemini-api-key-a
 GEMINI_API_KEY_B=your-gemini-api-key-b
 GEMINI_MODEL_FALLBACK=gemini-3.1-flash-lite
-GEMINI_MODEL_FALLBACK_COMPAT=gemini-2.5-flash-lite
+GEMINI_MODEL_FALLBACK_COMPAT=
 
 # Legacy Gemini compatibility
 GEMINI_API_KEY=your-legacy-gemini-api-key

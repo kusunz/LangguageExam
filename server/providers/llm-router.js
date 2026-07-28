@@ -163,9 +163,10 @@ function markStageCooldown(stage, error) {
 function getTaskModels() {
   return {
     generate: {
-      openrouterPrimary: process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || "nvidia/nemotron-3-super-120b-a12b:free",
-      openrouterSecondary: process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || "nvidia/nemotron-3-nano-30b-a3b:free",
-      openrouterRouter: process.env.OPENROUTER_MODEL_GENERATE_ROUTER || "openrouter/free"
+      openrouterPrimary: process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || "nvidia/nemotron-3-ultra-550b-a55b:free",
+      openrouterSecondary: process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || "nvidia/nemotron-3-super-120b-a12b:free",
+      openrouterTertiary: process.env.OPENROUTER_MODEL_GENERATE_TERTIARY || "nvidia/nemotron-3-nano-30b-a3b:free"
+      // REMOVED: openrouterRouter (was random router)
     },
     repair: {
       openrouterPrimary: process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || "nvidia/nemotron-3-nano-30b-a3b:free",
@@ -188,7 +189,7 @@ function buildProviderStages(taskName) {
   // OpenRouter stages FIRST (primary provider)
   if (process.env.OPENROUTER_API_KEY) {
     const isFreeModel = (model) => model && model.includes(":free");
-    const routerModel = isFreeModel(taskConfig.openrouterRouter);
+    
 
     if (taskConfig.openrouterPrimary) {
       const primaryIsFree = isFreeModel(taskConfig.openrouterPrimary);
@@ -697,3 +698,7 @@ module.exports = {
   isTemporaryUnavailableError,
   runJsonTask
 };
+
+
+
+
