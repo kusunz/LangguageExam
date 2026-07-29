@@ -169,8 +169,8 @@ function getTaskModels() {
       // REMOVED: openrouterRouter (was random router)
     },
     repair: {
-      openrouterPrimary: process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || "nvidia/nemotron-3-nano-30b-a3b:free",
-      openrouterSecondary: process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || "openrouter/free"
+      openrouterPrimary: process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || "nvidia/nemotron-3-super-120b-a12b:free",
+      openrouterSecondary: process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || "nvidia/nemotron-3-nano-30b-a3b:free"
     },
     explain: {
       openrouterPrimary: process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || "nvidia/nemotron-3-super-120b-a12b:free",

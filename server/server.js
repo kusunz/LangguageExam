@@ -1056,6 +1056,11 @@ async function getExamInstanceAccess(userId, instanceKey) {
     return { ok: false, status: 404, error: 'Instance not found' };
   }
 
+  // Demo users: skip attempt-status check (attempts may have been cleaned up)
+  if (isDemoUserId(userId)) {
+    return { ok: true, attemptStatus: 'active' };
+  }
+
   const attempt = await db.query(
     `SELECT status
      FROM attempts
@@ -3888,34 +3893,55 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
           temperature: 0.2
         };
 
+        const gradeTimeoutMs = Number.parseInt(process.env.GRADE_TIMEOUT_MS || String(analysisConfig.timeoutMs), 10);
+        let gradeTimedOut = false;
         let analysis;
-        if (useSplitGrading) {
-          console.log(`[Grade V2] Split-grading: ${wrongQuestions.length} wrong > threshold ${splitThreshold}`);
-          analysis = await runSplitGrading({
-            wrongQuestions,
-            ...sharedGradingBase,
-            maxTokensSummary: analysisConfig.maxTokensSummary,
-            maxTokensMondai: analysisConfig.maxTokensMondai,
-            timeoutMs: analysisConfig.timeoutMs
-          });
+
+        const gradeTimeoutPromise = new Promise(resolve =>
+          setTimeout(() => { gradeTimedOut = true; resolve(null); }, gradeTimeoutMs)
+        );
+
+        const gradeWorkPromise = useSplitGrading
+          ? (() => {
+              console.log(`[Grade V2] Split-grading: ${wrongQuestions.length} wrong > threshold ${splitThreshold}`);
+              return runSplitGrading({
+                wrongQuestions,
+                ...sharedGradingBase,
+                maxTokensSummary: analysisConfig.maxTokensSummary,
+                maxTokensMondai: analysisConfig.maxTokensMondai,
+                timeoutMs: analysisConfig.timeoutMs
+              });
+            })()
+          : (() => {
+              console.log(`[Grade V2] Single-call grading: ${wrongQuestions.length} wrong`);
+              const detailedPrompt = buildDetailedGradeAnalysisPrompt({
+                ...sharedGradingBase,
+                wrongQuestions
+              });
+              return runJsonTask({
+                task: 'explain',
+                prompt: detailedPrompt,
+                validateResult: buildDetailedGradeAnalysisValidator(wrongQuestions.map((q) => q.id)),
+                maxTokens: analysisConfig.maxTokens,
+                timeoutMs: analysisConfig.timeoutMs,
+                preferredProviders: analysisConfig.preferredProviders,
+                preferredStageNames: analysisConfig.preferredStageNames,
+                temperature: 0.2
+              }).then(r => r?.result || {});
+            })();
+
+        const gradeRace = await Promise.race([gradeWorkPromise, gradeTimeoutPromise]).catch(err => {
+          console.warn(`[Grade V2] AI grading error (will use fallback): ${err.message}`);
+          return null;
+        });
+
+        if (gradeTimedOut || gradeRace === null) {
+          console.warn(`[Grade V2] AI grading ${gradeTimedOut ? "timed out" : "failed"} – returning fallback result without AI enrichment`);
+          analysis = {};
         } else {
-          console.log(`[Grade V2] Single-call grading: ${wrongQuestions.length} wrong`);
-          const detailedPrompt = buildDetailedGradeAnalysisPrompt({
-            ...sharedGradingBase,
-            wrongQuestions
-          });
-          const analysisResult = await runJsonTask({
-            task: 'explain',
-            prompt: detailedPrompt,
-            validateResult: buildDetailedGradeAnalysisValidator(wrongQuestions.map((q) => q.id)),
-            maxTokens: analysisConfig.maxTokens,
-            timeoutMs: analysisConfig.timeoutMs,
-            preferredProviders: analysisConfig.preferredProviders,
-            preferredStageNames: analysisConfig.preferredStageNames,
-            temperature: 0.2
-          });
-          analysis = analysisResult?.result || {};
+          analysis = gradeRace;
         }
+
 
         analysisSummary = {
           ...analysisSummary,
@@ -5291,7 +5317,7 @@ async function runSplitGrading({
       if (!s.learner_summary) errors.push("missing_learner_summary");
       if (!Array.isArray(s.study_plan)) errors.push("invalid_study_plan");
       if (!Array.isArray(s.weak_tags)) errors.push("invalid_weak_tags");
-      if (!Array.isArray(s.strong_tags)) errors.push("invalid_strong_tags");
+      if (!Array.isArray(s.strength_tags) && !Array.isArray(s.strong_tags)) errors.push("invalid_strong_tags");
       if (!Array.isArray(s.focus_tags)) errors.push("invalid_focus_tags");
       if (!Array.isArray(s.confusion_patterns)) errors.push("invalid_confusion_patterns");
       if (!Array.isArray(s.personalization_hints)) errors.push("invalid_personalization_hints");
