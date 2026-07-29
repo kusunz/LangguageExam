@@ -19,8 +19,9 @@ RULES:
 1. Output ONLY valid JSON - no markdown, no explanation
 2. Fix syntax errors: missing quotes, trailing commas, unclosed brackets
 3. Preserve all original fields and values where possible
-4. If a value is missing, infer the minimal valid fix
-5. Maintain the original schema structure`;
+4. ADD MISSING REQUIRED FIELDS with appropriate values (boolean, string, number)
+5. If a value is missing, infer the minimal valid fix
+6. Maintain the original schema structure`;
 
 const EXPLAIN_SYSTEM = `You are a strict language exam grader and tutor. Output ONLY valid JSON.
 
@@ -65,3 +66,4 @@ module.exports = {
   getRoleConfig,
   getSystemPrompt
 };
+
