@@ -3870,33 +3870,53 @@ app.post('/api/grade-test', authMiddleware, async (req, res) => {
           wrongQuestions,
           totalCount
         });
-        const detailedPrompt = buildDetailedGradeAnalysisPrompt({
+        const splitThreshold = Number.parseInt(process.env.GRADE_SPLIT_THRESHOLD || '3', 10);
+        const useSplitGrading = wrongQuestions.length > splitThreshold;
+        const gradingExamMeta = { ...examMeta, total_score: correctCount, max_score: totalCount };
+        const gradingUserContext = buildUserLearningContext(userData, examMeta, uiLocale);
+        const sharedGradingBase = {
+          examMeta: gradingExamMeta,
           uiLocale,
-          examMeta: {
-            ...examMeta,
-            total_score: correctCount,
-            max_score: totalCount
-          },
-          wrongQuestions,
           weakTags,
           strongTags,
           scoreByGroup,
-          userLearningContext: buildUserLearningContext(userData, examMeta, uiLocale),
+          userLearningContext: gradingUserContext,
           fallbackSummary: analysisSummary,
-          responseProfile: analysisConfig.responseProfile
-        });
-        const analysisResult = await runJsonTask({
-          task: 'explain',
-          prompt: detailedPrompt,
-          validateResult: buildDetailedGradeAnalysisValidator(wrongQuestions.map((question) => question.id)),
-          maxTokens: analysisConfig.maxTokens,
-          timeoutMs: analysisConfig.timeoutMs,
+          responseProfile: analysisConfig.responseProfile,
           preferredProviders: analysisConfig.preferredProviders,
           preferredStageNames: analysisConfig.preferredStageNames,
           temperature: 0.2
-        });
+        };
 
-        const analysis = analysisResult?.result || {};
+        let analysis;
+        if (useSplitGrading) {
+          console.log(`[Grade V2] Split-grading: ${wrongQuestions.length} wrong > threshold ${splitThreshold}`);
+          analysis = await runSplitGrading({
+            wrongQuestions,
+            ...sharedGradingBase,
+            maxTokensSummary: analysisConfig.maxTokensSummary,
+            maxTokensMondai: analysisConfig.maxTokensMondai,
+            timeoutMs: analysisConfig.timeoutMs
+          });
+        } else {
+          console.log(`[Grade V2] Single-call grading: ${wrongQuestions.length} wrong`);
+          const detailedPrompt = buildDetailedGradeAnalysisPrompt({
+            ...sharedGradingBase,
+            wrongQuestions
+          });
+          const analysisResult = await runJsonTask({
+            task: 'explain',
+            prompt: detailedPrompt,
+            validateResult: buildDetailedGradeAnalysisValidator(wrongQuestions.map((q) => q.id)),
+            maxTokens: analysisConfig.maxTokens,
+            timeoutMs: analysisConfig.timeoutMs,
+            preferredProviders: analysisConfig.preferredProviders,
+            preferredStageNames: analysisConfig.preferredStageNames,
+            temperature: 0.2
+          });
+          analysis = analysisResult?.result || {};
+        }
+
         analysisSummary = {
           ...analysisSummary,
           ...ensureObject(analysis.summary),
@@ -5194,15 +5214,25 @@ IMPORTANT:
 
 function getDetailedGradeAnalysisRunConfig(options = {}) {
     const wrongCount = Math.max(0, ensureArray(options.wrongQuestions).length);
+    const envSummaryMax = Number.parseInt(process.env.LLM_GRADE_SUMMARY_MAX_TOKENS || '0', 10);
+    const envMondaiMax  = Number.parseInt(process.env.LLM_GRADE_MONDAI_MAX_TOKENS  || '0', 10);
+
+    // Single-call token budget (used when not split-grading)
+    const singleMaxTokens = wrongCount <= 1 ? 10240
+      : wrongCount <= 3 ? 16384
+      : wrongCount <= 6 ? 20480
+      : 24576;
+
+    // Split-grading budgets: summary once + per-mondai group
+    const maxTokensSummary = envSummaryMax > 0 ? envSummaryMax : 8000;
+    const maxTokensMondai  = envMondaiMax  > 0 ? envMondaiMax  : 6000;
 
     return {
-      // Increased: grading output is complex (Vietnamese + review_tasks + mini_lesson + extra_examples per question)
-      maxTokens: wrongCount <= 1 ? 8192 : wrongCount <= 3 ? 10240 : wrongCount <= 6 ? 12288 : 14336,
-      // Increased: reasoning models need more time for complex structured output
+      maxTokens: singleMaxTokens,
+      maxTokensSummary,
+      maxTokensMondai,
       timeoutMs: wrongCount <= 1 ? 90000 : wrongCount <= 3 ? 120000 : wrongCount <= 6 ? 150000 : 180000,
-      // FIXED: OpenRouter (Nemotron) first - Gemini 2.5-flash-lite is overloaded (503)
       preferredProviders: ['openrouter', 'gemini'],
-      // FIXED: Use working OpenRouter stages first, skip compat stages entirely
       preferredStageNames: [
         'openrouter-primary',
         'openrouter-secondary',
@@ -5221,7 +5251,160 @@ function getDetailedGradeAnalysisRunConfig(options = {}) {
     };
 }
 
-function buildDetailedGradeAnalysisPrompt({
+async function runSplitGrading({
+  wrongQuestions,
+  examMeta,
+  uiLocale,
+  weakTags,
+  strongTags,
+  scoreByGroup,
+  userLearningContext,
+  fallbackSummary,
+  responseProfile,
+  maxTokensSummary,
+  maxTokensMondai,
+  timeoutMs,
+  preferredProviders,
+  preferredStageNames,
+  temperature
+}) {
+  // Step 1: Generate Summary (no reasoning needed)
+  console.log("[SPLIT_GRADING] Step 1: Generating summary...");
+  const summaryPrompt = buildSummaryGradePrompt({
+    uiLocale,
+    examMeta,
+    wrongQuestions,
+    weakTags,
+    strongTags,
+    scoreByGroup,
+    userLearningContext,
+    fallbackSummary
+  });
+
+  const summaryValidator = (result) => {
+    const errors = [];
+    if (!result || typeof result !== "object") return ["result_not_object"];
+    if (!result.summary) errors.push("missing_summary");
+    else {
+      const s = result.summary;
+      if (!s.recommendation) errors.push("missing_recommendation");
+      if (!s.learner_summary) errors.push("missing_learner_summary");
+      if (!Array.isArray(s.study_plan)) errors.push("invalid_study_plan");
+      if (!Array.isArray(s.weak_tags)) errors.push("invalid_weak_tags");
+      if (!Array.isArray(s.strong_tags)) errors.push("invalid_strong_tags");
+      if (!Array.isArray(s.focus_tags)) errors.push("invalid_focus_tags");
+      if (!Array.isArray(s.confusion_patterns)) errors.push("invalid_confusion_patterns");
+      if (!Array.isArray(s.personalization_hints)) errors.push("invalid_personalization_hints");
+      if (!Array.isArray(s.next_goals)) errors.push("invalid_next_goals");
+      if (!["step_by_step", "contrastive", "example_first"].includes(s.explanation_style)) {
+        errors.push("invalid_explanation_style");
+      }
+    }
+    return errors;
+  };
+
+  const summaryResult = await runJsonTask({
+    task: "explain",
+    prompt: summaryPrompt,
+    validateResult: summaryValidator,
+    maxTokens: maxTokensSummary,
+    timeoutMs: Math.min(timeoutMs, 60000),
+    preferredProviders: preferredProviders,
+    preferredStageNames: preferredStageNames,
+    temperature
+  });
+
+  const summary = summaryResult?.result?.summary || {};
+
+  // Step 2: Group wrong questions by mondai (or batch of 2-3)
+  const mondaiGroups = groupQuestionsByMondai(wrongQuestions);
+  console.log("[SPLIT_GRADING] Step 2: Grading", mondaiGroups.length, "mondai groups");
+
+  const allQuestionFeedback = {};
+
+  for (const group of mondaiGroups) {
+    const { mondaiId, mondaiName, questions } = group;
+    console.log("[SPLIT_GRADING] Grading mondai:", mondaiName, "(", questions.length, "questions)");
+
+    const mondaiPrompt = buildMondaiFeedbackPrompt({
+      uiLocale,
+      mondaiId,
+      mondaiName,
+      questions,
+      summary,
+      weakTags,
+      strongTags,
+      responseProfile
+    });
+
+    const mondaiValidator = (result) => {
+      const errors = [];
+      if (!result || typeof result !== "object") return ["result_not_object"];
+      if (!result.question_feedback) errors.push("missing_question_feedback");
+      else {
+        questions.forEach((q) => {
+          const fb = result.question_feedback[q.id];
+          if (!fb) errors.push(`missing_feedback:${q.id}`);
+          else {
+            ["why_wrong", "key_point", "mini_lesson"].forEach((f) => {
+              if (!fb[f] || !fb[f].trim()) errors.push(`empty_${f}:${q.id}`);
+            });
+            if (!Array.isArray(fb.review_tasks) || fb.review_tasks.length === 0) errors.push(`empty_review_tasks:${q.id}`);
+            if (!Array.isArray(fb.extra_examples)) errors.push(`missing_extra_examples:${q.id}`);
+          }
+        });
+      }
+      return errors;
+    };
+
+    const mondaiResult = await runJsonTask({
+      task: "explain",
+      prompt: mondaiPrompt,
+      validateResult: mondaiValidator,
+      maxTokens: maxTokensMondai,
+      timeoutMs,
+      preferredProviders: preferredProviders,
+      preferredStageNames: preferredStageNames,
+      temperature,
+      // Enable reasoning for detailed feedback
+      reasoning: { enabled: true, max_tokens: 2048 }
+    });
+
+    Object.assign(allQuestionFeedback, mondaiResult?.result?.question_feedback || {});
+  }
+
+  return { summary, question_feedback: allQuestionFeedback };
+}
+
+function groupQuestionsByMondai(questions) {
+  const groups = new Map();
+  questions.forEach((q) => {
+    const mondaiId = q.mondai_id || q.section_id || "default";
+    const mondaiName = q.mondai_name || q.section_name || "Mondai";
+    if (!groups.has(mondaiId)) {
+      groups.set(mondaiId, { mondaiId, mondaiName, questions: [] });
+    }
+    groups.get(mondaiId).questions.push(q);
+  });
+  // Split groups larger than 3 questions
+  const result = [];
+  for (const group of groups.values()) {
+    if (group.questions.length <= 3) {
+      result.push(group);
+    } else {
+      for (let i = 0; i < group.questions.length; i += 3) {
+        result.push({
+          mondaiId: group.mondaiId + "_part" + Math.floor(i / 3 + 1),
+          mondaiName: group.mondaiName + " (Part " + Math.floor(i / 3 + 1) + ")",
+          questions: group.questions.slice(i, i + 3)
+        });
+      }
+    }
+  }
+  return result;
+}
+
+function buildSummaryGradePrompt({
   uiLocale = 'vi',
   examMeta = {},
   wrongQuestions = [],
@@ -5330,6 +5513,69 @@ Rules:
 - Prefer short sentences and direct learner-facing language.
 - Output valid JSON only. No markdown. No commentary outside JSON.`;
 }
+
+// buildDetailedGradeAnalysisPrompt: used for single-call grading (<=GRADE_SPLIT_THRESHOLD wrong questions)
+// Same schema as buildSummaryGradePrompt - this is the combined summary+question_feedback prompt.
+function buildDetailedGradeAnalysisPrompt(opts) {
+  return buildSummaryGradePrompt(opts);
+}
+
+// buildMondaiFeedbackPrompt: used by runSplitGrading for per-mondai-group feedback.
+// Returns only question_feedback (no summary section).
+function buildMondaiFeedbackPrompt({
+  uiLocale = 'vi',
+  mondaiId = 'unknown',
+  mondaiName = 'Mondai',
+  questions = [],
+  summary = {},
+  weakTags = [],
+  strongTags = [],
+  responseProfile = {}
+}) {
+  const locale = normalizeUiLocale(uiLocale);
+  const feedbackLanguage = getFeedbackLanguageName(locale);
+  const maxExamplesPerQuestion = Math.max(1, Number(responseProfile.maxExamplesPerQuestion || 1));
+  const maxReviewTasksPerQuestion = Math.max(1, Number(responseProfile.maxReviewTasksPerQuestion || 2));
+  const recommendation = String(summary.recommendation || '').trim();
+  const explanationStyle = summary.explanation_style || 'step_by_step';
+
+  const questionsBlock = questions.map((q, i) =>
+    `[${i + 1}] id="${q.id}"\nPrompt: ${q.prompt}\nTags: ${ensureArray(q.tags).join(', ') || '(none)'}\nStudent chose: ${q.user_answer}\nCorrect answer: ${q.correct_answer}\nAuthor hint: ${q.explain_brief || '(none)'}${q.passage_snippet ? `\nContext: ${q.passage_snippet}` : ''}`
+  ).join('\n\n');
+
+  return `You are a JLPT coach giving per-question feedback in ${feedbackLanguage}.
+Mondai group: ${mondaiName} (id: ${mondaiId})
+Overall coaching style: ${explanationStyle}
+${recommendation ? `Overall recommendation: ${recommendation}` : ''}
+Weak tags across exam: ${uniqueStrings(weakTags, 6).join(', ') || '(none)'}
+
+Grade ONLY these ${questions.length} wrong questions. Output ONLY question_feedback for their ids.
+
+QUESTIONS:
+${questionsBlock}
+
+Return RAW JSON ONLY:
+{
+  "question_feedback": {
+    "<question_id>": {
+      "why_wrong": "<why wrong in ${feedbackLanguage}>",
+      "key_point": "<core point in ${feedbackLanguage}>",
+      "mini_lesson": "<2-4 coaching sentences in ${feedbackLanguage}>",
+      "extra_examples": [{ "target": "<Japanese>", "${locale}": "<translation>" }],
+      "review_tasks": ["<task1>", "<task2>"]
+    }
+  }
+}
+
+Rules:
+- "why_wrong" must compare chosen answer vs correct answer.
+- "key_point" is a brief recall hook.
+- "mini_lesson" tells the learner what clue to notice next time.
+- Return at most ${maxReviewTasksPerQuestion} review_tasks per question.
+- Return at most ${maxExamplesPerQuestion} extra_examples per question.
+- Output valid JSON only. No markdown. No commentary.`;
+}
+
 function buildTtsTextPrompt(text, language) {
   const langName = getTtsLanguageName(language);
 
@@ -7053,6 +7299,14 @@ if (require.main === module) {
 }
 
 module.exports = app;
+
+
+
+
+
+
+
+
 
 
 
