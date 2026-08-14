@@ -1,11 +1,12 @@
 # Dependencies
 node_modules/
-.agent/
-*.zip
+
 # Environment files
 .env
 .env.local
 .env.*.local
+*.env
+# Env templates are intentionally tracked (placeholders only)
 
 # User data
 server/data/
@@ -15,38 +16,72 @@ dist/
 build/
 .vercel/
 
-# IDE
+# IDE & OS
 .idea/
 .vscode/
 *.swp
 *.swo
-
-# OS
 .DS_Store
 Thumbs.db
 
-# Logs
+# Logs & Caches
 *.log
-npm-debug.log*
-server/server.log
-
-# Cache
-.cache/
 *.cache
+.cache/
 
-# Private project notes
-.project-notes.md
-
-# Local scripts
-*.ps1
-
-# Local test helpers
+# Test Files & Folders (Strictly Ignored)
+tests/
+server/tests/
+web/tests/
+test/
+*.test.js
+*.spec.js
 test-*.js
 server/test-*.js
-
-# Test output and scratch files
-server/test-results.txt
+test-results.txt
 check_output.txt
 test-output.txt
 test-v2-out.txt
+playwright-report/
+test-results/
+playwright.config.js
+**/playwright.config.js
+
+# Agent, AI & Tooling (Strictly Ignored)
+.agent/
+.agent-tmp/
+.hermes/
+.codex/
+graphify-out/
+repomack-output.*
+repompack-*
+_tmp_*.py
+*.hermes-tmp.*
+*.pyc
+__pycache__/
+
+# Runtime & Scratch Artifacts
+*.pid
+nul
+*.backup
+*.backup2
 temp_snippet.txt
+*.zip
+*.ps1
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Secondary Documents (Keep only README.md and DEPLOYMENT.md)
+docs/
+.project-notes.md
+*.md
+!README.md
+!DEPLOYMENT.md
+# Scratch / debug scripts (do not track)
+server/debug-db.js
+server/getTaskModels-fix.js
+server/stages-fix.js
+server/.envexample
+db-schema.json

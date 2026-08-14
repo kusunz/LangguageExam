@@ -1,168 +1,90 @@
-# Language Exam Practice App
+# Japanese Practice
 
-Ứng dụng luyện thi ngoại ngữ (JLPT N2, HSK) với đề thi được tạo 100% ngẫu nhiên bằng AI.
+Language exam practice (JLPT N2; HSK template ready). Exams are generated 100% by AI.
 
 ## Features
 
-- 🎯 **JLPT N2** support (HSK template ready for extension)
-- 🤖 **AI-generated questions** - 100% original, random questions
-- 🎧 **TTS audio** for listening sections (Gemini/Deepgram/Browser)
-- ⏱️ **Real-time timers** - Overall + group timers
-- 📊 **Detailed feedback** - Vietnamese explanations, mini-lessons
-- 📕 **Mistake book** - Track and review errors
-- 📱 **Mobile-first** - Touch-friendly, responsive design
+- JLPT N2 practice (HSK template ready to extend)
+- AI-generated, fully randomized questions
+- TTS audio (Gemini / Deepgram / browser fallback)
+- Overall and per-group timers
+- Vietnamese explanations and mini-lessons
+- Mistake book for error review
+- Mobile-first, responsive UI
 
 ## Quick Start
 
-### 1. Clone and Setup
+Install all dependencies from the repo root:
 
 ```bash
-cd g:\japanesePractice
+npm install            # server + web
+```
+
+Configure the server environment:
+
+```bash
 cd server
-npm install
+cp ../.env.local.template .env     # then fill in placeholders
 ```
 
-### 2. Configure Environment
-
-Copy the example env file and fill in your API keys:
+Run locally:
 
 ```bash
-copy .env.example .env
+npm start                           # server: http://localhost:3000
+cd ../web && npm run dev            # web (Vite, proxies to API): http://localhost:5173
 ```
 
-Edit `.env`:
+## Authentication
 
-```env
-PORT=3000
-NODE_ENV=development
+The app runs in demo mode by default. Click "Dung thu khong dang nhap" to start; sessions persist via localStorage and user data is stored server-side per session.
 
-# Privy Auth (optional for demo mode)
-PRIVY_APP_ID=your-privy-app-id
-PRIVY_APP_SECRET=your-privy-app-secret
-
-# LLM (at least one required)
-OPENAI_API_KEY=your-openai-key
-GEMINI_API_KEY=your-gemini-key
-
-# TTS (optional)
-DEEPGRAM_API_KEY=your-deepgram-key
-```
-
-### 3. Run Locally
-
-```bash
-npm start
-```
-
-Open http://localhost:3000
-
-## Auth Mode
-
-The app runs in **demo mode** by default:
-- Click "Dùng thử không đăng nhập" to enter
-- Session persists via localStorage
-- User data is stored server-side per session
-
-For production with real email authentication, you can integrate Privy or another auth provider by updating `app.js` Auth module.
-
-## API Keys
-
-### OpenAI (optional)
-- Go to [OpenAI API](https://platform.openai.com/api-keys)
-- Create an API key
-- Add to `.env` as `OPENAI_API_KEY`
-
-### Google Gemini (recommended)
-- Go to [Google AI Studio](https://aistudio.google.com/apikey)
-- Create an API key
-- Add to `.env` as `GEMINI_API_KEY`
-
-### Deepgram TTS (optional)
-- Go to [Deepgram Console](https://console.deepgram.com)
-- Create an API key
-- Add to `.env` as `DEEPGRAM_API_KEY`
+For production auth, set `SESSION_INTROSPECT_URL` and `DASUN_LOGIN_URL` (see `.env.production.template`).
 
 ## Project Structure
 
 ```
 japanesePractice/
-├── web/
-│   ├── index.html      # SPA entry point
-│   ├── styles.css      # Mobile-first styles
-│   ├── app.js          # Application logic
-│   └── exams/
-│       ├── jlpt_n2.json    # JLPT N2 exam spec
-│       └── hsk_template.json # HSK template
-├── server/
-│   ├── server.js       # Express server
-│   ├── package.json
-│   ├── .env.example
-│   └── data/           # User data (auto-created)
-└── README.md
+api/                 # Vercel serverless entry (api/index.js)
+server/              # Express API, providers, scripts
+web/                 # Vite SPA (HTML/CSS/JS)
+.env.local.template  # local dev template (copy to server/.env)
+.env.production.template
+vercel.json
+package.json
+README.md
+DEPLOYMENT.md
 ```
 
-## Extending with New Exams
+## Extend an Exam
 
-To add a new exam (e.g., HSK 5):
+1. Add `web/exams/hsk_5.json` following `web/exams/jlpt_n2.json`.
+2. Add the tab in `web/index.html`.
 
-1. Create `web/exams/hsk_5.json` following the same schema as `jlpt_n2.json`
-2. Add the exam tab in `index.html`
-3. Enable the tab in UI (remove `disabled` attribute)
+Exam spec:
 
-Exam spec structure:
 ```json
-{
-  "exam_id": "hsk_5",
-  "display_name_vi": "HSK 5",
-  "language": "zh-CN",
-  "level": "HSK5",
-  "modes": { ... },
-  "official_time_limits_sec": { ... },
-  "groups": [ ... ],
-  "ui": { ... }
-}
+{ "exam_id": "hsk_5", "display_name_vi": "HSK 5", "language": "zh-CN", "level": "HSK5",
+  "modes": { "basic": {}, "standard": {}, "official": {} }, "official_time_limits_sec": {},
+  "groups": [{}], "ui": {} }
 ```
 
 ## Test Modes
 
-| Mode | Time | Questions | Use Case |
-|------|------|-----------|----------|
-| Basic | ~35 min | ~33% | Quick practice |
-| Standard | ~70 min | ~67% | Regular study |
-| Official | ~155 min | 100% | Exam simulation |
+| Mode | Time | Questions |
+|------|------|-----------|
+| Basic | ~35m | ~33% |
+| Standard | ~70m | ~67% |
+| Official | ~155m | 100% |
+
+## Environment
+
+Required: `DATABASE_URL` plus at least one LLM provider (NVIDIA NIM, OpenRouter, or Gemini).
+Optional: `DEEPGRAM_API_KEY` for TTS.
+Template values are placeholders only; never commit a real `.env`.
 
 ## Deployment
 
-### Option 1: Node.js Server
-
-```bash
-# Production
-NODE_ENV=production npm start
-```
-
-### Option 2: Docker
-
-```dockerfile
-FROM node:20-alpine
-WORKDIR /app
-COPY server/package*.json ./
-RUN npm ci --production
-COPY server/ ./
-COPY web/ ./web/
-EXPOSE 3000
-CMD ["node", "server.js"]
-```
-
-### Option 3: Vercel/Railway
-
-Deploy the `server/` folder as a Node.js app, with `web/` as static files.
-
-## Security Notes
-
-- API keys are only stored on server, never exposed to client
-- User tokens are verified server-side with Privy JWKS
-- Rate limiting protects API endpoints
-- Per-user data is isolated by verified userId
+See `DEPLOYMENT.md` (Vercel).
 
 ## License
 

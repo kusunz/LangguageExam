@@ -1,90 +1,86 @@
-# Deployment Guide (Vercel)
+# Deployment Guide
 
-This app uses Vercel for deployment with:
-- **Frontend**: Served by the Express app from the `web/` folder
-- **Backend**: Serverless Express API from `api/index.js`
+Deploys to Vercel. The Express handler (`api/index.js`) serves both the API and the static `web/` frontend from the same origin.
 
-## 1. Database Setup (Neon)
+## 1. Database (Neon Postgres)
 
-1.  Go to [Neon.tech](https://neon.tech) and sign up.
-2.  Create a new project.
-3.  Copy the **Connection String** (Postgres URL).
+1. Sign up at https://neon.tech.
+2. Create a project and copy its connection string into `DATABASE_URL`.
 
 ## 2. Deploy to Vercel
 
-### Quick Deploy:
 ```bash
-# Install Vercel CLI
 npm i -g vercel
-
-# Deploy from project root
-cd g:\japanesePractice
-vercel
+vercel            # first time: link the project
+vercel --prod     # production deploy
 ```
 
-For production after the first link:
-
-```bash
-vercel --prod
-```
-
-### Or via GitHub:
-1. Push to GitHub
-2. Go to [vercel.com](https://vercel.com) → New Project
-3. Import your repository
-4. Keep the project root as the repository root
-5. Deploy with `vercel.json`
+Or push to GitHub and import at https://vercel.com.
 
 ## 3. Environment Variables
 
-In Vercel Dashboard → Settings → Environment Variables:
+Configure in the Vercel dashboard. Use placeholders only and never commit real values (see `.env.production.template`).
 
-| Variable | Value | Required |
-|----------|-------|----------|
-| `DATABASE_URL` | Your Neon connection string | ✅ |
-| `DB_MODE` | `neon` | ✅ |
-| `NODE_ENV` | `production` | ✅ |
-| `ANSWER_HASH_SECRET` | Long random secret for answer hashing | ✅ |
-| `WARMUP_SECRET` | Long random secret for admin warmup cron endpoints | ✅ |
-| `DEMO_AUTH_SECRET` | Long random secret for signed demo sessions when Privy is enabled | Recommended |
-| `OPENROUTER_API_KEY` | Needed if OpenRouter should generate exams | Optional |
-| `GEMINI_API_KEY_A` | Gemini text generation key | Optional |
-| `GEMINI_API_KEY_B` | Backup Gemini text generation key | Optional |
-| `GEMINI_API_KEY` | Legacy Gemini key used by some text/TTS paths | Optional |
-| `GEMINI_EMBEDDING_KEY_A` | Gemini embeddings key | Optional |
-| `GEMINI_EMBEDDING_KEY_B` | Backup Gemini embeddings key | Optional |
-| `DEEPGRAM_API_KEY` | Deepgram TTS key | Optional |
-| `PRIVY_APP_ID` | Privy app ID | Optional |
-| `PRIVY_CLIENT_ID` | Privy client ID | Optional |
-| `CORS_ORIGIN` | Single allowed frontend origin if frontend is hosted separately | Optional |
-| `CORS_ORIGINS` | Comma-separated allowed frontend origins if hosting cross-origin | Optional |
+### Core
+| Variable | Value |
+|---|---|
+| DATABASE_URL | Neon Postgres connection string |
+| ANSWER_HASH_SECRET | openssl rand -hex 32 |
+| WARMUP_SECRET | openssl rand -hex 32 |
+| DEMO_AUTH_SECRET | openssl rand -hex 32 |
+
+### Auth (example domain)
+| Variable | Example |
+|---|---|
+| SESSION_INTROSPECT_URL | https://app.example.com/api/internal/session/introspect |
+| DASUN_LOGIN_URL | https://app.example.com/login |
+| CORS_ORIGIN | https://app.example.com |
+
+### LLM (NVIDIA NIM - grading/explain primary)
+| Variable | Value |
+|---|---|
+| NIM_BASE_URL | https://integrate.api.nvidia.com/v1 |
+| NIM_API_KEY | Your NIM API key |
+| NIM_MODEL_PRIMARY | nvidia/nemotron-4-340b-reward |
+
+### LLM (OpenRouter - free tier)
+| Variable | Value |
+|---|---|
+| OPENROUTER_API_KEY | Free-tier OpenRouter key |
+| OPENROUTER_API_BASE | https://openrouter.ai/api/v1 |
+| OPENROUTER_MODEL_GENERATE_PRIMARY | openai/gpt-oss-120b:free |
+
+### Optional
+| Variable | Notes |
+|---|---|
+| GEMINI_API_KEY_A | Embeddings + fallback generation |
+| DEEPGRAM_API_KEY | TTS (falls back to Gemini/browser) |
+
+Tuning (optional defaults in template): `LLM_TIMEOUT_MS`, `BLUEPRINT_GENERATION_CONCURRENCY`, `DB_MODE=neon`, `PORT`.
 
 ## 4. How It Works
 
-- `vercel.json` routes both `/api/*` and app page requests to the same Express serverless handler
-- Express serves `/exams/*` from `web/public/exams` and the SPA shell from `web/index.html`
-- This keeps the frontend and backend on the same deployment without requiring a separate Vite output folder
-- Same-origin deploys work without extra CORS configuration; only set `CORS_ORIGIN` or `CORS_ORIGINS` if your frontend runs on a different host
-- If Privy is enabled and demo login should remain available, set `DEMO_AUTH_SECRET` so demo sessions stay valid across server restarts and scale-out instances
+- `vercel.json` routes `/api/*` and all other paths to the Express handler.
+- Express serves `/exams/*` from `web/public/exams` and the SPA shell from `web/index.html`.
+- Same-origin deploys need no CORS. Set `CORS_ORIGIN`/`CORS_ORIGINS` only when the frontend is hosted elsewhere.
+- Keep `DEMO_AUTH_SECRET` set so demo login works across restarts and scale-out.
 
 ## 5. Local Development
 
 ```bash
-# Terminal 1: Backend
-cd server && npm start
-
-# Terminal 2: Frontend (with Vite)
-cd web && npm run dev
+cd server && npm start       # http://localhost:3000
+cd ../web && npm run dev     # http://localhost:5173 (proxies to API)
 ```
 
-Access via http://localhost:5173 (Vite proxies API to :3000)
+Copy `.env.local.template` to `server/.env`.
 
-## 6. Recommended Vercel Checks
+## 6. Verification
 
-After deploy, verify:
+1. `GET /` renders the login screen.
+2. `GET /exams/jlpt_n2.json` returns JSON.
+3. Demo login: `POST /api/user-data` returns `200`.
+4. Start a practice exam; the first spec loads without `404`.
 
-1. Open `/` and confirm the login screen renders.
-2. Open `/exams/jlpt_base.json` and confirm it returns JSON.
-3. Use demo login and confirm `/api/user-data` returns `200`.
-4. Start one practice session and confirm the first exam spec loads without `404`.
-5. If Privy is enabled, confirm both email login and demo login still work after a fresh deploy.
+## 7. Security
+
+Only `.template` files are tracked and they contain placeholders. Never commit a real `.env` with live secrets.
