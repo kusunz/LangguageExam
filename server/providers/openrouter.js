@@ -1,13 +1,10 @@
-const DEFAULT_OPENROUTER_BASE =
+﻿const DEFAULT_OPENROUTER_BASE =
   process.env.OPENROUTER_API_BASE ||
   process.env.OPENROUTER_BASE_URL ||
   "https://openrouter.ai/api/v1";
 const DEFAULT_OPENROUTER_BASE_URL = DEFAULT_OPENROUTER_BASE.replace(/\/+$/, "");
 
-function parsePositiveInt(value, fallback) {
-  const parsed = Number.parseInt(String(value ?? ""), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
+const { parsePositiveInt, createProviderError: _sharedCreateProviderError, extractMessageText } = require("./provider-utils");
 
 const DEFAULT_TIMEOUT_MS = parsePositiveInt(
   process.env.OPENROUTER_TIMEOUT_MS || process.env.LLM_TIMEOUT_MS,
@@ -60,34 +57,14 @@ function getOpenRouterDispatcher() {
 }
 
 function createProviderError(message, extra = {}) {
-  const error = new Error(message);
-  Object.assign(error, extra);
-  return error;
+  return _sharedCreateProviderError(message, extra);
 }
 
 function getOpenRouterBaseUrl() {
   return DEFAULT_OPENROUTER_BASE_URL;
 }
 
-function extractMessageText(message) {
-  if (!message) return "";
-  const content = message.content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-
-  let text = "";
-  for (const part of content) {
-    if (!part) continue;
-    if (typeof part === "string") {
-      text += part;
-      continue;
-    }
-    if (typeof part.text === "string") {
-      text += part.text;
-    }
-  }
-  return text;
-}
+// extractMessageText imported from provider-utils.js
 
 function isRetryableOpenRouterFailure(status, errorText) {
   const normalized = String(errorText || "").toLowerCase();

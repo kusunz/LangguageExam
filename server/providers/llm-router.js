@@ -1,11 +1,13 @@
-const { callOpenRouter } = require("./openrouter");
+﻿const { callOpenRouter } = require("./openrouter");
 const {
   DEFAULT_GEMINI_MODEL_FALLBACK,
   DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
   callGeminiText,
   getGeminiTextKeyStages
 } = require("./gemini");
+const { callNIM } = require("./nim");
 const { getRoleConfig } = require("./prompt-roles");
+const { parsePositiveInt } = require("./provider-utils");
 
 const TEMPORARY_UNAVAILABLE_PAYLOAD = {
   error: "llm_temporarily_unavailable",
@@ -20,10 +22,6 @@ const MISSING_ENDPOINT_STAGE_COOLDOWN_MS = parsePositiveInt(
   6 * 60 * 60 * 1000
 );
 
-function parsePositiveInt(value, fallback) {
-  const parsed = Number.parseInt(String(value ?? ""), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
 
 function logRouter(message, data = null) {
   const stamp = new Date().toISOString();
@@ -163,18 +161,26 @@ function markStageCooldown(stage, error) {
 function getTaskModels() {
   return {
     generate: {
-      openrouterPrimary: process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || "nvidia/nemotron-3-ultra-550b-a55b:free",
-      openrouterSecondary: process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || "nvidia/nemotron-3-super-120b-a12b:free",
-      openrouterTertiary: process.env.OPENROUTER_MODEL_GENERATE_TERTIARY || "nvidia/nemotron-3-nano-30b-a3b:free"
-      // REMOVED: openrouterRouter (was random router)
+      openrouterPrimary: process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || "openai/gpt-oss-120b:free",
+      openrouterSecondary: process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || "openai/gpt-oss-20b:free",
+      openrouterTertiary: process.env.OPENROUTER_MODEL_GENERATE_TERTIARY || "nvidia/nemotron-3-ultra-550b-a55b:free",
+      nimPrimary: process.env.NIM_MODEL_GENERATE_PRIMARY || process.env.NIM_MODEL_PRIMARY || "openai/gpt-oss-120b",
+      nimSecondary: process.env.NIM_MODEL_GENERATE_SECONDARY || process.env.NIM_MODEL_SECONDARY || "nvidia/nemotron-3-ultra",
+      nimTertiary: process.env.NIM_MODEL_GENERATE_TERTIARY || process.env.NIM_MODEL_TERTIARY || "nvidia/nemotron-3-super",
+      geminiFallback: process.env.GEMINI_MODEL_GENERATE_FALLBACK || process.env.GEMINI_MODEL_FALLBACK || "gemini-3.1-flash-lite"
     },
     repair: {
-      openrouterPrimary: process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || "nvidia/nemotron-3-super-120b-a12b:free",
-      openrouterSecondary: process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || "nvidia/nemotron-3-nano-30b-a3b:free"
+      openrouterPrimary: process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || "nvidia/nemotron-3-nano-30b-a3b:free",
+      openrouterSecondary: process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || "openai/gpt-oss-20b:free",
+      nimSecondary: process.env.NIM_MODEL_REPAIR_SECONDARY || "nvidia/nemotron-3-super"
     },
     explain: {
-      openrouterPrimary: process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || "nvidia/nemotron-3-super-120b-a12b:free",
-      openrouterSecondary: process.env.OPENROUTER_MODEL_EXPLAIN_SECONDARY || "nvidia/nemotron-3-nano-30b-a3b:free"
+      openrouterPrimary: process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || "openai/gpt-oss-120b:free",
+      openrouterSecondary: process.env.OPENROUTER_MODEL_EXPLAIN_SECONDARY || "openai/gpt-oss-20b:free",
+      openrouterTertiary: process.env.OPENROUTER_MODEL_EXPLAIN_TERTIARY || "nvidia/nemotron-3-nano-30b-a3b:free",
+      nimPrimary: process.env.NIM_MODEL_PRIMARY || "openai/gpt-oss-120b",
+      nimSecondary: process.env.NIM_MODEL_SECONDARY || "nvidia/nemotron-3-ultra",
+      nimTertiary: process.env.NIM_MODEL_TERTIARY || "nvidia/nemotron-3-super"
     }
   };
 }
@@ -186,7 +192,63 @@ function buildProviderStages(taskName) {
   const roleConfig = getRoleConfig(taskName);
   const stages = [];
 
-  // OpenRouter stages FIRST (primary provider)
+  // NIM stages FIRST (primary - https://integrate.api.nvidia.com/v1 via 9Router)
+  // Primary for quality. Note: NIM models do NOT support structured JSON output native,
+  // so extractJsonFragment + repair fallback is used for JSON parsing.
+  if (taskName === 'generate' && taskConfig.nimPrimary) {
+    stages.push({
+      name: 'nim-primary',
+      provider: 'nim',
+      model: taskConfig.nimPrimary,
+      repairModel: repairConfig.openrouterPrimary, // Use OpenRouter JSON-native for repair
+      useReasoning: false,
+      jsonFormat: false, // NIM models: text output, need extraction
+      systemPrompt: roleConfig.system,
+      temperature: roleConfig.temperature,
+      maxTokens: roleConfig.maxTokens
+    });
+  }
+  if (taskName === 'explain' && taskConfig.nimPrimary) {
+    stages.push({
+      name: 'nim-primary',
+      provider: 'nim',
+      model: taskConfig.nimPrimary,
+      repairModel: repairConfig.openrouterPrimary,
+      useReasoning: false,
+      jsonFormat: false,
+      systemPrompt: roleConfig.system,
+      temperature: roleConfig.temperature,
+      maxTokens: roleConfig.maxTokens
+    });
+    if (taskConfig.nimSecondary) {
+      stages.push({
+        name: 'nim-secondary',
+        provider: 'nim',
+        model: taskConfig.nimSecondary,
+        repairModel: repairConfig.openrouterSecondary,
+        useReasoning: false,
+        jsonFormat: false,
+        systemPrompt: roleConfig.system,
+        temperature: roleConfig.temperature,
+        maxTokens: roleConfig.maxTokens
+      });
+    }
+    if (taskConfig.nimTertiary) {
+      stages.push({
+        name: 'nim-tertiary',
+        provider: 'nim',
+        model: taskConfig.nimTertiary,
+        repairModel: repairConfig.openrouterSecondary,
+        useReasoning: false,
+        jsonFormat: false,
+        systemPrompt: roleConfig.system,
+        temperature: roleConfig.temperature,
+        maxTokens: roleConfig.maxTokens
+      });
+    }
+  }
+
+  // OpenRouter stages (fallback - includes JSON-native repair models)
   if (process.env.OPENROUTER_API_KEY) {
     const isFreeModel = (model) => model && model.includes(":free");
     
@@ -461,6 +523,21 @@ function isRetryableFailure(error) {
   return false;
 }
 
+
+
+
+
+const fs = require('fs');
+const path = require('path');
+function traceLLM(stageName, model, prompt, responseText, ms) {
+  try {
+    const logPath = path.join(__dirname, '../llm_trace.log');
+    const truncPrompt = prompt.length > 1500 ? prompt.substring(0, 1500) + "\n...(truncated)" : prompt;
+    const entry = "\n========================================\n[" + new Date().toISOString() + "] STAGE: " + stageName + " | MODEL: " + model + " | TIME: " + ms + "ms\n-- PROMPT --\n" + truncPrompt + "\n-- RESPONSE --\n" + responseText + "\n";
+    fs.appendFileSync(logPath, entry);
+  } catch(e) {}
+}
+
 async function invokeStage(stage, prompt, options) {
   const requestOptions = {
     prompt,
@@ -471,20 +548,32 @@ async function invokeStage(stage, prompt, options) {
     reasoning: options.reasoning,
     fetchImpl: options.fetchImpl,
     includeRaw: options.includeRaw,
-    // OpenRouter-specific
     useReasoning: stage.useReasoning,
     systemPrompt: stage.systemPrompt
   };
 
+  const start = Date.now();
+  let result;
   if (stage.provider === "openrouter") {
-    return callOpenRouter(requestOptions);
+    result = await callOpenRouter(requestOptions);
+  } else if (stage.provider === "nim") {
+    // NIM models don't support structured JSON output natively
+    // We rely on extractJsonFragment in parseAndValidateJson
+    result = await callNIM(requestOptions);
+  } else {
+    result = await callGeminiText({
+      ...requestOptions,
+      apiKey: stage.apiKey
+    });
   }
-
-  return callGeminiText({
-    ...requestOptions,
-    apiKey: stage.apiKey
-  });
+  
+  traceLLM(stage.name, stage.model, prompt, result.text, Date.now() - start);
+  return result;
 }
+
+
+
+
 
 async function invokeRepairStage(stage, prompt, options) {
   const repairStage = {

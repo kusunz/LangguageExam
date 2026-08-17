@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Language Exam Practice Server
  * Express server with Privy auth, LLM proxy, and user data storage
  */
@@ -15,11 +15,13 @@ const db = require('./db');
 const {
   buildProviderStages,
   createTemporaryUnavailableError,
+  createRouterError,
   getTemporaryUnavailablePayload,
   isTemporaryUnavailableError,
   runJsonTask
 } = require('./providers/llm-router');
 const { callOpenRouter } = require('./providers/openrouter');
+const { callNIM } = require('./providers/nim');
 const { callGeminiText } = require('./providers/gemini');
 const {
   runEmbeddingBackfill
@@ -146,6 +148,11 @@ app.set('trust proxy', 1);
 app.use(cors(resolveCorsOptions));
 app.use(applySecurityHeaders);
 app.use(express.json({ limit: '10mb' }));
+
+// Latency logging middleware
+const { latencyLogger } = require('./middleware/latency-logger.js');
+app.use(latencyLogger({ logSlowThreshold: 1000, sampleRate: 1.0 }));
+
 // JSON Parse Error Handler
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
@@ -270,13 +277,7 @@ async function cleanupExpiredDemoArtifacts(force = false) {
 
 // Auth middleware
 async function authMiddleware(req, res, next) {
-  // Full demo mode - no auth required at all
-  if (IS_DEMO_MODE) {
-    req.user = getDemoUserFromRequest(req);
-    return next();
-  }
-
-  // 1. Check for guest/demo Bearer token
+  // 1. Check for guest/demo Bearer token FIRST (works regardless of IS_DEMO_MODE)
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.substring(7);
@@ -294,6 +295,12 @@ async function authMiddleware(req, res, next) {
       };
       return next();
     }
+  }
+
+  // Full demo mode - no auth required at all
+  if (IS_DEMO_MODE) {
+    req.user = getDemoUserFromRequest(req);
+    return next();
   }
 
   // 2. Central session introspection via cookie
@@ -415,6 +422,35 @@ app.get('/api/config', (req, res) => {
   });
 });
 
+// Latency metrics endpoint
+app.get('/api/latency-metrics', (req, res) => {
+  const metrics = global.latencyMetrics || {
+    totalRequests: 0,
+    totalLatencyMs: 0,
+    slowRequests: 0,
+    byEndpoint: {}
+  };
+  
+  const avgLatency = metrics.totalRequests > 0 
+    ? (metrics.totalLatencyMs / metrics.totalRequests).toFixed(2)
+    : 0;
+  
+  res.json({
+    totalRequests: metrics.totalRequests,
+    avgLatencyMs: avgLatency,
+    slowRequests: metrics.slowRequests,
+    slowRequestRate: metrics.totalRequests > 0 
+      ? ((metrics.slowRequests / metrics.totalRequests) * 100).toFixed(2) + '%'
+      : '0%',
+    byEndpoint: Object.entries(metrics.byEndpoint).map(([endpoint, data]) => ({
+      endpoint,
+      count: data.count,
+      avgLatencyMs: (data.totalLatencyMs / data.count).toFixed(2),
+      maxLatencyMs: data.maxLatencyMs.toFixed(2)
+    }))
+  });
+});
+
 app.post('/api/demo-login', async (req, res) => {
   try {
     const demoUser = getDemoUserFromRequest(req);
@@ -434,6 +470,13 @@ app.post('/api/demo-login', async (req, res) => {
 // Get current user info
 app.post('/api/me', authMiddleware, (req, res) => {
   res.json({ userId: req.user.userId, email: req.user.email });
+});
+
+// Logout endpoint (clears demo session / invalidates token client-side)
+app.post('/api/logout', (req, res) => {
+  // For demo mode, logout is client-side token deletion
+  // In production with central auth, would call introspection service to invalidate
+  res.json({ success: true, message: 'Logged out successfully' });
 });
 
 // ============ DB Helper Functions ============
@@ -3060,6 +3103,9 @@ async function hydratePendingBlueprintSlots(params) {
  */
 async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snapshotId, selectionOptions = {}) {
   if (!snapshotId) throw new Error('Snapshot required');
+  if (!Array.isArray(examSpec.groups)) {
+    throw createRouterError('examSpec.groups must be an array', { retryable: false, code: 'invalid_exam_spec' });
+  }
 
   const {
     userId = null,
@@ -3271,7 +3317,7 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
     const requiredTypes = JLPT_READING_TYPES[level] || [];
 
     // Shuffle candidates for randomness
-    candidates.sort(() => Math.random() - 0.5);
+    candidates.sort(() => rng() - 0.5);
 
     // Try to pick one of each available type first
     for (const type of requiredTypes) {
@@ -5344,25 +5390,17 @@ async function runSplitGrading({
 
   // Step 2: Group wrong questions by mondai (or batch of 2-3)
   const mondaiGroups = groupQuestionsByMondai(wrongQuestions);
-  console.log("[SPLIT_GRADING] Step 2: Grading", mondaiGroups.length, "mondai groups");
+  const MONDAI_CONCURRENCY = Number.parseInt(process.env.GRADE_MONDAI_CONCURRENCY || "3", 10);
+  console.log("[SPLIT_GRADING] Step 2: Grading", mondaiGroups.length, "mondai groups (concurrency=" + MONDAI_CONCURRENCY + ")");
 
   const allQuestionFeedback = {};
 
-  for (const group of mondaiGroups) {
+  // Run mondai groups in concurrent batches to reduce total wall-clock time
+  function buildMondaiTask(group) {
     const { mondaiId, mondaiName, questions } = group;
-    console.log("[SPLIT_GRADING] Grading mondai:", mondaiName, "(", questions.length, "questions)");
-
     const mondaiPrompt = buildMondaiFeedbackPrompt({
-      uiLocale,
-      mondaiId,
-      mondaiName,
-      questions,
-      summary,
-      weakTags,
-      strongTags,
-      responseProfile
+      uiLocale, mondaiId, mondaiName, questions, summary, weakTags, strongTags, responseProfile
     });
-
     const mondaiValidator = (result) => {
       const errors = [];
       if (!result || typeof result !== "object") return ["result_not_object"];
@@ -5370,33 +5408,31 @@ async function runSplitGrading({
       else {
         questions.forEach((q) => {
           const fb = result.question_feedback[q.id];
-          if (!fb) errors.push(`missing_feedback:${q.id}`);
-          else {
-            ["why_wrong", "key_point", "mini_lesson"].forEach((f) => {
-              if (!fb[f] || !fb[f].trim()) errors.push(`empty_${f}:${q.id}`);
-            });
-            if (!Array.isArray(fb.review_tasks) || fb.review_tasks.length === 0) errors.push(`empty_review_tasks:${q.id}`);
-            if (!Array.isArray(fb.extra_examples)) errors.push(`missing_extra_examples:${q.id}`);
-          }
+          if (!fb) { errors.push(`missing_feedback:${q.id}`); return; }
+          ["why_wrong", "key_point", "mini_lesson"].forEach((f) => {
+            if (!fb[f] || !fb[f].trim()) errors.push(`empty_${f}:${q.id}`);
+          });
+          if (!Array.isArray(fb.review_tasks) || fb.review_tasks.length === 0) errors.push(`empty_review_tasks:${q.id}`);
+          if (!Array.isArray(fb.extra_examples)) errors.push(`missing_extra_examples:${q.id}`);
         });
       }
       return errors;
     };
-
-    const mondaiResult = await runJsonTask({
-      task: "explain",
-      prompt: mondaiPrompt,
-      validateResult: mondaiValidator,
-      maxTokens: maxTokensMondai,
-      timeoutMs,
-      preferredProviders: preferredProviders,
-      preferredStageNames: preferredStageNames,
-      temperature,
-      // Enable reasoning for detailed feedback
-      reasoning: { enabled: true, max_tokens: 2048 }
+    return runJsonTask({
+      task: "explain", prompt: mondaiPrompt, validateResult: mondaiValidator,
+      maxTokens: maxTokensMondai, timeoutMs, preferredProviders, preferredStageNames, temperature
+    }).then(r => {
+      console.log("[SPLIT_GRADING] Done:", mondaiName, "(" + questions.length + " q)");
+      Object.assign(allQuestionFeedback, r?.result?.question_feedback || {});
+    }).catch(err => {
+      console.warn("[SPLIT_GRADING] Failed (skipping):", mondaiName, err.message);
     });
+  }
 
-    Object.assign(allQuestionFeedback, mondaiResult?.result?.question_feedback || {});
+  for (let i = 0; i < mondaiGroups.length; i += MONDAI_CONCURRENCY) {
+    const batch = mondaiGroups.slice(i, i + MONDAI_CONCURRENCY);
+    console.log("[SPLIT_GRADING] Batch", Math.floor(i / MONDAI_CONCURRENCY) + 1, ":", batch.map(g => g.mondaiName).join(", "));
+    await Promise.all(batch.map(buildMondaiTask));
   }
 
   return { summary, question_feedback: allQuestionFeedback };
@@ -5662,16 +5698,16 @@ function getLlmConfigSnapshot() {
     ),
     tasks: taskStages,
     env: {
-      OPENROUTER_MODEL_GENERATE_PRIMARY: process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || 'qwen/qwen3.6-plus-preview:free',
-      OPENROUTER_MODEL_GENERATE_SECONDARY: process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || 'nvidia/nemotron-3-super-120b-a12b:free',
+      OPENROUTER_MODEL_GENERATE_PRIMARY: process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || 'openai/gpt-oss-120b:free',
+      OPENROUTER_MODEL_GENERATE_SECONDARY: process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || 'openai/gpt-oss-20b:free',
       OPENROUTER_MODEL_REPAIR_PRIMARY: process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || 'nvidia/nemotron-3-nano-30b-a3b:free',
-      OPENROUTER_MODEL_REPAIR_SECONDARY: process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || 'arcee-ai/trinity-large-preview:free',
-      OPENROUTER_MODEL_EXPLAIN_PRIMARY: process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || 'qwen/qwen3.6-plus-preview:free',
-      OPENROUTER_MODEL_EXPLAIN_SECONDARY: process.env.OPENROUTER_MODEL_EXPLAIN_SECONDARY || 'nvidia/nemotron-3-super-120b-a12b:free',
+      OPENROUTER_MODEL_REPAIR_SECONDARY: process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || 'openai/gpt-oss-20b:free',
+      OPENROUTER_MODEL_EXPLAIN_PRIMARY: process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || 'openai/gpt-oss-120b:free',
+      OPENROUTER_MODEL_EXPLAIN_SECONDARY: process.env.OPENROUTER_MODEL_EXPLAIN_SECONDARY || 'openai/gpt-oss-20b:free',
       OPENROUTER_RPM: process.env.OPENROUTER_RPM || '5',
       BLUEPRINT_GENERATION_CONCURRENCY: process.env.BLUEPRINT_GENERATION_CONCURRENCY || '4',
       BLUEPRINT_GENERATION_CONCURRENCY_EFFECTIVE: String(getEffectiveBlueprintGenerationConcurrency()),
-      GEMINI_MODEL_FALLBACK: process.env.GEMINI_MODEL_FALLBACK || 'gemini-3.1-flash-lite-preview',
+      GEMINI_MODEL_FALLBACK: process.env.GEMINI_MODEL_FALLBACK || 'gemini-3.1-flash-lite',
       GEMINI_MODEL_FALLBACK_COMPAT: process.env.GEMINI_MODEL_FALLBACK_COMPAT || '',
       GEMINI_EMBEDDING_MODEL_PRIMARY: process.env.GEMINI_EMBEDDING_MODEL_PRIMARY || process.env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001',
       GEMINI_EMBEDDING_MODEL_SECONDARY: process.env.GEMINI_EMBEDDING_MODEL_SECONDARY || '',
