@@ -1,4 +1,4 @@
-﻿const { callOpenRouter } = require("./openrouter");
+const { callOpenRouter } = require("./openrouter");
 const {
   DEFAULT_GEMINI_MODEL_FALLBACK,
   DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
@@ -161,7 +161,7 @@ function markStageCooldown(stage, error) {
 function getTaskModels() {
   return {
     generate: {
-      openrouterPrimary: process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || "openai/gpt-oss-120b:free",
+      openrouterPrimary: process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || "google/gemma-4-31b-it:free",
       openrouterSecondary: process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || "openai/gpt-oss-20b:free",
       openrouterTertiary: process.env.OPENROUTER_MODEL_GENERATE_TERTIARY || "nvidia/nemotron-3-ultra-550b-a55b:free",
       nimPrimary: process.env.NIM_MODEL_GENERATE_PRIMARY || process.env.NIM_MODEL_PRIMARY || "openai/gpt-oss-120b",
@@ -170,17 +170,17 @@ function getTaskModels() {
       geminiFallback: process.env.GEMINI_MODEL_GENERATE_FALLBACK || process.env.GEMINI_MODEL_FALLBACK || "gemini-3.1-flash-lite"
     },
     repair: {
-      openrouterPrimary: process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || "nvidia/nemotron-3-nano-30b-a3b:free",
+      openrouterPrimary: process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || "google/gemma-4-31b-it:free",
       openrouterSecondary: process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || "openai/gpt-oss-20b:free",
-      nimSecondary: process.env.NIM_MODEL_REPAIR_SECONDARY || "nvidia/nemotron-3-super"
+      nimSecondary: process.env.NIM_MODEL_REPAIR_SECONDARY || "nvidia/nemotron-3.5-lightning-30b-a3b"
     },
     explain: {
-      openrouterPrimary: process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || "openai/gpt-oss-120b:free",
+      openrouterPrimary: process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || "google/gemma-4-31b-it:free",
       openrouterSecondary: process.env.OPENROUTER_MODEL_EXPLAIN_SECONDARY || "openai/gpt-oss-20b:free",
-      openrouterTertiary: process.env.OPENROUTER_MODEL_EXPLAIN_TERTIARY || "nvidia/nemotron-3-nano-30b-a3b:free",
+      openrouterTertiary: process.env.OPENROUTER_MODEL_EXPLAIN_TERTIARY || "nvidia/nemotron-3.5-lightning:free",
       nimPrimary: process.env.NIM_MODEL_PRIMARY || "openai/gpt-oss-120b",
       nimSecondary: process.env.NIM_MODEL_SECONDARY || "nvidia/nemotron-3-ultra",
-      nimTertiary: process.env.NIM_MODEL_TERTIARY || "nvidia/nemotron-3-super"
+      nimTertiary: process.env.NIM_MODEL_TERTIARY || "nvidia/nemotron-3.5-lightning-30b-a3b"
     }
   };
 }
@@ -478,7 +478,7 @@ function buildTaskReasoningOptions(task, options = {}) {
   if (explicitReasoning === null) return undefined;
   if (explicitReasoning && typeof explicitReasoning === "object") return explicitReasoning;
 
-  if (task !== "generate") return undefined;
+  if (task !== "generate" && task !== "explain") return undefined;
 
   const budget = Number.parseInt(process.env.OPENROUTER_GENERATE_REASONING_MAX_TOKENS || "1024", 10);
   if (!Number.isFinite(budget) || budget <= 0) return undefined;
