@@ -297,7 +297,7 @@ async function cleanupExpiredDemoArtifacts(force = false) {
 
   try {
     await db.query(`DELETE FROM attempts WHERE (user_id = 'demo-user' OR user_id LIKE 'demo:%') AND started_at < NOW() - INTERVAL '3 days'`);
-    await db.query(`DELETE FROM exam_instances_cache WHERE (user_id = 'demo-user' OR user_id LIKE 'demo:%') AND created_at < NOW() - INTERVAL '3 days'`);
+    await db.query(`DELETE FROM exam_instances_cache WHERE (user_id = 'demo-user' OR user_id LIKE 'demo:%') AND created_at < NOW() - INTERVAL '30 days'`);
     await db.query(`DELETE FROM sessions WHERE (user_id = 'demo-user' OR user_id LIKE 'demo:%') AND created_at < NOW() - INTERVAL '3 days'`);
     await db.query(`DELETE FROM users WHERE (id = 'demo-user' OR id LIKE 'demo:%') AND COALESCE(last_login_at, created_at, NOW()) < NOW() - INTERVAL '3 days'`);
   } catch (error) {
@@ -5693,6 +5693,8 @@ function buildTtsTextPrompt(text, language) {
 }
 
 function getAdminSecretFromRequest(req) {
+  // Vercel cron requests are trusted: Vercel adds the x-vercel-cron header
+  if (req.headers['x-vercel-cron']) return process.env.WARMUP_SECRET || '';
   return req.headers['x-warmup-secret'];
 }
 
@@ -6892,8 +6894,8 @@ app.post('/api/exam/start', authMiddleware, examStartRateLimiter, examStartGate,
         try {
           await db.query(`
             INSERT INTO exam_instances_cache
-            (instance_key, user_id, exam_id, level, mode, plan, seed, set_no, blueprint, delivery_state, answer_keys)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            (instance_key, user_id, exam_id, level, mode, plan, seed, set_no, blueprint, delivery_state, answer_keys, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CURRENT_TIMESTAMP + INTERVAL '30 days')
           `, [
             newInstanceKey, userId, examSpec.exam_id, level, mode, plan, seed, finalSetNo,
             JSON.stringify(newBlueprint),
@@ -6939,7 +6941,7 @@ app.post('/api/exam/start', authMiddleware, examStartRateLimiter, examStartGate,
 
         await db.query(`
           UPDATE exam_instances_cache
-          SET expires_at = (CURRENT_TIMESTAMP + INTERVAL '3 days'),
+          SET expires_at = (CURRENT_TIMESTAMP + INTERVAL '30 days'),
               delivery_state = $2
           WHERE instance_key = $1
         `, [instanceKey, JSON.stringify({ cursors: {} })]);
@@ -6979,8 +6981,8 @@ app.post('/api/exam/start', authMiddleware, examStartRateLimiter, examStartGate,
         try {
           await db.query(`
             INSERT INTO exam_instances_cache
-            (instance_key, user_id, exam_id, level, mode, plan, seed, set_no, blueprint, delivery_state, answer_keys)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            (instance_key, user_id, exam_id, level, mode, plan, seed, set_no, blueprint, delivery_state, answer_keys, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CURRENT_TIMESTAMP + INTERVAL '30 days')
           `, [
             newInstanceKey, userId, examSpec.exam_id, level, mode, plan, seed, finalSetNo,
             JSON.stringify(newBlueprint),

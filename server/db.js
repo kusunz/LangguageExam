@@ -274,7 +274,7 @@ async function initDb() {
           delivery_state JSONB,
           answer_keys JSONB,
           created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-          expires_at TIMESTAMPTZ DEFAULT (CURRENT_TIMESTAMP + INTERVAL '3 days'),
+          expires_at TIMESTAMPTZ DEFAULT (CURRENT_TIMESTAMP + INTERVAL '30 days'),
           UNIQUE(user_id, exam_id, level, mode, set_no)
         )`,
         `CREATE INDEX IF NOT EXISTS idx_instances_user ON exam_instances_cache(user_id)`,
@@ -443,6 +443,7 @@ async function initDb() {
             ALTER TABLE exam_instances_cache ADD COLUMN IF NOT EXISTS answer_keys JSONB;
             ALTER TABLE exam_instances_cache ADD COLUMN IF NOT EXISTS plan TEXT;
             ALTER TABLE exam_instances_cache ADD COLUMN IF NOT EXISTS seed TEXT;
+            ALTER TABLE exam_instances_cache ALTER COLUMN expires_at SET DEFAULT (CURRENT_TIMESTAMP + INTERVAL '30 days');
             CREATE INDEX IF NOT EXISTS idx_instances_lookup ON exam_instances_cache(user_id, exam_id, level, mode, set_no);
             CREATE INDEX IF NOT EXISTS idx_instances_resume ON exam_instances_cache(user_id, exam_id, level, mode, created_at DESC);
           EXCEPTION WHEN others THEN NULL; END;
