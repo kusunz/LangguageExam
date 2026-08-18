@@ -167,7 +167,7 @@ app.use(express.static(path.join(__dirname, '../web')));
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: Number.parseInt(process.env.RATE_LIMIT_MAX || '100', 10),
   message: { error: 'Too many requests, please try again later.' }
 });
 app.use('/api/', limiter);
