@@ -168,7 +168,8 @@ app.use(express.static(path.join(__dirname, '../web')));
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: Number.parseInt(process.env.RATE_LIMIT_MAX || '100', 10),
-  message: { error: 'Too many requests, please try again later.' }
+  message: { error: 'Too many requests, please try again later.' },
+  keyGenerator: (req) => req.get('x-demo-session-id') || req.ip
 });
 app.use('/api/', limiter);
 // Bounded concurrency for exam/start: protects DB pool and LLM generation from bursts
@@ -193,6 +194,15 @@ function examStartGate(req, res, next) {
   }
 }
 
+// Per-user rate limit for exam/start (LLM-heavy endpoint)
+const examStartRateLimiter = rateLimit({
+  windowMs: Number.parseInt(process.env.EXAM_START_RATE_WINDOW_MS || String(60 * 1000), 10),
+  max: Number.parseInt(process.env.EXAM_START_RATE_MAX || '10', 10),
+  message: { error: 'Too many exam starts, please slow down' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.get('x-demo-session-id') || req.user?.userId || req.ip
+});
 // Strict rate limiting for answer verification (prevent brute-force)
 const verifyAnswerLimiter = rateLimit({
   windowMs: 1000, // 1 second
@@ -6749,7 +6759,7 @@ async function deliverRequestedSlots(instanceKey, want) {
 }
 
 // POST /api/exam/start
-app.post('/api/exam/start', authMiddleware, examStartGate, async (req, res) => {
+app.post('/api/exam/start', authMiddleware, examStartRateLimiter, examStartGate, async (req, res) => {
   try {
     const {
       examSpec,
@@ -6844,11 +6854,7 @@ app.post('/api/exam/start', authMiddleware, examStartGate, async (req, res) => {
       let created = false;
 
       for (let attempt = 0; attempt < MAX_ATTEMPTS && !created; attempt++) {
-        const maxRes = await db.query(
-          'SELECT COALESCE(MAX(set_no), 0) + 1 AS next_set FROM exam_instances_cache WHERE user_id=$1 AND exam_id=$2 AND level=$3 AND mode=$4',
-          [userId, examSpec.exam_id, level, mode]
-        );
-        finalSetNo = maxRes.rows[0].next_set;
+        finalSetNo = 1 + Math.floor(Math.random() * 200); // random slot: avoids MAX+1 race on same-user parallel starts
         console.log(`[Exam] New set_no: ${finalSetNo} (attempt ${attempt + 1})`);
 
         const today = formatDateYmd();
