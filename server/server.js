@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Language Exam Practice Server
  * Express server with Privy auth, LLM proxy, and user data storage
  */
@@ -171,6 +171,27 @@ const limiter = rateLimit({
   message: { error: 'Too many requests, please try again later.' }
 });
 app.use('/api/', limiter);
+// Bounded concurrency for exam/start: protects DB pool and LLM generation from bursts
+const EXAM_START_MAX_CONCURRENT = Math.max(1, Number.parseInt(process.env.EXAM_START_MAX_CONCURRENT || '5', 10));
+let examStartActive = 0;
+const examStartQueue = [];
+
+function examStartGate(req, res, next) {
+  const run = () => {
+    examStartActive += 1;
+    res.on('close', () => {
+      examStartActive -= 1;
+      const waiter = examStartQueue.shift();
+      if (waiter) waiter();
+    });
+    next();
+  };
+  if (examStartActive < EXAM_START_MAX_CONCURRENT) {
+    run();
+  } else {
+    examStartQueue.push(run);
+  }
+}
 
 // Strict rate limiting for answer verification (prevent brute-force)
 const verifyAnswerLimiter = rateLimit({
@@ -6728,7 +6749,7 @@ async function deliverRequestedSlots(instanceKey, want) {
 }
 
 // POST /api/exam/start
-app.post('/api/exam/start', authMiddleware, async (req, res) => {
+app.post('/api/exam/start', authMiddleware, examStartGate, async (req, res) => {
   try {
     const {
       examSpec,

@@ -25,7 +25,7 @@ try {
       ssl: process.env.DB_SSL === 'false' ? undefined : { rejectUnauthorized: false },
       connectionTimeoutMillis: 30000,
       idleTimeoutMillis: 30000,
-      max: 10
+      max: Number.parseInt(process.env.DB_POOL_MAX || '10', 10)
     });
     driverType = 'pg';
     console.log('[DB] Driver: pg Pool');
@@ -533,6 +533,11 @@ async function initDb() {
       return false;
     }
   })();
+
+  // Do not cache a failed DB init forever; allow later retries on transient failures.
+  initPromise.then((ok) => {
+    if (!ok && (pool || sql)) initPromise = null;
+  });
 
   return initPromise;
 }
