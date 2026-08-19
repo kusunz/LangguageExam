@@ -318,7 +318,7 @@ async function handleExchangeCode(req, res) {
   const exchangeUrl = process.env.SESSION_EXCHANGE_URL || 
     'https://dasun.app/api/internal/auth/exchange-code';
   const appKey = process.env.INTERNAL_APP_KEY || 'japanesePractice';
-  const serviceToken = process.env.INTERNAL_SERVICE_TOKEN || 'a3f89e7126348151247cd060032f9392';
+  const serviceToken = process.env.INTERNAL_SERVICE_TOKEN || '46661b603c7fee1c97eeccb434e059eed586c229da9f916cc7fd2d8912efbd5c';
 
   try {
     const response = await fetch(exchangeUrl, {
@@ -395,7 +395,7 @@ function extractUserFromSessionData(sessionData) {
 async function introspectSession(headers) {
   try {
     const appKey = process.env.INTERNAL_APP_KEY || 'japanesePractice';
-    const serviceToken = process.env.INTERNAL_SERVICE_TOKEN || 'a3f89e7126348151247cd060032f9392';
+    const serviceToken = process.env.INTERNAL_SERVICE_TOKEN || '46661b603c7fee1c97eeccb434e059eed586c229da9f916cc7fd2d8912efbd5c';
     const response = await fetch(SESSION_INTROSPECT_URL, {
       method: 'POST',
       headers: {
