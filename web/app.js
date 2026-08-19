@@ -2483,7 +2483,7 @@
 
                 this.stopProgress();
                 this.isStartingTest = false; // Reset after successful start
-                AuthManager.refreshCredits();
+                Auth.refreshCredits();
                 showScreen('test-screen');
                 this.initializeTest();
                 console.log('Test Initialized (V2).');
