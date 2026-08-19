@@ -93,6 +93,20 @@ async function ensureCriticalSchema() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_user_mondai_history_unique
     ON user_mondai_history(user_id, mondai_hash)
   `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS user_credit_usage (
+      user_id TEXT NOT NULL,
+      date DATE NOT NULL DEFAULT CURRENT_DATE,
+      credits_used INTEGER DEFAULT 0,
+      credits_total INTEGER NOT NULL,
+      plan_key TEXT NOT NULL DEFAULT 'free',
+      PRIMARY KEY (user_id, date)
+    )
+  `);
+  await query(
+    'CREATE INDEX IF NOT EXISTS idx_user_credit_usage_date ON user_credit_usage(user_id, date DESC)'
+  );
 }
 
 async function initDb() {

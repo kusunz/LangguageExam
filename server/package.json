@@ -12,7 +12,9 @@
     "test:all": "node test-all.js",
     "test:db": "node test-db.js",
     "test:ui": "node test-ui.js",
-    "test:e2e": "vitest run tests/e2e.test.js"
+    "test:e2e": "vitest run tests/e2e.test.js",
+    "test:unit": "vitest run tests/unit-credits.test.js tests/unit-server-helpers.test.js tests/unit-frontend.test.js",
+    "test:pw": "playwright test tests/ui-fast.spec.js"
   },
   "dependencies": {
     "@deepgram/sdk": "^4.11.3",

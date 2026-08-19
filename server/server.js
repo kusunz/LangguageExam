@@ -12,6 +12,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { jwtVerify, SignJWT } = require('jose');
 const db = require('./db');
+const credits = require('./credits');
 const {
   buildProviderStages,
   createTemporaryUnavailableError,
@@ -117,6 +118,7 @@ function resolveCorsOptions(req, callback) {
   callback(null, {
     origin: allowOrigin ? (requestOrigin || true) : false,
     methods: ['GET', 'HEAD', 'POST', 'PUT', 'OPTIONS'],
+    credentials: true,
     allowedHeaders: ['Accept', 'Authorization', 'Content-Type', DEMO_SESSION_HEADER, 'x-warmup-secret'],
     maxAge: 600,
     optionsSuccessStatus: 204
@@ -307,8 +309,46 @@ async function cleanupExpiredDemoArtifacts(force = false) {
 
 
 // Auth middleware
+function extractUserFromSessionData(sessionData) {
+  let planKey = credits.DEFAULT_TIER;
+  const entitlements = sessionData.entitlements;
+  if (entitlements) {
+    const appPlans = Array.isArray(entitlements.app_plan_keys) ? entitlements.app_plan_keys : [];
+    const globalPlans = Array.isArray(entitlements.global_plan_keys) ? entitlements.global_plan_keys : [];
+    const allPlans = [...appPlans, ...globalPlans];
+    if (allPlans.length > 0) {
+      const paidPlans = allPlans.filter(p => p !== 'free');
+      planKey = paidPlans.length > 0 ? paidPlans[0] : (allPlans.includes('free') ? 'free' : allPlans[0]);
+    }
+  }
+  return {
+    userId: sessionData.user.id,
+    email: sessionData.user.email || 'user@example.com',
+    planKey: planKey
+  };
+}
+
+async function introspectSession(headers) {
+  try {
+    const response = await fetch(SESSION_INTROSPECT_URL, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        ...headers
+      }
+    });
+    if (!response.ok) return null;
+    const sessionData = await response.json();
+    if (!sessionData || !sessionData.user || !sessionData.user.id) return null;
+    return sessionData;
+  } catch (err) {
+    log('ERROR', 'Introspection fetch error', { error: err.message });
+    return null;
+  }
+}
+
 async function authMiddleware(req, res, next) {
-  // 1. Check for guest/demo Bearer token FIRST (works regardless of IS_DEMO_MODE)
+  // 1. Check for Bearer token FIRST (works for demo mode & cross-domain SSO tokens)
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.substring(7);
@@ -322,54 +362,39 @@ async function authMiddleware(req, res, next) {
     if (demoPayload) {
       req.user = {
         userId: String(demoPayload.sub || 'demo-user'),
-        email: String(demoPayload.email || 'demo@example.com')
+        email: String(demoPayload.email || 'demo@example.com'),
+        planKey: credits.DEFAULT_TIER
       };
       return next();
+    }
+
+    // Try central session introspection using Bearer header (cross-domain)
+    if (SESSION_INTROSPECT_URL) {
+      const sessionData = await introspectSession({ 'Authorization': `Bearer ${token}` });
+      if (sessionData) {
+        req.user = extractUserFromSessionData(sessionData);
+        return next();
+      }
     }
   }
 
   // Full demo mode - no auth required at all
   if (IS_DEMO_MODE) {
     req.user = getDemoUserFromRequest(req);
+    req.user.planKey = credits.DEFAULT_TIER;
     return next();
   }
 
-  // 2. Central session introspection via cookie
-  try {
-    const sessionCookie = req.headers.cookie;
-    if (!sessionCookie) {
-      return res.status(401).json({ error: 'Not authenticated' });
+  // 2. Central session introspection via cookie (Subdomain mode)
+  if (req.headers.cookie) {
+    const sessionData = await introspectSession({ 'Cookie': req.headers.cookie });
+    if (sessionData) {
+      req.user = extractUserFromSessionData(sessionData);
+      return next();
     }
-
-    const introspectUrl = SESSION_INTROSPECT_URL;
-    const response = await fetch(introspectUrl, {
-      method: 'GET',
-      headers: {
-        'Cookie': sessionCookie,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (!response.ok) {
-      log('WARN', 'Introspection failed', { status: response.status });
-      return res.status(401).json({ error: 'Invalid session' });
-    }
-
-    const sessionData = await response.json();
-    if (!sessionData || !sessionData.user || !sessionData.user.id) {
-      log('WARN', 'Invalid introspection payload');
-      return res.status(401).json({ error: 'Invalid session' });
-    }
-
-    req.user = {
-      userId: sessionData.user.id,
-      email: sessionData.user.email || 'user@example.com'
-    };
-    next();
-  } catch (err) {
-    log('ERROR', 'Auth introspection error', { error: err.message });
-    return res.status(401).json({ error: 'Auth service error' });
   }
+
+  return res.status(401).json({ error: 'Not authenticated' });
 }
 
 const DEFAULT_MODES = {
@@ -500,7 +525,7 @@ app.post('/api/demo-login', async (req, res) => {
 
 // Get current user info
 app.post('/api/me', authMiddleware, (req, res) => {
-  res.json({ userId: req.user.userId, email: req.user.email });
+  res.json({ userId: req.user.userId, email: req.user.email, planKey: req.user.planKey });
 });
 
 // Logout endpoint (clears demo session / invalidates token client-side)
@@ -509,6 +534,26 @@ app.post('/api/logout', (req, res) => {
   // In production with central auth, would call introspection service to invalidate
   res.json({ success: true, message: 'Logged out successfully' });
 });
+
+  // GET /api/usage - returns daily credit quota for current user
+  app.get('/api/usage', authMiddleware, async (req, res) => {
+    try {
+      const userId = req.user.userId;
+      const planKey = req.user.planKey || credits.DEFAULT_TIER;
+      const usageData = await credits.getUserUsage(db, userId);
+      const rem = credits.getRemainingCredits(usageData);
+      res.json({
+        planKey,
+        dailyLimit: credits.getDailyCredits(planKey),
+        used: rem.used,
+        total: rem.total,
+        remaining: rem.remaining,
+        date: credits.getUtcDateKey()
+      });
+    } catch (err) {
+      res.status(500).json({ error: 'Usage check failed' });
+    }
+  });
 
 // ============ DB Helper Functions ============
 
@@ -6847,6 +6892,26 @@ app.post('/api/exam/start', authMiddleware, examStartRateLimiter, examStartGate,
     const user = await loadUserData(userId, req.user.email);
     const plan = user.plan || 'free';
     const level = examSpec.level || examSpec.default_level;
+
+    // Credit / quota check
+    const sections = req.body.sections || ["full"];
+    const examCost = credits.calculateExamCost(level, mode, sections);
+    const userPlanKey = req.user.planKey || "free";
+
+    const creditResult = await credits.checkAndDeductCredits(db, userId, userPlanKey, examCost);
+    if (!creditResult.ok) {
+      return res.status(429).json({
+        error: creditResult.code,
+        message: creditResult.message,
+        remaining: creditResult.remaining,
+        total: creditResult.total,
+        used: creditResult.used,
+        cost: creditResult.cost,
+        planKey: userPlanKey
+      });
+    }
+    console.log("[Exam] Credit deducted:", { planKey: userPlanKey, cost: examCost, remaining: creditResult.remaining });
+
     const learnerHints = buildUserExamGenerationHints(user, { exam_id: examSpec.exam_id, level, mode });
     const variantKey = inferExamVariantKey(examSpec);
     const requestedMondaiIds = getRequestedMondaiIds(examSpec);

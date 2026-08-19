@@ -67,6 +67,7 @@
     // ============================================
     const State = {
         user: null,
+        usage: null,
         userData: null,
         currentExam: 'jlpt',
         currentMode: 'official',
@@ -157,7 +158,7 @@
         State.ttsAudio = null;
 
         // 5. Clear runtime localStorage (NOT settings/preferences)
-        const sessionKeys = ['user', 'app_session_id', 'demo_userData', 'demo_session_started_at'];
+        const sessionKeys = ['user', 'sso_token', 'app_session_id', 'demo_userData', 'demo_session_started_at'];
         sessionKeys.forEach(key => {
             try { localStorage.removeItem(key); } catch (_) { }
         });
@@ -460,14 +461,16 @@
     // ============================================
     const Api = {
         async request(endpoint, options = {}) {
+            const token = State.user?.token || localStorage.getItem('sso_token');
             const headers = {
                 'Content-Type': 'application/json',
                 'x-demo-session-id': getOrCreateDemoBrowserId(),
-                ...(State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
+                ...(token ? { 'Authorization': `Bearer ${token}` } : {})
             };
 
             try {
                 const response = await fetch(`${CONFIG.apiBase}${endpoint}`, {
+                    credentials: 'include',
                     ...options,
                     headers: { ...headers, ...options.headers },
                     body: options.body ? JSON.stringify(options.body) : undefined
@@ -482,8 +485,10 @@
 
                 if (!response.ok) {
                     const error = await response.json().catch(() => ({ error: response.statusText }));
-                    const requestError = new Error(error.error || 'Request failed');
+                    const requestError = new Error(error.message || error.error || 'Request failed');
                     requestError.status = response.status;
+                    requestError.code = error.error;
+                    requestError.details = error;
                     throw requestError;
                 }
 
@@ -536,6 +541,10 @@
 
         async getMe() {
             return this.request('/me', { method: 'POST' });
+        },
+
+        async getUsage() {
+            return this.request('/usage', { method: 'GET' });
         },
 
         async getAdminLlmConfig(secret) {
@@ -788,7 +797,7 @@
 
         async init() {
             try {
-                const configRes = await fetch('/api/config');
+                const configRes = await fetch('/api/config', { credentials: 'include' });
                 this.config = await configRes.json();
             } catch (err) {
                 console.error('Failed to load config:', err);
@@ -796,6 +805,22 @@
             }
 
             clearExpiredDemoSessionIfNeeded();
+
+            // Extract SSO token from URL query parameters (cross-domain handoff)
+            try {
+                const urlParams = new URLSearchParams(window.location.search);
+                const ssoToken = urlParams.get('sso_token') || urlParams.get('token');
+                if (ssoToken) {
+                    localStorage.setItem('sso_token', ssoToken);
+                    urlParams.delete('sso_token');
+                    urlParams.delete('token');
+                    const newSearch = urlParams.toString();
+                    const newUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
+                    window.history.replaceState(null, '', newUrl);
+                }
+            } catch (e) {
+                console.warn('URL token parsing failed:', e);
+            }
 
             // Check if user is already authenticated via cookie/central auth or demo token
             try {
@@ -967,9 +992,11 @@
 
             State.user = null;
             State.userData = null;
+            State.usage = null;
             localStorage.removeItem('user');
+            localStorage.removeItem('sso_token');
             
-            const returnUrl = encodeURIComponent(window.location.origin);
+            const returnUrl = encodeURIComponent(window.location.origin + window.location.pathname);
             const loginUrl = this.config?.dasunLoginUrl || 'https://dasun.app/login';
             let logoutUrl = loginUrl.replace('/login', '/logout') + '?return_to=' + returnUrl;
             
@@ -982,9 +1009,39 @@
             window.location.href = logoutUrl;
         },
 
+        async refreshCredits() {
+            try {
+                const usage = await Api.getUsage();
+                State.usage = usage;
+                this.updateCreditBadge(usage);
+            } catch (err) {
+                console.warn('Could not fetch credit usage:', err);
+            }
+        },
+
+        updateCreditBadge(usage) {
+            const badge = $('#credit-badge');
+            const countEl = $('#credit-count');
+            const tierEl = $('#credit-tier');
+            if (!badge) return;
+            if (!usage) {
+                badge.style.display = 'none';
+                return;
+            }
+            badge.style.display = 'inline-flex';
+            if (countEl) countEl.textContent = `${usage.remaining}/${usage.total}`;
+            if (tierEl) tierEl.textContent = usage.planKey ? `(${usage.planKey.toUpperCase()})` : '';
+            if (usage.remaining <= 0) {
+                badge.classList.add('exhausted');
+            } else {
+                badge.classList.remove('exhausted');
+            }
+        },
+
         updateUI() {
             if (!State.user) return;
             $('#user-email').textContent = State.user.isDemo ? 'Khách (Demo)' : (State.userData?.nickname || State.user.email);
+            this.refreshCredits();
         }
     };
 
@@ -2426,6 +2483,7 @@
 
                 this.stopProgress();
                 this.isStartingTest = false; // Reset after successful start
+                AuthManager.refreshCredits();
                 showScreen('test-screen');
                 this.initializeTest();
                 console.log('Test Initialized (V2).');
@@ -2437,7 +2495,11 @@
                 this.stopProgress();
                 this.isStartingTest = false; // Reset on error
                 console.error('Start Test V2 Error:', err);
-                showToast('Lỗi khởi tạo bài thi: ' + err.message, 'error');
+                if (err.code === 'CREDITS_EXHAUSTED') {
+                    showToast('Hạn mức tạo bài thi hôm nay đã hết. Tự động reset lúc 00:00 UTC.', 'error');
+                } else {
+                    showToast('Lỗi khởi tạo bài thi: ' + err.message, 'error');
+                }
                 showScreen('home-screen');
             }
         },
