@@ -173,7 +173,7 @@ const limiter = rateLimit({
   message: { error: 'Too many requests, please try again later.' },
   keyGenerator: (req) => req.get('x-demo-session-id') || req.ip
 });
-app.use('/api/', limiter);
+app.use(limiter);
 // Bounded concurrency for exam/start: protects DB pool and LLM generation from bursts
 const EXAM_START_MAX_CONCURRENT = Math.max(1, Number.parseInt(process.env.EXAM_START_MAX_CONCURRENT || '5', 10));
 let examStartActive = 0;
@@ -307,6 +307,69 @@ async function cleanupExpiredDemoArtifacts(force = false) {
   }
 }
 
+
+
+async function handleExchangeCode(req, res) {
+  const { code, state } = req.body || {};
+  if (!code) {
+    return res.status(400).json({ error: 'Code is required' });
+  }
+
+  const exchangeUrl = process.env.SESSION_EXCHANGE_URL || 
+    'https://dasun.app/api/internal/auth/exchange-code';
+  const appKey = process.env.INTERNAL_APP_KEY || 'japanesePractice';
+  const serviceToken = process.env.INTERNAL_SERVICE_TOKEN || 'a3f89e7126348151247cd060032f9392';
+
+  try {
+    const response = await fetch(exchangeUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-App-Key': appKey,
+        'X-Service-Token': serviceToken
+      },
+      body: JSON.stringify({ code, state })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      log('WARN', 'Exchange code failed at central auth', { status: response.status, body: errorText });
+      return res.status(401).json({ error: 'Invalid or expired handoff code' });
+    }
+
+    const data = await response.json();
+    if (!data || !data.authenticated) {
+      return res.status(401).json({ error: 'Authentication failed' });
+    }
+
+    const centralUser = data.central_user || {};
+    if (centralUser && centralUser.id) {
+      try {
+        await db.query(
+          `INSERT INTO users (id, email, last_login_at, created_at)
+           VALUES ($1, $2, NOW(), NOW())
+           ON CONFLICT (id) DO UPDATE SET last_login_at = NOW()`,
+          [centralUser.id, centralUser.display_name || centralUser.primary_identity_label_masked || 'user@example.com']
+        );
+      } catch (dbErr) {
+        log('WARN', 'Failed to upsert user on exchange-code', { error: dbErr.message });
+      }
+    }
+
+    return res.json({
+      authenticated: true,
+      token: data.session_token,
+      user: {
+        userId: centralUser.id,
+        email: centralUser.display_name || centralUser.primary_identity_label_masked || 'user@example.com',
+        planKey: credits.DEFAULT_TIER
+      }
+    });
+  } catch (err) {
+    log('ERROR', 'Exchange code exception', { error: err.message });
+    return res.status(500).json({ error: 'Failed to exchange authentication code' });
+  }
+}
 
 // Auth middleware
 function extractUserFromSessionData(sessionData) {
@@ -519,7 +582,10 @@ app.get('/api/latency-metrics', (req, res) => {
   });
 });
 
-app.post('/api/demo-login', async (req, res) => {
+app.post('/api/auth/exchange-code', handleExchangeCode);
+  app.post('/auth/exchange-code', handleExchangeCode);
+
+  app.post('/api/demo-login', async (req, res) => {
   try {
     const demoUser = getDemoUserFromRequest(req);
     const token = await issueDemoAccessToken(demoUser);
@@ -7526,8 +7592,6 @@ if (require.main === module) {
 }
 
 // Serve static web assets after API routes
-app.use(express.static(path.join(__dirname, '../web/public')));
-app.use(express.static(path.join(__dirname, '../web')));
 
 module.exports = app;
 
