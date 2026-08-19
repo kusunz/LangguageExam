@@ -1,4 +1,31 @@
 const { callOpenRouter } = require("./openrouter");
+// OpenRouter daily budget guard (protects accounts with a per-day request cap)
+const OPENROUTER_DAILY_MAX = Number.parseInt(
+  process.env.OPENROUTER_DAILY_MAX || '1000',
+  10
+);
+let openRouterDailyUsed = 0;
+let openRouterDailyWindowStart = Date.now();
+
+function isOpenRouterDailyBudgetExhausted() {
+  const now = Date.now();
+  if (now - openRouterDailyWindowStart >= 24 * 60 * 60 * 1000) {
+    openRouterDailyWindowStart = now;
+    openRouterDailyUsed = 0;
+  }
+  return openRouterDailyUsed >= OPENROUTER_DAILY_MAX;
+}
+
+function markOpenRouterCall() {
+  const now = Date.now();
+  if (now - openRouterDailyWindowStart >= 24 * 60 * 60 * 1000) {
+    openRouterDailyWindowStart = now;
+    openRouterDailyUsed = 0;
+  }
+  openRouterDailyUsed += 1;
+  return openRouterDailyUsed;
+}
+
 const {
   DEFAULT_GEMINI_MODEL_FALLBACK,
   DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
@@ -259,7 +286,7 @@ function buildProviderStages(taskName) {
         name: "openrouter-primary",
         provider: "openrouter",
         model: taskConfig.openrouterPrimary,
-        repairModel: repairConfig.nimSecondary,
+        repairModel: repairConfig.openrouterPrimary,
         useReasoning: primaryIsFree,
         systemPrompt: roleConfig.system,
         temperature: roleConfig.temperature,
@@ -272,7 +299,7 @@ function buildProviderStages(taskName) {
         name: "openrouter-secondary",
         provider: "openrouter",
         model: taskConfig.openrouterSecondary,
-        repairModel: repairConfig.nimSecondary,
+        repairModel: repairConfig.openrouterSecondary,
         useReasoning: secondaryIsFree,
         systemPrompt: roleConfig.system,
         temperature: roleConfig.temperature,
@@ -284,7 +311,7 @@ function buildProviderStages(taskName) {
         name: "openrouter-router",
         provider: "openrouter",
         model: taskConfig.openrouterRouter,
-        repairModel: repairConfig.nimSecondary,
+        repairModel: repairConfig.openrouterSecondary,
         useReasoning: routerModel,
         systemPrompt: roleConfig.system,
         temperature: roleConfig.temperature,
@@ -643,12 +670,31 @@ async function runJsonTask(options) {
       continue;
     }
 
+    if (stage.provider === "openrouter" && isOpenRouterDailyBudgetExhausted()) {
+      logRouter("stage_skipped_openrouter_daily_cap", {
+        task,
+        stage: stage.name,
+        provider: stage.provider,
+        model: stage.model,
+        usedToday: openRouterDailyUsed,
+        dailyMax: OPENROUTER_DAILY_MAX
+      });
+      lastRetryableError = createRouterError("OpenRouter daily budget exhausted", {
+        retryable: true,
+        provider: stage.provider,
+        model: stage.model,
+        code: "openrouter_daily_cap"
+      });
+      continue;
+    }
+
     logRouter("stage_start", {
       task,
       stage: stage.name,
       provider: stage.provider,
       model: stage.model
     });
+    if (stage.provider === "openrouter") markOpenRouterCall();
 
     let response;
     try {

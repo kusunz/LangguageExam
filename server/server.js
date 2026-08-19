@@ -2766,14 +2766,15 @@ async function generateDailyBankVariant(params) {
     mode,
     variantKey,
     dateYmd,
-    snapshotId
+    snapshotId,
+    setCount = DAILY_BANK_SET_COUNT
   } = params;
 
   const variantSpec = buildExamVariantSpec(baseSpec, variantKey);
   const reservedHashes = new Set();
   const published = [];
 
-  for (let setNo = 1; setNo <= DAILY_BANK_SET_COUNT; setNo += 1) {
+  for (let setNo = 1; setNo <= setCount; setNo += 1) {
     const seed = crypto.createHash('sha256')
       .update(`${variantSpec.exam_id}|${level}|${mode}|${variantKey}|${dateYmd}|${setNo}`)
       .digest('hex');
@@ -2859,7 +2860,8 @@ async function runDailyBankWorkflow(options = {}) {
             mode,
             variantKey,
             dateYmd,
-            snapshotId
+            snapshotId,
+            setCount: options.setCount || DAILY_BANK_SET_COUNT
           }));
         }
 
@@ -6093,6 +6095,63 @@ app.get(['/api/admin/warmup', '/api/admin/warmup/:levelParam/:modeParam'], async
 
   } catch (err) {
     console.error('[Warmup] Error:', err);
+    if (isTemporaryUnavailableError(err)) {
+      return res.status(503).json(getTemporaryUnavailablePayload(err));
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/admin/daily-bank/:levelParam/:modeParam
+ * Daily cron: fill snapshot buckets and publish DAILY_BANK_SET_COUNT full exams
+ * for one level + mode (cache-warm exam starts, lower live LLM usage).
+ * Query: set_count (test/light runs), date_ymd, level, mode.
+ * Auth: x-warmup-secret header or Vercel cron (x-vercel-cron header).
+ */
+app.get(['/api/admin/daily-bank', '/api/admin/daily-bank/:levelParam/:modeParam'], async (req, res) => {
+  const secret = getAdminSecretFromRequest(req);
+  const expectedSecret = process.env.WARMUP_SECRET;
+  if (!expectedSecret || secret !== expectedSecret) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    if (!(await db.initDb())) {
+      return res.status(503).json({ error: 'DB unavailable' });
+    }
+
+    const level = String(req.params.levelParam || req.query.level || 'N2').toUpperCase();
+    const mode = String(req.params.modeParam || req.query.mode || 'standard').toLowerCase();
+    const setCount = Math.max(1, Number.parseInt(req.query.set_count || String(DAILY_BANK_SET_COUNT), 10));
+
+    const result = await runDailyBankWorkflow({
+      levels: [level],
+      modes: [mode],
+      variants: ['full'],
+      setCount,
+      dateYmd: req.query.date_ymd || undefined
+    });
+
+    if (result && result.ok === false) {
+      return res.status(409).json(result);
+    }
+
+    const levelResult = result?.results?.find((entry) => entry.level === level);
+    const publishedCount = (levelResult?.variants || []).reduce((sum, variant) => sum + (variant.publishedCount || 0), 0);
+
+    res.json({
+      ok: true,
+      level,
+      mode,
+      setCount,
+      variants: ['full'],
+      snapshotId: levelResult?.snapshotId || null,
+      warmStats: levelResult?.warmStats || null,
+      publishedCount
+    });
+  } catch (err) {
+    console.error('[DailyBank Cron] Error:', err);
     if (isTemporaryUnavailableError(err)) {
       return res.status(503).json(getTemporaryUnavailablePayload(err));
     }
