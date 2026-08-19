@@ -321,25 +321,37 @@ function extractUserFromSessionData(sessionData) {
       planKey = paidPlans.length > 0 ? paidPlans[0] : (allPlans.includes('free') ? 'free' : allPlans[0]);
     }
   }
+  const user = sessionData.central_user || sessionData.user || {};
   return {
-    userId: sessionData.user.id,
-    email: sessionData.user.email || 'user@example.com',
+    userId: user.id,
+    email: user.display_name || user.primary_identity_label_masked || user.email || 'user@example.com',
     planKey: planKey
   };
 }
 
 async function introspectSession(headers) {
   try {
+    const appKey = process.env.INTERNAL_APP_KEY || 'japanesePractice';
+    const serviceToken = process.env.INTERNAL_SERVICE_TOKEN || 'a3f89e7126348151247cd060032f9392';
     const response = await fetch(SESSION_INTROSPECT_URL, {
-      method: 'GET',
+      method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'X-App-Key': appKey,
+        'X-Service-Token': serviceToken,
         ...headers
-      }
+      },
+      body: JSON.stringify({
+        app_key: appKey,
+        requested_path: '/',
+        requested_access_mode: 'required'
+      })
     });
     if (!response.ok) return null;
     const sessionData = await response.json();
-    if (!sessionData || !sessionData.user || !sessionData.user.id) return null;
+    if (!sessionData || !sessionData.authenticated) return null;
+    const user = sessionData.central_user || sessionData.user;
+    if (!user || !user.id) return null;
     return sessionData;
   } catch (err) {
     log('ERROR', 'Introspection fetch error', { error: err.message });

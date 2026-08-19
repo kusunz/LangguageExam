@@ -806,11 +806,37 @@
 
             clearExpiredDemoSessionIfNeeded();
 
-            // Extract SSO token from URL query parameters (cross-domain handoff)
+            // Extract handoff code or SSO token from URL query parameters (cross-domain handoff)
             try {
                 const urlParams = new URLSearchParams(window.location.search);
+                const handoffCode = urlParams.get('code');
+                const handoffState = urlParams.get('state');
                 const ssoToken = urlParams.get('sso_token') || urlParams.get('token');
-                if (ssoToken) {
+
+                if (handoffCode) {
+                    this.showAuthLoading('Đang xác thực đăng nhập...');
+                    try {
+                        const exchangeRes = await fetch('/api/auth/exchange-code', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ code: handoffCode, state: handoffState })
+                        });
+                        if (exchangeRes.ok) {
+                            const exchangeData = await exchangeRes.json();
+                            if (exchangeData.token) {
+                                localStorage.setItem('sso_token', exchangeData.token);
+                            }
+                        }
+                    } catch (exchangeErr) {
+                        console.warn('Handoff code exchange failed:', exchangeErr);
+                    } finally {
+                        urlParams.delete('code');
+                        urlParams.delete('state');
+                        const newSearch = urlParams.toString();
+                        const newUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
+                        window.history.replaceState(null, '', newUrl);
+                    }
+                } else if (ssoToken) {
                     localStorage.setItem('sso_token', ssoToken);
                     urlParams.delete('sso_token');
                     urlParams.delete('token');
@@ -889,7 +915,9 @@
 
         async loginWithEmail() {
             const returnUrl = encodeURIComponent(window.location.href);
-            const loginUrl = (this.config?.dasunLoginUrl || 'https://dasun.app/login') + '?return_to=' + returnUrl;
+            const baseUrl = this.config?.dasunLoginUrl || 'https://dasun.app/login';
+            const separator = baseUrl.includes('?') ? '&' : '?';
+            const loginUrl = `${baseUrl}${separator}app_key=japanesePractice&return_to=${returnUrl}`;
             window.location.href = loginUrl;
         },
 
