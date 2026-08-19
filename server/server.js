@@ -7525,6 +7525,10 @@ if (require.main === module) {
   })();
 }
 
+// Serve static web assets after API routes
+app.use(express.static(path.join(__dirname, '../web/public')));
+app.use(express.static(path.join(__dirname, '../web')));
+
 module.exports = app;
 
 
