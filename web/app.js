@@ -1,4 +1,34 @@
 /**
+// PKCE (RFC 7636) helpers for OAuth2 flow with dasun.app
+const OAUTH_CLIENT_ID = 'japanesePractice';
+
+function generatePkceVerifier() {
+    const array = new Uint8Array(32);
+    crypto.getRandomValues(array);
+    return base64urlEncode(array);
+}
+
+function base64urlEncode(bytes) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    let result = '';
+    for (let i = 0; i < bytes.length; i += 3) {
+        const b0 = bytes[i];
+        const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
+        const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
+        result += chars[(b0 >> 2) & 0x3F];
+        result += chars[((b0 << 4) | (b1 >> 4)) & 0x3F];
+        result += i + 1 < bytes.length ? chars[((b1 << 2) | (b2 >> 6)) & 0x3F] : '';
+        result += i + 2 < bytes.length ? chars[b2 & 0x3F] : '';
+    }
+    return result;
+}
+
+async function generatePkceChallenge(verifier) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(verifier);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    return base64urlEncode(new Uint8Array(hashBuffer));
+}
  * Language Exam Practice App
  * Single-file SPA with modular architecture
  */
@@ -801,54 +831,47 @@
                 this.config = await configRes.json();
             } catch (err) {
                 console.error('Failed to load config:', err);
-                this.config = { dasunLoginUrl: 'https://dasun.app/login', guestMode: false };
+                this.config = { dasunLoginUrl: 'https://dasun.app', guestMode: false };
             }
 
             clearExpiredDemoSessionIfNeeded();
 
-            // Extract handoff code or SSO token from URL query parameters (cross-domain handoff)
+            // Extract OAuth code from URL query parameters (PKCE flow)
             try {
                 const urlParams = new URLSearchParams(window.location.search);
-                const handoffCode = urlParams.get('code');
-                const handoffState = urlParams.get('state');
-                const ssoToken = urlParams.get('sso_token') || urlParams.get('token');
+                const authCode = urlParams.get('code');
+                const authState = urlParams.get('state');
 
-                if (handoffCode) {
-                    this.showAuthLoading('Đang xác thực đăng nhập...');
+                if (authCode) {
+                    const codeVerifier = sessionStorage.getItem('pkce_code_verifier');
+                    this.showAuthLoading('Verifying login...');
                     try {
                         const exchangeRes = await fetch('/api/auth/exchange-code', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ code: handoffCode, state: handoffState })
+                            body: JSON.stringify({ code: authCode, code_verifier: codeVerifier, state: authState })
                         });
                         if (exchangeRes.ok) {
                             const exchangeData = await exchangeRes.json();
-                            const tokenToSave = exchangeData.token || exchangeData.session_token;
+                            const tokenToSave = exchangeData.token || exchangeData.access_token;
                             if (tokenToSave) {
                                 localStorage.setItem('sso_token', tokenToSave);
                             }
                         }
                     } catch (exchangeErr) {
-                        console.warn('Handoff code exchange failed:', exchangeErr);
+                        console.warn('OAuth code exchange failed:', exchangeErr);
                     } finally {
+                        sessionStorage.removeItem('pkce_code_verifier');
                         urlParams.delete('code');
                         urlParams.delete('state');
                         const newSearch = urlParams.toString();
                         const newUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
                         window.history.replaceState(null, '', newUrl);
                     }
-                } else if (ssoToken) {
-                    localStorage.setItem('sso_token', ssoToken);
-                    urlParams.delete('sso_token');
-                    urlParams.delete('token');
-                    const newSearch = urlParams.toString();
-                    const newUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
-                    window.history.replaceState(null, '', newUrl);
                 }
             } catch (e) {
-                console.warn('URL token parsing failed:', e);
+                console.warn('URL code parsing failed:', e);
             }
-
             // Check if user is already authenticated via cookie/central auth or demo token
             try {
                 this.showAuthLoading('Đang kiểm tra phiên...');
@@ -915,13 +938,18 @@
         },
 
         async loginWithEmail() {
-            const returnUrl = encodeURIComponent(window.location.href);
-            const baseUrl = this.config?.dasunLoginUrl || 'https://dasun.app/login';
-            const separator = baseUrl.includes('?') ? '&' : '?';
-            const loginUrl = `${baseUrl}${separator}app_key=japanesePractice&return_to=${returnUrl}`;
-            window.location.href = loginUrl;
-        },
+            const codeVerifier = generatePkceVerifier();
+            const codeChallenge = await generatePkceChallenge(codeVerifier);
+            sessionStorage.setItem('pkce_code_verifier', codeVerifier);
 
+            const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
+            const state = crypto.randomUUID();
+            sessionStorage.setItem('pkce_state', state);
+
+            const baseUrl = this.config?.dasunLoginUrl || 'https://dasun.app';
+            const authorizeUrl = `${baseUrl}/oauth/authorize?client_id=${OAUTH_CLIENT_ID}&redirect_uri=${redirectUri}&response_type=code&code_challenge=${codeChallenge}&code_challenge_method=S256&state=${state}`;
+            window.location.href = authorizeUrl;
+        },
         async loginDemo() {
             this.showAuthLoading('Đang bắt đầu dùng thử...');
             try {

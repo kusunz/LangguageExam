@@ -59,6 +59,12 @@ const GENERATE_MAX_TOKENS = Math.max(
 );
 const SESSION_INTROSPECT_URL = process.env.SESSION_INTROSPECT_URL || 'https://dasun.app/api/internal/session/introspect';
 const IS_DEMO_MODE = !process.env.SESSION_INTROSPECT_URL;
+const OAUTH_TOKEN_URL = process.env.OAUTH_TOKEN_URL || 'https://dasun.app/oauth/token';
+const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || 'japanesePractice';
+const OAUTH_REDIRECT_URI = process.env.OAUTH_REDIRECT_URI || '';
+const DASUN_JWT_ISSUER = process.env.DASUN_JWT_ISSUER || 'https://dasun.app';
+const DASUN_JWT_PUBLIC_KEY = process.env.DASUN_JWT_PUBLIC_KEY || '';
+let dasunJwtKey = null;
 const DEMO_SESSION_HEADER = 'x-demo-session-id';
 const DEMO_USER_PREFIX = 'demo:';
 const DEMO_ACCESS_ISSUER = 'language-exam-demo';
@@ -68,6 +74,30 @@ const DEMO_ACCESS_SECRET = Buffer.from(
   'utf8'
 );
 let lastDemoCleanupAt = 0;
+
+async function getDasunJwtKey() {
+  if (!DASUN_JWT_PUBLIC_KEY) return null;
+  if (!dasunJwtKey) {
+    const { importSPKI } = require('jose');
+    dasunJwtKey = await importSPKI(DASUN_JWT_PUBLIC_KEY, 'RS256');
+  }
+  return dasunJwtKey;
+}
+
+async function verifyDasunJwt(token) {
+  try {
+    const key = await getDasunJwtKey();
+    if (!key) return null;
+    const { jwtVerify } = require('jose');
+    const { payload } = await jwtVerify(token, key, {
+      issuer: DASUN_JWT_ISSUER,
+      audience: OAUTH_CLIENT_ID,
+    });
+    return payload;
+  } catch (err) {
+    return null;
+  }
+}
 const LOCALHOST_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i;
 const CORS_ALLOWED_ORIGINS = new Set(
   [process.env.CORS_ORIGIN, process.env.CORS_ORIGINS]
@@ -315,36 +345,38 @@ async function cleanupExpiredDemoArtifacts(force = false) {
 
 
 async function handleExchangeCode(req, res) {
-  const { code, state } = req.body || {};
+  const { code, code_verifier, state } = req.body || {};
   if (!code) {
     return res.status(400).json({ error: 'Code is required' });
   }
+  if (!code_verifier) {
+    return res.status(400).json({ error: 'Code verifier is required' });
+  }
 
-  const exchangeUrl = process.env.SESSION_EXCHANGE_URL || 
-    'https://dasun.app/api/internal/auth/exchange-code';
-  const appKey = process.env.INTERNAL_APP_KEY || 'japanesePractice';
-  const serviceToken = process.env.INTERNAL_SERVICE_TOKEN || '46661b603c7fee1c97eeccb434e059eed586c229da9f916cc7fd2d8912efbd5c';
+  const redirectUri = process.env.OAUTH_REDIRECT_URI || (req.body.redirect_uri || '');
 
   try {
-    const response = await fetch(exchangeUrl, {
+    const response = await fetch(OAUTH_TOKEN_URL, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-App-Key': appKey,
-        'X-Service-Token': serviceToken,
-        'Authorization': `Bearer ${serviceToken}`
-      },
-      body: JSON.stringify({ code, state, app_key: appKey })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'authorization_code',
+        code,
+        code_verifier,
+        redirect_uri: redirectUri,
+        client_id: OAUTH_CLIENT_ID,
+        state
+      })
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      log('WARN', 'Exchange code failed at central auth', { status: response.status, body: errorText });
-      return res.status(401).json({ error: 'Invalid or expired handoff code' });
+      log('WARN', 'OAuth token exchange failed', { status: response.status, body: errorText });
+      return res.status(401).json({ error: 'Invalid or expired authorization code' });
     }
 
     const data = await response.json();
-    if (!data || !data.authenticated) {
+    if (!data || !data.access_token) {
       return res.status(401).json({ error: 'Authentication failed' });
     }
 
@@ -364,15 +396,15 @@ async function handleExchangeCode(req, res) {
 
     return res.json({
       authenticated: true,
-      token: data.session_token,
+      token: data.access_token,
       user: {
-        userId: centralUser.id,
+        userId: centralUser.id || data.sub,
         email: centralUser.display_name || centralUser.primary_identity_label_masked || 'user@example.com',
-        planKey: credits.DEFAULT_TIER
+        planKey: data.tier || credits.DEFAULT_TIER
       }
     });
   } catch (err) {
-    log('ERROR', 'Exchange code exception', { error: err.message });
+    log('ERROR', 'OAuth token exchange exception', { error: err.message });
     return res.status(500).json({ error: 'Failed to exchange authentication code' });
   }
 }
@@ -449,7 +481,20 @@ async function authMiddleware(req, res, next) {
       return next();
     }
 
-    // Try central session introspection using Bearer header (cross-domain)
+    // Try stateless JWT verification (no central call needed)
+    if (DASUN_JWT_PUBLIC_KEY) {
+      const jwtPayload = await verifyDasunJwt(token);
+      if (jwtPayload) {
+        req.user = {
+          userId: String(jwtPayload.sub || ''),
+          email: String(jwtPayload.email || 'user@example.com'),
+          planKey: String(jwtPayload.tier || credits.DEFAULT_TIER)
+        };
+        return next();
+      }
+    }
+
+    // Fallback: central session introspection using Bearer header (cross-domain)
     if (SESSION_INTROSPECT_URL) {
       const sessionData = await introspectSession({ 'Authorization': `Bearer ${token}` });
       if (sessionData) {
