@@ -7,8 +7,7 @@ try {
     module.exports = (req, res) => {
         res.status(500).json({
             error: 'Server Boot Failed',
-            message: error.message,
-            stack: error.stack
+            message: process.env.NODE_ENV === 'production' ? 'Internal server boot error' : error.message
         });
     };
 }
