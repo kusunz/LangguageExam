@@ -7,6 +7,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
+const IS_TEST_ENV = process.env.NODE_ENV === 'test' || process.env.VITEST === 'true';
 const fs = require('fs').promises;
 const path = require('path');
 const crypto = require('crypto');
@@ -168,6 +169,7 @@ app.use(express.static(path.join(__dirname, '../web')));
 
 // Rate limiting
 const limiter = rateLimit({
+    skip: () => IS_TEST_ENV,
   windowMs: 15 * 60 * 1000,
   max: Number.parseInt(process.env.RATE_LIMIT_MAX || '100', 10),
   message: { error: 'Too many requests, please try again later.' },
@@ -198,6 +200,7 @@ function examStartGate(req, res, next) {
 
 // Per-user rate limit for exam/start (LLM-heavy endpoint)
 const examStartRateLimiter = rateLimit({
+    skip: () => IS_TEST_ENV,
   windowMs: Number.parseInt(process.env.EXAM_START_RATE_WINDOW_MS || String(60 * 1000), 10),
   max: Number.parseInt(process.env.EXAM_START_RATE_MAX || '10', 10),
   message: { error: 'Too many exam starts, please slow down' },
@@ -207,6 +210,7 @@ const examStartRateLimiter = rateLimit({
 });
 // Strict rate limiting for answer verification (prevent brute-force)
 const verifyAnswerLimiter = rateLimit({
+    skip: () => IS_TEST_ENV,
   windowMs: 1000, // 1 second
   max: 5, // 5 requests per second
   message: { error: 'Too many verification requests, slow down' },
@@ -217,6 +221,7 @@ const verifyAnswerLimiter = rateLimit({
 
 // Rate limiting for TTS endpoints (prevent cost runaway)
 const ttsLimiter = rateLimit({
+    skip: () => IS_TEST_ENV,
   windowMs: 60 * 1000, // 1 minute
   max: 10, // 10 TTS requests per minute per user
   message: { error: 'Too many TTS requests, please slow down' },
@@ -326,9 +331,10 @@ async function handleExchangeCode(req, res) {
       headers: {
         'Content-Type': 'application/json',
         'X-App-Key': appKey,
-        'X-Service-Token': serviceToken
+        'X-Service-Token': serviceToken,
+        'Authorization': `Bearer ${serviceToken}`
       },
-      body: JSON.stringify({ code, state })
+      body: JSON.stringify({ code, state, app_key: appKey })
     });
 
     if (!response.ok) {
@@ -456,7 +462,7 @@ async function authMiddleware(req, res, next) {
   // Full demo mode - no auth required at all
   if (IS_DEMO_MODE) {
     req.user = getDemoUserFromRequest(req);
-    req.user.planKey = credits.DEFAULT_TIER;
+    req.user.planKey = (isDemoUserId(req.user.userId) ? 'demo' : credits.DEFAULT_TIER);
     return next();
   }
 

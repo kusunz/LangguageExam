@@ -34,6 +34,7 @@ const SECTION_FRACTION = 0.2;
 
 function getDailyCredits(planKey) {
   const key = String(planKey || DEFAULT_TIER).toLowerCase();
+  if (key === 'demo') return 10000;
   return TIER_DAILY_CREDITS[key] || TIER_DAILY_CREDITS[DEFAULT_TIER];
 }
 
@@ -137,7 +138,9 @@ function getRemainingCredits(usage) {
 
 async function checkAndDeductCredits(db, userId, planKey, cost) {
   const dateKey = getUtcDateKey();
-  const dailyTotal = getDailyCredits(planKey);
+  const isDemo = !userId || String(userId).startsWith('demo') || userId === 'demo-user';
+  const effectivePlan = isDemo ? 'demo' : (planKey || DEFAULT_TIER);
+  const dailyTotal = getDailyCredits(effectivePlan);
 
   try {
     await db.query(

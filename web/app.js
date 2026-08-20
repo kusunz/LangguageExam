@@ -823,8 +823,9 @@
                         });
                         if (exchangeRes.ok) {
                             const exchangeData = await exchangeRes.json();
-                            if (exchangeData.token) {
-                                localStorage.setItem('sso_token', exchangeData.token);
+                            const tokenToSave = exchangeData.token || exchangeData.session_token;
+                            if (tokenToSave) {
+                                localStorage.setItem('sso_token', tokenToSave);
                             }
                         }
                     } catch (exchangeErr) {
