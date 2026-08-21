@@ -353,7 +353,7 @@ async function handleExchangeCode(req, res) {
     return res.status(400).json({ error: 'Code verifier is required' });
   }
 
-  const redirectUri = process.env.OAUTH_REDIRECT_URI || (req.body.redirect_uri || '');
+  const redirectUri = req.body.redirect_uri || process.env.OAUTH_REDIRECT_URI || '';
 
   try {
     const response = await fetch(OAUTH_TOKEN_URL, {

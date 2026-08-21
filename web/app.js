@@ -832,7 +832,7 @@
                 this.config = await configRes.json();
             } catch (err) {
                 console.error('Failed to load config:', err);
-                this.config = { dasunLoginUrl: 'https://dasun.app/login', guestMode: false };
+                this.config = { dasunLoginUrl: 'https://dasun.app', guestMode: false };
             }
 
             clearExpiredDemoSessionIfNeeded();
@@ -845,12 +845,19 @@
 
                 if (authCode) {
                     const codeVerifier = sessionStorage.getItem('pkce_code_verifier');
+                    const savedRedirectUri = sessionStorage.getItem('pkce_redirect_uri');
+                    const redirectUri = savedRedirectUri || (window.location.origin + window.location.pathname);
                     this.showAuthLoading('Verifying login...');
                     try {
                         const exchangeRes = await fetch('/api/auth/exchange-code', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ code: authCode, code_verifier: codeVerifier, state: authState })
+                            body: JSON.stringify({
+                                code: authCode,
+                                code_verifier: codeVerifier,
+                                redirect_uri: redirectUri,
+                                state: authState
+                            })
                         });
                         if (exchangeRes.ok) {
                             const exchangeData = await exchangeRes.json();
@@ -858,11 +865,14 @@
                             if (tokenToSave) {
                                 localStorage.setItem('sso_token', tokenToSave);
                             }
+                        } else {
+                            console.warn('Exchange response not ok:', exchangeRes.status);
                         }
                     } catch (exchangeErr) {
                         console.warn('OAuth code exchange failed:', exchangeErr);
                     } finally {
                         sessionStorage.removeItem('pkce_code_verifier');
+                        sessionStorage.removeItem('pkce_redirect_uri');
                         urlParams.delete('code');
                         urlParams.delete('state');
                         const newSearch = urlParams.toString();
@@ -944,15 +954,17 @@
             const codeChallenge = await generatePkceChallenge(codeVerifier);
             sessionStorage.setItem('pkce_code_verifier', codeVerifier);
 
-            const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
+            const redirectUriRaw = window.location.origin + window.location.pathname;
+            sessionStorage.setItem('pkce_redirect_uri', redirectUriRaw);
+            const redirectUri = encodeURIComponent(redirectUriRaw);
             const state = crypto.randomUUID();
             sessionStorage.setItem('pkce_state', state);
 
-            const baseUrl = this.config?.dasunLoginUrl || 'https://dasun.app';
+            const rawBaseUrl = this.config?.dasunLoginUrl || 'https://dasun.app';
+            const baseUrl = rawBaseUrl.replace(/\/login\/?$/, '').replace(/\/$/, '');
             const authorizeUrl = `${baseUrl}/oauth/authorize?client_id=${OAUTH_CLIENT_ID}&redirect_uri=${redirectUri}&response_type=code&code_challenge=${codeChallenge}&code_challenge_method=S256&state=${state}`;
             window.location.href = authorizeUrl;
         },
-
         async loginDemo() {
             this.showAuthLoading('Đang bắt đầu dùng thử...');
             try {
@@ -1045,27 +1057,23 @@
         },
 
         logout() {
-            if (State.user && State.user.isDemo) {
-                resetAppState('logout');
-                return;
-            }
-
             State.user = null;
             State.userData = null;
             State.usage = null;
             localStorage.removeItem('user');
             localStorage.removeItem('sso_token');
-            
+            resetAppState('logout');
+
             const returnUrl = encodeURIComponent(window.location.origin + window.location.pathname);
-            const loginUrl = this.config?.dasunLoginUrl || 'https://dasun.app/login';
-            let logoutUrl = loginUrl.replace('/login', '/logout') + '?return_to=' + returnUrl;
-            
-            // Extract CSRF token from cookie to satisfy central auth
+            const rawBaseUrl = this.config?.dasunLoginUrl || 'https://dasun.app';
+            const baseUrl = rawBaseUrl.replace(/\/login\/?$/, '').replace(/\/$/, '');
+            let logoutUrl = `${baseUrl}/logout?return_to=${returnUrl}`;
+
             const match = document.cookie.match(new RegExp('(^| )dash_csrf_token=([^;]+)'));
             if (match) {
                 logoutUrl += '&logout_token=' + match[2];
             }
-            
+
             window.location.href = logoutUrl;
         },
 
@@ -4921,7 +4929,15 @@
             }
         });
 
-        $('#btn-logout').addEventListener('click', () => Auth.logout());
+        $('#btn-logout')?.addEventListener('click', () => Auth.logout());
+
+        document.addEventListener('click', (e) => {
+            const logoutBtn = e.target.closest('#btn-logout, .btn-logout, .logout-btn, [data-action="logout"], .user-menu__panel button, .user-menu__panel a, .user-menu__panel [data-action="logout"]');
+            if (logoutBtn) {
+                e.preventDefault();
+                Auth.logout();
+            }
+        });
 
         // Theme toggle
         $('#btn-theme-toggle')?.addEventListener('click', () => Theme.toggle());
