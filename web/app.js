@@ -1,40 +1,41 @@
 /**
-// PKCE (RFC 7636) helpers for OAuth2 flow with dasun.app
-const OAUTH_CLIENT_ID = 'japanesePractice';
-
-function generatePkceVerifier() {
-    const array = new Uint8Array(32);
-    crypto.getRandomValues(array);
-    return base64urlEncode(array);
-}
-
-function base64urlEncode(bytes) {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-    let result = '';
-    for (let i = 0; i < bytes.length; i += 3) {
-        const b0 = bytes[i];
-        const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
-        const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
-        result += chars[(b0 >> 2) & 0x3F];
-        result += chars[((b0 << 4) | (b1 >> 4)) & 0x3F];
-        result += i + 1 < bytes.length ? chars[((b1 << 2) | (b2 >> 6)) & 0x3F] : '';
-        result += i + 2 < bytes.length ? chars[b2 & 0x3F] : '';
-    }
-    return result;
-}
-
-async function generatePkceChallenge(verifier) {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(verifier);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-    return base64urlEncode(new Uint8Array(hashBuffer));
-}
  * Language Exam Practice App
  * Single-file SPA with modular architecture
  */
 
 (function () {
     'use strict';
+
+    // PKCE (RFC 7636) helpers for OAuth2 flow with dasun.app
+    const OAUTH_CLIENT_ID = 'japanesePractice';
+
+    function generatePkceVerifier() {
+        const array = new Uint8Array(32);
+        crypto.getRandomValues(array);
+        return base64urlEncode(array);
+    }
+
+    function base64urlEncode(bytes) {
+        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+        let result = '';
+        for (let i = 0; i < bytes.length; i += 3) {
+            const b0 = bytes[i];
+            const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
+            const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
+            result += chars[(b0 >> 2) & 0x3F];
+            result += chars[((b0 << 4) | (b1 >> 4)) & 0x3F];
+            result += i + 1 < bytes.length ? chars[((b1 << 2) | (b2 >> 6)) & 0x3F] : '';
+            result += i + 2 < bytes.length ? chars[b2 & 0x3F] : '';
+        }
+        return result;
+    }
+
+    async function generatePkceChallenge(verifier) {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(verifier);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+        return base64urlEncode(new Uint8Array(hashBuffer));
+    }
 
     // ============================================
     // Configuration
@@ -831,7 +832,7 @@ async function generatePkceChallenge(verifier) {
                 this.config = await configRes.json();
             } catch (err) {
                 console.error('Failed to load config:', err);
-                this.config = { dasunLoginUrl: 'https://dasun.app', guestMode: false };
+                this.config = { dasunLoginUrl: 'https://dasun.app/login', guestMode: false };
             }
 
             clearExpiredDemoSessionIfNeeded();
@@ -872,6 +873,7 @@ async function generatePkceChallenge(verifier) {
             } catch (e) {
                 console.warn('URL code parsing failed:', e);
             }
+
             // Check if user is already authenticated via cookie/central auth or demo token
             try {
                 this.showAuthLoading('Đang kiểm tra phiên...');
@@ -950,6 +952,7 @@ async function generatePkceChallenge(verifier) {
             const authorizeUrl = `${baseUrl}/oauth/authorize?client_id=${OAUTH_CLIENT_ID}&redirect_uri=${redirectUri}&response_type=code&code_challenge=${codeChallenge}&code_challenge_method=S256&state=${state}`;
             window.location.href = authorizeUrl;
         },
+
         async loginDemo() {
             this.showAuthLoading('Đang bắt đầu dùng thử...');
             try {
