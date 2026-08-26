@@ -110,7 +110,7 @@ function requestOrigin(req) {
 }
 
 function oauthRedirectUri(req) {
-  if (OAUTH_REDIRECT_URI) return OAUTH_REDIRECT_URI;
+  if (OAUTH_REDIRECT_URI) return OAUTH_REDIRECT_URI.trim();
   if (process.env.NODE_ENV === 'production') {
     throw new Error('OAUTH_REDIRECT_URI must be configured in production.');
   }
