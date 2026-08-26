@@ -388,6 +388,7 @@ async function cleanupExpiredDemoArtifacts(force = false) {
 
 
 async function exchangeAuthorizationCode({ code, codeVerifier, state, redirectUri }) {
+  await db.initDb();
   if (!code) {
     throw Object.assign(new Error('Code is required'), { statusCode: 400 });
   }
