@@ -154,11 +154,13 @@ async function initDb() {
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
           token TEXT NOT NULL,
+          plan_key TEXT NOT NULL DEFAULT 'free',
           created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
           expires_at TIMESTAMPTZ NOT NULL
         )`,
         `CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`,
         `CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)`,
+        `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS plan_key TEXT NOT NULL DEFAULT 'free'`,
 
         // Exam results table
         `CREATE TABLE IF NOT EXISTS exam_results (

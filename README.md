@@ -38,7 +38,7 @@ cd ../web && npm run dev            # web (Vite, proxies to API): http://localho
 
 The app runs in demo mode by default. Click "Dung thu khong dang nhap" to start; sessions persist via localStorage and user data is stored server-side per session.
 
-For production auth, set `SESSION_INTROSPECT_URL` and `DASUN_LOGIN_URL` (see `.env.production.template`).
+For production auth, the app uses Dasun OAuth Authorization Code + PKCE. The server exchanges the code with the backend-only `OAUTH_SERVICE_TOKEN` and creates a local `HttpOnly` session cookie. Set `DASUN_AUTHORIZE_URL`, `OAUTH_TOKEN_URL`, `OAUTH_CLIENT_ID`, `OAUTH_REDIRECT_URI`, `OAUTH_SERVICE_TOKEN`, and `APP_SESSION_SECRET` in `.env.production.template`. The Dasun administrator must approve the exact redirect URI before login works.
 
 ## Project Structure
 
