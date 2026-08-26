@@ -189,7 +189,7 @@
         State.ttsAudio = null;
 
         // 5. Clear runtime localStorage (NOT settings/preferences)
-        const sessionKeys = ['user', 'sso_token', 'app_session_id', 'demo_userData', 'demo_session_started_at'];
+        const sessionKeys = ['user', 'app_session_id', 'demo_userData', 'demo_session_started_at'];
         sessionKeys.forEach(key => {
             try { localStorage.removeItem(key); } catch (_) { }
         });
@@ -492,7 +492,7 @@
     // ============================================
     const Api = {
         async request(endpoint, options = {}) {
-            const token = State.user?.token || localStorage.getItem('sso_token');
+            const token = State.user?.isDemo ? State.user.token : null;
             const headers = {
                 'Content-Type': 'application/json',
                 'x-demo-session-id': getOrCreateDemoBrowserId(),
@@ -665,7 +665,7 @@
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...(State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
+                    ...(State.user?.isDemo && State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
                 },
                 body: JSON.stringify({ text, language, provider, speed, voice })
             });
@@ -718,7 +718,7 @@
                     headers: {
                         'Content-Type': 'application/json',
                         'x-demo-session-id': getOrCreateDemoBrowserId(),
-                        ...(State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
+                        ...(State.user?.isDemo && State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
                     },
                     body: JSON.stringify({ instanceKey, reason })
                 }).catch(() => { });
@@ -763,7 +763,7 @@
                 }
             }
 
-            const token = State.user?.token;
+            const token = State.user?.isDemo ? State.user.token : null;
             const res = await fetch('/api/notebook', {
                 method: 'POST',
                 headers: {
@@ -789,7 +789,7 @@
                 } catch (e) { console.error('Error removing demo notebook:', e); }
             }
 
-            const token = State.user?.token;
+            const token = State.user?.isDemo ? State.user.token : null;
             const res = await fetch('/api/notebook', {
                 method: 'POST',
                 headers: {
@@ -811,7 +811,7 @@
                 } catch (e) { return { items: [] }; }
             }
 
-            const token = State.user?.token;
+            const token = State.user?.isDemo ? State.user.token : null;
             const res = await fetch('/api/notebook', {
                 headers: token ? { 'Authorization': `Bearer ${token}` } : {}
             });
@@ -836,53 +836,6 @@
             }
 
             clearExpiredDemoSessionIfNeeded();
-
-            // Extract OAuth code from URL query parameters (PKCE flow)
-            try {
-                const urlParams = new URLSearchParams(window.location.search);
-                const authCode = urlParams.get('code');
-                const authState = urlParams.get('state');
-
-                if (authCode) {
-                    const codeVerifier = sessionStorage.getItem('pkce_code_verifier');
-                    const savedRedirectUri = sessionStorage.getItem('pkce_redirect_uri');
-                    const redirectUri = savedRedirectUri || (window.location.origin + window.location.pathname);
-                    this.showAuthLoading('Verifying login...');
-                    try {
-                        const exchangeRes = await fetch('/api/auth/exchange-code', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                code: authCode,
-                                code_verifier: codeVerifier,
-                                redirect_uri: redirectUri,
-                                state: authState
-                            })
-                        });
-                        if (exchangeRes.ok) {
-                            const exchangeData = await exchangeRes.json();
-                            const tokenToSave = exchangeData.token || exchangeData.access_token;
-                            if (tokenToSave) {
-                                localStorage.setItem('sso_token', tokenToSave);
-                            }
-                        } else {
-                            console.warn('Exchange response not ok:', exchangeRes.status);
-                        }
-                    } catch (exchangeErr) {
-                        console.warn('OAuth code exchange failed:', exchangeErr);
-                    } finally {
-                        sessionStorage.removeItem('pkce_code_verifier');
-                        sessionStorage.removeItem('pkce_redirect_uri');
-                        urlParams.delete('code');
-                        urlParams.delete('state');
-                        const newSearch = urlParams.toString();
-                        const newUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
-                        window.history.replaceState(null, '', newUrl);
-                    }
-                }
-            } catch (e) {
-                console.warn('URL code parsing failed:', e);
-            }
 
             // Check if user is already authenticated via cookie/central auth or demo token
             try {
@@ -950,20 +903,8 @@
         },
 
         async loginWithEmail() {
-            const codeVerifier = generatePkceVerifier();
-            const codeChallenge = await generatePkceChallenge(codeVerifier);
-            sessionStorage.setItem('pkce_code_verifier', codeVerifier);
-
-            const redirectUriRaw = window.location.origin + window.location.pathname;
-            sessionStorage.setItem('pkce_redirect_uri', redirectUriRaw);
-            const redirectUri = encodeURIComponent(redirectUriRaw);
-            const state = crypto.randomUUID();
-            sessionStorage.setItem('pkce_state', state);
-
-            const rawBaseUrl = this.config?.dasunLoginUrl || 'https://dasun.app';
-            const baseUrl = rawBaseUrl.replace(/\/login\/?$/, '').replace(/\/$/, '');
-            const authorizeUrl = `${baseUrl}/oauth/authorize?client_id=${OAUTH_CLIENT_ID}&redirect_uri=${redirectUri}&response_type=code&code_challenge=${codeChallenge}&code_challenge_method=S256&state=${state}`;
-            window.location.href = authorizeUrl;
+            const returnTo = encodeURIComponent(window.location.pathname + window.location.search + window.location.hash);
+            window.location.href = `/api/auth/start?return_to=${returnTo}`;
         },
         async loginDemo() {
             this.showAuthLoading('Đang bắt đầu dùng thử...');
@@ -1056,13 +997,14 @@
             };
         },
 
-        logout() {
+        async logout() {
             State.user = null;
             State.userData = null;
             State.usage = null;
             localStorage.removeItem('user');
-            localStorage.removeItem('sso_token');
             resetAppState('logout');
+
+            try { await fetch('/api/logout', { method: 'POST', credentials: 'include' }); } catch (_) { }
 
             const returnUrl = encodeURIComponent(window.location.origin + window.location.pathname);
             const rawBaseUrl = this.config?.dasunLoginUrl || 'https://dasun.app';
@@ -1665,7 +1607,7 @@
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        ...(State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
+                        ...(State.user?.isDemo && State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
                     },
                     body: JSON.stringify({ text, language, provider }),
                     signal
@@ -1886,7 +1828,7 @@
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            ...(State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
+                            ...(State.user?.isDemo && State.user?.token ? { 'Authorization': `Bearer ${State.user.token}` } : {})
                         },
                         body: JSON.stringify({ text, language })
                     });
@@ -5170,8 +5112,6 @@
         init();
     }
 })();
-
-
 
 
 

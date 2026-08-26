@@ -59,9 +59,14 @@ const GENERATE_MAX_TOKENS = Math.max(
 );
 const SESSION_INTROSPECT_URL = process.env.SESSION_INTROSPECT_URL || 'https://dasun.app/api/internal/session/introspect';
 const IS_DEMO_MODE = !process.env.SESSION_INTROSPECT_URL;
+const DASUN_AUTHORIZE_URL = process.env.DASUN_AUTHORIZE_URL || '';
 const OAUTH_TOKEN_URL = process.env.OAUTH_TOKEN_URL || 'https://dasun.app/oauth/token';
 const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || 'japanesePractice';
+const OAUTH_SERVICE_TOKEN = process.env.OAUTH_SERVICE_TOKEN || '';
 const OAUTH_REDIRECT_URI = process.env.OAUTH_REDIRECT_URI || '';
+const LOCAL_SESSION_COOKIE = process.env.LOCAL_SESSION_COOKIE || 'jp_session';
+const LOCAL_SESSION_SECURE = process.env.LOCAL_SESSION_SECURE === 'true' || process.env.NODE_ENV === 'production';
+const LOCAL_SESSION_MAX_AGE_SECONDS = Number.parseInt(process.env.LOCAL_SESSION_MAX_AGE_SECONDS || '604800', 10);
 const DASUN_JWT_ISSUER = process.env.DASUN_JWT_ISSUER || 'https://dasun.app';
 const DASUN_JWT_PUBLIC_KEY = process.env.DASUN_JWT_PUBLIC_KEY || '';
 let dasunJwtKey = null;
@@ -74,6 +79,44 @@ const DEMO_ACCESS_SECRET = Buffer.from(
   'utf8'
 );
 let lastDemoCleanupAt = 0;
+const OAUTH_FLOW_COOKIE = process.env.OAUTH_FLOW_COOKIE || 'jp_oauth_flow';
+const OAUTH_FLOW_SECRET = Buffer.from(process.env.APP_SESSION_SECRET || process.env.DEMO_AUTH_SECRET || '', 'utf8');
+
+function signOauthFlow(payload) {
+  if (OAUTH_FLOW_SECRET.length < 32) throw new Error('APP_SESSION_SECRET must be at least 32 characters.');
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signature = crypto.createHmac('sha256', OAUTH_FLOW_SECRET).update(encoded).digest('base64url');
+  return `${encoded}.${signature}`;
+}
+
+function verifyOauthFlow(value) {
+  if (!value || OAUTH_FLOW_SECRET.length < 32) return null;
+  const [encoded, signature] = String(value).split('.');
+  if (!encoded || !signature) return null;
+  const expected = crypto.createHmac('sha256', OAUTH_FLOW_SECRET).update(encoded).digest('base64url');
+  const left = Buffer.from(signature); const right = Buffer.from(expected);
+  if (left.length !== right.length || !crypto.timingSafeEqual(left, right)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+    if (!payload.expiresAt || payload.expiresAt < Date.now()) return null;
+    return payload;
+  } catch { return null; }
+}
+
+function requestOrigin(req) {
+  const host = String(req.headers['x-forwarded-host'] || req.get('host') || '').split(',')[0].trim();
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+  return `${proto}://${host}`;
+}
+
+function oauthRedirectUri(req) {
+  if (OAUTH_REDIRECT_URI) return OAUTH_REDIRECT_URI;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('OAUTH_REDIRECT_URI must be configured in production.');
+  }
+  return `${requestOrigin(req)}/api/auth/callback`;
+}
+function safeLocalReturnTo(value) { return typeof value === 'string' && value.startsWith('/') && !value.startsWith('//') ? value : '/'; }
 
 async function getDasunJwtKey() {
   if (!DASUN_JWT_PUBLIC_KEY) return null;
@@ -344,16 +387,16 @@ async function cleanupExpiredDemoArtifacts(force = false) {
 
 
 
-async function handleExchangeCode(req, res) {
-  const { code, code_verifier, state } = req.body || {};
+async function exchangeAuthorizationCode({ code, codeVerifier, state, redirectUri }) {
   if (!code) {
-    return res.status(400).json({ error: 'Code is required' });
+    throw Object.assign(new Error('Code is required'), { statusCode: 400 });
   }
-  if (!code_verifier) {
-    return res.status(400).json({ error: 'Code verifier is required' });
+  if (!codeVerifier) {
+    throw Object.assign(new Error('Code verifier is required'), { statusCode: 400 });
   }
-
-  const redirectUri = req.body.redirect_uri || process.env.OAUTH_REDIRECT_URI || '';
+  if (!OAUTH_SERVICE_TOKEN) {
+    throw Object.assign(new Error('Authentication is not configured.'), { statusCode: 503 });
+  }
 
   try {
     const response = await fetch(OAUTH_TOKEN_URL, {
@@ -362,22 +405,23 @@ async function handleExchangeCode(req, res) {
       body: JSON.stringify({
         grant_type: 'authorization_code',
         code,
-        code_verifier,
+        code_verifier: codeVerifier,
         redirect_uri: redirectUri,
         client_id: OAUTH_CLIENT_ID,
-        state
-      })
+          state,
+          service_token: OAUTH_SERVICE_TOKEN
+        })
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      log('WARN', 'OAuth token exchange failed', { status: response.status, body: errorText });
-      return res.status(401).json({ error: 'Invalid or expired authorization code' });
+      log('WARN', 'OAuth token exchange failed', { status: response.status });
+      throw Object.assign(new Error('Invalid or expired authorization code'), { statusCode: 401 });
     }
 
     const data = await response.json();
     if (!data || !data.access_token) {
-      return res.status(401).json({ error: 'Authentication failed' });
+      throw Object.assign(new Error('Authentication failed'), { statusCode: 401 });
     }
 
     const centralUser = data.central_user || {};
@@ -394,18 +438,79 @@ async function handleExchangeCode(req, res) {
       }
     }
 
-    return res.json({
-      authenticated: true,
-      token: data.access_token,
+    const localSession = await manageSession(centralUser.id || data.sub, null, centralUser.display_name || centralUser.primary_identity_label_masked || '', data.tier || credits.DEFAULT_TIER);
+    return {
+      sessionToken: localSession.token,
       user: {
         userId: centralUser.id || data.sub,
         email: centralUser.display_name || centralUser.primary_identity_label_masked || 'user@example.com',
         planKey: data.tier || credits.DEFAULT_TIER
       }
-    });
+    };
   } catch (err) {
+    if (err?.statusCode) throw err;
     log('ERROR', 'OAuth token exchange exception', { error: err.message });
-    return res.status(500).json({ error: 'Failed to exchange authentication code' });
+    throw Object.assign(new Error('Failed to exchange authentication code'), { statusCode: 500 });
+  }
+}
+
+function setLocalSessionCookie(res, token) {
+  appendCookie(res, LOCAL_SESSION_COOKIE, token, {
+    httpOnly: true,
+    secure: LOCAL_SESSION_SECURE,
+    sameSite: 'Lax',
+    path: '/',
+    maxAgeSeconds: LOCAL_SESSION_MAX_AGE_SECONDS
+  });
+}
+
+function appendCookie(res, name, value, options = {}) {
+  const parts = [`${encodeURIComponent(name)}=${encodeURIComponent(value)}`];
+  if (options.maxAgeSeconds !== undefined) parts.push(`Max-Age=${Math.max(0, Math.floor(options.maxAgeSeconds))}`);
+  parts.push(`Path=${options.path || '/'}`);
+  if (options.httpOnly) parts.push('HttpOnly');
+  if (options.secure) parts.push('Secure');
+  if (options.sameSite) parts.push(`SameSite=${options.sameSite}`);
+  const existing = res.getHeader('Set-Cookie');
+  const cookies = Array.isArray(existing) ? existing.slice() : existing ? [String(existing)] : [];
+  cookies.push(parts.join('; '));
+  res.setHeader('Set-Cookie', cookies);
+}
+
+function clearCookie(res, name, path) {
+  appendCookie(res, name, '', {
+    maxAgeSeconds: 0,
+    httpOnly: true,
+    secure: LOCAL_SESSION_SECURE,
+    sameSite: 'Lax',
+    path
+  });
+}
+
+async function completeOauthCallback(req, res) {
+  res.set({ 'Cache-Control': 'no-store', Pragma: 'no-cache', 'Referrer-Policy': 'no-referrer' });
+  const code = String(req.query.code || '');
+  const state = String(req.query.state || '');
+  const flow = verifyOauthFlow(parseCookieHeader(req.headers.cookie, OAUTH_FLOW_COOKIE));
+  if (!code || !state || !flow || flow.state !== state) {
+    clearCookie(res, OAUTH_FLOW_COOKIE, '/api/auth');
+    return res.status(401).send('Authentication state is invalid or expired.');
+  }
+
+  try {
+    const result = await exchangeAuthorizationCode({
+      code,
+      codeVerifier: flow.codeVerifier,
+      redirectUri: flow.redirectUri,
+      state
+    });
+    setLocalSessionCookie(res, result.sessionToken);
+    clearCookie(res, OAUTH_FLOW_COOKIE, '/api/auth');
+    return res.redirect(302, safeLocalReturnTo(flow.returnTo));
+  } catch (error) {
+    clearCookie(res, OAUTH_FLOW_COOKIE, '/api/auth');
+    const statusCode = Number(error?.statusCode) || 500;
+    return res.status(statusCode).send(statusCode < 500 ? String(error.message) : 'Authentication failed.');
   }
 }
 
@@ -433,7 +538,11 @@ function extractUserFromSessionData(sessionData) {
 async function introspectSession(headers) {
   try {
     const appKey = process.env.INTERNAL_APP_KEY || 'japanesePractice';
-    const serviceToken = process.env.INTERNAL_SERVICE_TOKEN || '46661b603c7fee1c97eeccb434e059eed586c229da9f916cc7fd2d8912efbd5c';
+    const serviceToken = process.env.INTERNAL_SERVICE_TOKEN || '';
+    if (!serviceToken) {
+      log('ERROR', 'Internal service token is not configured');
+      return null;
+    }
     const response = await fetch(SESSION_INTROSPECT_URL, {
       method: 'POST',
       headers: {
@@ -460,7 +569,41 @@ async function introspectSession(headers) {
   }
 }
 
+function parseCookieHeader(header, name) {
+  const match = String(header || '').match(new RegExp(`(?:^|;\\s*)${name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}=([^;]+)`));
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+async function resolveLocalSession(req) {
+  const token = parseCookieHeader(req.headers.cookie, LOCAL_SESSION_COOKIE);
+  if (!token) return null;
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  try {
+    const result = await db.query(`
+      SELECT s.id, s.user_id, s.plan_key, u.email, u.nickname
+      FROM sessions s JOIN users u ON u.id = s.user_id
+      WHERE s.token = $1 AND s.expires_at > NOW()
+      LIMIT 1
+    `, [tokenHash]);
+    const row = result.rows[0];
+    if (!row) return null;
+    return { userId: row.user_id, email: row.nickname || row.email || 'user@example.com', planKey: row.plan_key || credits.DEFAULT_TIER, localSessionId: row.id };
+  } catch (error) {
+    log('WARN', 'Local session lookup failed', { error: error.message });
+    return null;
+  }
+}
+
 async function authMiddleware(req, res, next) {
+  if (!IS_DEMO_MODE) {
+    const localUser = await resolveLocalSession(req);
+    if (localUser) {
+      req.localSessionId = localUser.localSessionId;
+      req.user = localUser;
+      return next();
+    }
+  }
+
   // 1. Check for Bearer token FIRST (works for demo mode & cross-domain SSO tokens)
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -547,8 +690,14 @@ const DAILY_BANK_WARM_MAX_GENERATE_TOTAL = Math.max(
   DAILY_BANK_TARGET_PER_BUCKET * 17,
   Number.parseInt(process.env.DAILY_BANK_WARM_MAX_GENERATE_TOTAL || String(DAILY_BANK_TARGET_PER_BUCKET * 17), 10)
 );
-const DAILY_BANK_RUN_ON_STARTUP = String(process.env.DAILY_BANK_RUN_ON_STARTUP || '1') !== '0';
-const DAILY_BANK_ENABLED = String(process.env.DAILY_BANK_ENABLED || '1') !== '0';
+function envFlag(name, fallback = true) {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  return !['0', 'false', 'no', 'off'].includes(String(value).trim().toLowerCase());
+}
+
+const DAILY_BANK_RUN_ON_STARTUP = envFlag('DAILY_BANK_RUN_ON_STARTUP');
+const DAILY_BANK_ENABLED = envFlag('DAILY_BANK_ENABLED');
 const DAILY_BANK_SCHEDULE_HOUR = Math.max(
   0,
   Math.min(23, Number.parseInt(process.env.DAILY_BANK_SCHEDULE_HOUR || '0', 10))
@@ -573,8 +722,8 @@ const DAILY_BANK_EXACT_VARIANT_LOOKUP = new Map(
     .filter((variant) => Array.isArray(variant.mondaiIds) && variant.mondaiIds.length > 0)
     .map((variant) => [variant.mondaiIds.slice().sort().join('|'), variant.key])
 );
-const CURRENT_DAY_RARE_BUCKET_WARM_ENABLED = String(process.env.CURRENT_DAY_RARE_BUCKET_WARM_ENABLED || '1') !== '0';
-const CURRENT_DAY_RARE_BUCKET_WARM_ON_STARTUP = String(process.env.CURRENT_DAY_RARE_BUCKET_WARM_ON_STARTUP || '1') !== '0';
+const CURRENT_DAY_RARE_BUCKET_WARM_ENABLED = envFlag('CURRENT_DAY_RARE_BUCKET_WARM_ENABLED');
+const CURRENT_DAY_RARE_BUCKET_WARM_ON_STARTUP = envFlag('CURRENT_DAY_RARE_BUCKET_WARM_ON_STARTUP');
 const CURRENT_DAY_RARE_BUCKET_WARM_TARGET_PER_BUCKET = Math.max(
   1,
   Number.parseInt(process.env.CURRENT_DAY_RARE_BUCKET_WARM_TARGET_PER_BUCKET || '3', 10)
@@ -603,6 +752,41 @@ app.get('/api/config', (req, res) => {
     guestMode: IS_DEMO_MODE
   });
 });
+
+app.get('/api/auth/start', (req, res) => {
+  res.set({ 'Cache-Control': 'no-store', Pragma: 'no-cache', 'Referrer-Policy': 'no-referrer' });
+  if (IS_DEMO_MODE) return res.redirect(302, safeLocalReturnTo(req.query.return_to));
+  try {
+    const codeVerifier = crypto.randomBytes(32).toString('base64url');
+    const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+    const state = crypto.randomUUID();
+    const redirectUri = oauthRedirectUri(req);
+    const returnTo = safeLocalReturnTo(req.query.return_to);
+    const flow = signOauthFlow({ codeVerifier, state, redirectUri, returnTo, expiresAt: Date.now() + 10 * 60 * 1000 });
+    appendCookie(res, OAUTH_FLOW_COOKIE, flow, {
+      httpOnly: true,
+      secure: LOCAL_SESSION_SECURE,
+      sameSite: 'Lax',
+      path: '/api/auth',
+      maxAgeSeconds: 10 * 60
+    });
+    const authorizeUrl = new URL(
+      DASUN_AUTHORIZE_URL || '/oauth/authorize',
+      DASUN_AUTHORIZE_URL ? undefined : `${String(process.env.DASUN_LOGIN_URL || 'https://dasun.app').replace(/\/login\/?$/, '').replace(/\/$/, '')}/`
+    );
+    authorizeUrl.searchParams.set('client_id', OAUTH_CLIENT_ID);
+    authorizeUrl.searchParams.set('redirect_uri', redirectUri);
+    authorizeUrl.searchParams.set('response_type', 'code');
+    authorizeUrl.searchParams.set('code_challenge', codeChallenge);
+    authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+    authorizeUrl.searchParams.set('state', state);
+    return res.redirect(302, authorizeUrl.toString());
+  } catch (error) {
+    return res.status(500).json({ error: 'Authentication is not configured.' });
+  }
+});
+
+app.get('/api/auth/callback', completeOauthCallback);
 
 // Latency metrics endpoint
 app.get('/api/latency-metrics', (req, res) => {
@@ -633,8 +817,12 @@ app.get('/api/latency-metrics', (req, res) => {
   });
 });
 
-app.post('/api/auth/exchange-code', handleExchangeCode);
-  app.post('/auth/exchange-code', handleExchangeCode);
+function rejectLegacyCodeExchange(_req, res) {
+  return res.status(410).json({ error: 'SSO_HANDOFF_DEPRECATED' });
+}
+
+app.post('/api/auth/exchange-code', rejectLegacyCodeExchange);
+app.post('/auth/exchange-code', rejectLegacyCodeExchange);
 
   app.post('/api/demo-login', async (req, res) => {
   try {
@@ -658,9 +846,13 @@ app.post('/api/me', authMiddleware, (req, res) => {
 });
 
 // Logout endpoint (clears demo session / invalidates token client-side)
-app.post('/api/logout', (req, res) => {
-  // For demo mode, logout is client-side token deletion
-  // In production with central auth, would call introspection service to invalidate
+app.post('/api/logout', async (req, res) => {
+  const token = parseCookieHeader(req.headers.cookie, LOCAL_SESSION_COOKIE);
+  if (token) {
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    await db.query('DELETE FROM sessions WHERE token = $1', [tokenHash]).catch(() => undefined);
+  }
+  clearCookie(res, LOCAL_SESSION_COOKIE, '/');
   res.json({ success: true, message: 'Logged out successfully' });
 });
 
@@ -1323,7 +1515,7 @@ async function getExamInstanceAccess(userId, instanceKey) {
     attemptStatus: attempt.rows[0]?.status || null
   };
 }
-async function manageSession(userId, existingSessionId, email = '') {
+async function manageSession(userId, existingSessionId, email = '', planKey = credits.DEFAULT_TIER) {
   try {
     // Use transaction to ensure atomicity
     await db.query('BEGIN');
@@ -1342,12 +1534,12 @@ async function manageSession(userId, existingSessionId, email = '') {
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(existingSessionId);
 
     if (existingSessionId && isUUID) {
-      const res = await db.query('SELECT id FROM sessions WHERE id = $1 AND user_id = $2', [existingSessionId, userId]);
+      const res = await db.query('SELECT id, token FROM sessions WHERE id = $1 AND user_id = $2', [existingSessionId, userId]);
       if (res.rows.length > 0) {
         // Refresh expiry (extend by 7 days)
         await db.query("UPDATE sessions SET expires_at = NOW() + INTERVAL '7 days' WHERE id = $1", [existingSessionId]);
         await db.query('COMMIT');
-        return existingSessionId;
+        return { id: res.rows[0].id, token: null };
       }
     }
 
@@ -1355,14 +1547,16 @@ async function manageSession(userId, existingSessionId, email = '') {
     await db.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
 
     // 4. Create new session
+    const sessionToken = crypto.randomBytes(32).toString('base64url');
+    const sessionTokenHash = crypto.createHash('sha256').update(sessionToken).digest('hex');
     const newSessionRes = await db.query(`
-      INSERT INTO sessions (user_id, token, expires_at)
-      VALUES ($1, 'valid', NOW() + INTERVAL '7 days')
-      RETURNING id
-    `, [userId]);
+      INSERT INTO sessions (user_id, token, plan_key, expires_at)
+      VALUES ($1, $2, $3, NOW() + INTERVAL '7 days')
+      RETURNING id, token
+    `, [userId, sessionTokenHash, planKey]);
 
     await db.query('COMMIT');
-    return newSessionRes.rows[0].id;
+    return { id: newSessionRes.rows[0].id, token: sessionToken };
   } catch (err) {
     await db.query('ROLLBACK').catch(() => { });
     console.error('manageSession error:', err.code || 'UNKNOWN', err.message);
@@ -1386,7 +1580,7 @@ app.post('/api/user-data', authMiddleware, async (req, res) => {
     let activeSessionId = null;
     if (dbOk && !isDemoUserId(req.user.userId)) {
       try {
-        activeSessionId = await manageSession(req.user.userId, sessionId, req.user.email);
+        activeSessionId = (await manageSession(req.user.userId, sessionId || req.localSessionId, req.user.email)).id;
       } catch (e) {
         console.error('Session management failed:', e.message, e.code || '', e.detail || '');
         // Continue without session if DB fails momentarily

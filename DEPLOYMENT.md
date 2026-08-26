@@ -109,20 +109,45 @@ This guide explains how to pair and connect any child/mini-app with the central 
    - Backend forwards the cookie header to `SESSION_INTROSPECT_URL`.
 
 2. Cross-Domain Mode (Custom Domain: `exam.com`):
-   - Unauthenticated users are redirected to `https://dasun.app/login?return_to=https://exam.com`.
-   - `dasun.app` authenticates the user and redirects back with `?sso_token=<token>`.
-   - Client stores the token in `localStorage` and passes `Authorization: Bearer <sso_token>` header to API requests.
-   - Mini-app backend introspects the Bearer token with `SESSION_INTROSPECT_URL`.
+   - Unauthenticated users are sent to the mini-app backend `/api/auth/start`.
+   - The backend generates state and PKCE verifier, then redirects to Dasun `/oauth/authorize`.
+   - Dasun returns a one-time authorization code to the exact registered backend callback.
+   - The backend exchanges the code and creates a local opaque `HttpOnly; Secure; SameSite=Lax` session cookie.
+   - The browser never stores a central JWT, service token, verifier, or authorization code.
 
 ### Environment Configuration (Mini-App Side)
 Set these environment variables on the mini-app hosting environment (e.g. Vercel project settings):
 - `SESSION_INTROSPECT_URL`: Central introspection endpoint (e.g. `https://dasun.app/api/internal/session/introspect`).
 - `DASUN_LOGIN_URL`: Central login portal URL (e.g. `https://dasun.app/login`).
+- `DASUN_AUTHORIZE_URL`: Central OAuth authorize endpoint (e.g. `https://dasun.app/oauth/authorize`).
+- `OAUTH_TOKEN_URL`: Central OAuth token endpoint (e.g. `https://dasun.app/oauth/token`).
+- `OAUTH_SERVICE_TOKEN`: Backend-only secret returned once by Dasun admin for this OAuth client.
+- `OAUTH_REDIRECT_URI`: Exact callback URI registered by Dasun admin, including path and port.
 - `CORS_ORIGINS`: Allowed origins list (e.g. `https://exam.dasun.app,https://exam.com`).
 
-### Admin Key Confirmation & Registration Checklist
+### Admin Approval & Registration Checklist
 Before a new mini-app can go live with `dasun.app`, complete these steps with the `dasun.app` administrator:
-1. Register `home_url`: Provide the entrypoint URL of the mini-app.
-2. Select Launch Mode: Choose `same_tab`, `new_tab`, or `embedded`.
-3. Set Visibility Level: Select `public`, `login_required`, or `admin_only`.
-4. Configure Entitlements: Admin configures `app_plan_keys` on `dasun.app` to grant plan tiers (`free`, `pro`, `premium`, `elite`) to users.
+1. Register the mini-app in the portal registry if it should appear in Dasun.
+2. Create an OAuth client through the admin API. The client is always created as `draft`.
+3. Register one exact HTTPS callback URI, for example `https://exam.com/api/auth/callback`.
+4. Copy the generated service token once into the mini-app secret store if introspection is needed. Never put it in browser code.
+5. Validate staging login, refresh, local logout, and callback replay behavior.
+6. Explicitly PATCH the OAuth client status to `active`. Draft and disabled clients cannot authorize or exchange codes.
+7. Configure entitlements (`free`, `pro`, `premium`, `elite`) only after the client approval is complete.
+
+Example approval API calls (run by a Dasun administrator only):
+
+```text
+POST https://dasun.app/api/admin/oauth-clients
+X-Admin-Token: <admin-token>
+{
+  "client_id": "japanesePractice",
+  "display_name": "Japanese Practice",
+  "redirect_uris": ["https://exam.com/api/auth/callback"],
+  "pkce_required": true
+}
+
+PATCH https://dasun.app/api/admin/oauth-clients/japanesePractice
+X-Admin-Token: <admin-token>
+{ "status": "active" }
+```
