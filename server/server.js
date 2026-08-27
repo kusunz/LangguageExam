@@ -420,7 +420,7 @@ async function exchangeAuthorizationCode({ code, codeVerifier, state, redirectUr
       throw Object.assign(new Error('Invalid or expired authorization code'), { statusCode: 401 });
     }
 
-    const data = await response.json();
+    const rawText = await response.text(); let data; try { data = JSON.parse(rawText); } catch(e) { throw new Error('Central returned non-JSON: ' + rawText.slice(0,200)); }
     if (!data || !data.access_token) {
       throw Object.assign(new Error('Authentication failed'), { statusCode: 401 });
     }
@@ -450,7 +450,7 @@ async function exchangeAuthorizationCode({ code, codeVerifier, state, redirectUr
     };
   } catch (err) {
     if (err?.statusCode) throw err;
-    log('ERROR', 'OAuth token exchange exception', { error: err.message });
+    log('ERROR', 'OAuth token exchange exception', { error: err.message, stack: err.stack, full: String(err) }); console.error('[FATAL OAUTH ERR]', err);
     throw Object.assign(new Error('Failed to exchange authentication code'), { statusCode: 500 });
   }
 }
