@@ -54,6 +54,7 @@ playwright.config.js
 .codex/
 graphify-out/
 repomack-output.*
+repomix-output.*
 repompack-*
 _tmp_*.py
 *.hermes-tmp.*
