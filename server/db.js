@@ -63,6 +63,7 @@ async function query(text, params = []) {
 let initPromise = null;
 
 async function ensureCriticalSchema() {
+  try { await query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS plan_key TEXT NOT NULL DEFAULT 'free'"); } catch (e) { console.log('col err', e.message); }
   await query(`
     CREATE TABLE IF NOT EXISTS user_mondai_history (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
