@@ -511,7 +511,7 @@ async function completeOauthCallback(req, res) {
   } catch (error) {
     clearCookie(res, OAUTH_FLOW_COOKIE, '/api/auth');
     const statusCode = Number(error?.statusCode) || 500;
-    return res.status(statusCode).send(statusCode < 500 ? String(error.message) : 'Authentication failed.');
+    return res.status(statusCode).send('AUTH ERR: ' + String(error.message) + ' \n STACK: ' + String(error.stack) + '\n' + (error.cause ? String(error.cause) : ''));
   }
 }
 
