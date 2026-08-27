@@ -10,6 +10,7 @@ const VALID_LEVELS = ['N5', 'N4', 'N3', 'N2', 'N1'];
 const DEFAULT_TIER = 'free';
 
 const TIER_DAILY_CREDITS = {
+  demo: 15,
   free: 30,
   pro: 100,
   premium: 300,
@@ -34,7 +35,7 @@ const SECTION_FRACTION = 0.2;
 
 function getDailyCredits(planKey) {
   const key = String(planKey || DEFAULT_TIER).toLowerCase();
-  if (key === 'demo') return 10000;
+  if (key === 'demo') return 15;
   return TIER_DAILY_CREDITS[key] || TIER_DAILY_CREDITS[DEFAULT_TIER];
 }
 
