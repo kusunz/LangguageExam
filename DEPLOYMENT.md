@@ -33,7 +33,7 @@ Configure in the Vercel dashboard. Use placeholders only and never commit real v
 | Variable | Example |
 |---|---|
 | SESSION_INTROSPECT_URL | https://app.example.com/api/internal/session/introspect |
-| DASUN_LOGIN_URL | https://app.example.com/login |
+| DASUN_LOGIN_URL | https://sso.dasun.app/login |
 | CORS_ORIGIN | https://app.example.com |
 
 ### LLM (NVIDIA NIM - grading/explain primary)

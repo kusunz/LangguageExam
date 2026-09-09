@@ -59,8 +59,8 @@ const GENERATE_MAX_TOKENS = Math.max(
 );
 const SESSION_INTROSPECT_URL = process.env.SESSION_INTROSPECT_URL || 'https://dasun.app/api/internal/session/introspect';
 const IS_DEMO_MODE = !process.env.SESSION_INTROSPECT_URL;
-const DASUN_AUTHORIZE_URL = process.env.DASUN_AUTHORIZE_URL || '';
-const OAUTH_TOKEN_URL = process.env.OAUTH_TOKEN_URL || 'https://dasun.app/oauth/token';
+const DASUN_AUTHORIZE_URL = process.env.DASUN_AUTHORIZE_URL || 'https://sso.dasun.app/oauth/authorize';
+const OAUTH_TOKEN_URL = process.env.OAUTH_TOKEN_URL || 'https://sso.dasun.app/oauth/token';
 const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || 'japanesePractice';
 const OAUTH_SERVICE_TOKEN = process.env.OAUTH_SERVICE_TOKEN || '';
 const OAUTH_REDIRECT_URI = process.env.OAUTH_REDIRECT_URI || '';
@@ -160,8 +160,8 @@ const CONTENT_SECURITY_POLICY = [
   "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com data:",
   "img-src 'self' data: blob:",
   "media-src 'self' blob: data:",
-  "connect-src 'self' https://dasun.app",
-  "frame-src 'self' https://dasun.app"
+  "connect-src 'self' https://dasun.app https://sso.dasun.app",
+  "frame-src 'self' https://dasun.app https://sso.dasun.app"
 ].join('; ');
 
 function getRequestOriginCandidates(req) {
@@ -749,7 +749,7 @@ const dailyBankRuntimeState = {
 // Get public config (no auth required)
 app.get('/api/config', (req, res) => {
   res.json({
-    dasunLoginUrl: process.env.DASUN_LOGIN_URL || 'https://dasun.app/login',
+    dasunLoginUrl: process.env.DASUN_LOGIN_URL || 'https://sso.dasun.app/login',
     guestMode: IS_DEMO_MODE
   });
 });

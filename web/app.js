@@ -832,7 +832,7 @@
                 this.config = await configRes.json();
             } catch (err) {
                 console.error('Failed to load config:', err);
-                this.config = { dasunLoginUrl: 'https://dasun.app', guestMode: false };
+                this.config = { dasunLoginUrl: 'https://sso.dasun.app/login', guestMode: false };
             }
 
             clearExpiredDemoSessionIfNeeded();
@@ -1007,7 +1007,7 @@
             try { await fetch('/api/logout', { method: 'POST', credentials: 'include' }); } catch (_) { }
 
             const returnUrl = encodeURIComponent(window.location.origin + window.location.pathname);
-            const rawBaseUrl = this.config?.dasunLoginUrl || 'https://dasun.app';
+            const rawBaseUrl = this.config?.dasunLoginUrl || 'https://sso.dasun.app/login';
             const baseUrl = rawBaseUrl.replace(/\/login\/?$/, '').replace(/\/$/, '');
             let logoutUrl = `${baseUrl}/logout?return_to=${returnUrl}`;
 
