@@ -417,7 +417,7 @@ async function exchangeAuthorizationCode({ code, codeVerifier, state, redirectUr
     if (!response.ok) {
       const errorText = await response.text();
       log('WARN', 'OAuth token exchange failed', { status: response.status });
-      throw Object.assign(new Error('Invalid or expired authorization code'), { statusCode: 401 });
+      throw Object.assign(new Error('Auth Exchange Failed: ' + errorText), { statusCode: response.status });
     }
 
     const rawText = await response.text(); let data; try { data = JSON.parse(rawText); } catch(e) { throw new Error('Central returned non-JSON: ' + rawText.slice(0,200)); }
