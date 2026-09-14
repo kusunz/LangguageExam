@@ -450,7 +450,7 @@ async function exchangeAuthorizationCode({ code, codeVerifier, state, redirectUr
     };
   } catch (err) {
     if (err?.statusCode) throw err;
-    log('ERROR', 'OAuth token exchange exception', { error: err.message, stack: err.stack, full: String(err) }); console.error('[FATAL OAUTH ERR]', err);
+    log('ERROR', 'OAuth token exchange exception', { error: err.message });
     throw Object.assign(new Error('Failed to exchange authentication code'), { statusCode: 500 });
   }
 }
@@ -511,7 +511,8 @@ async function completeOauthCallback(req, res) {
   } catch (error) {
     clearCookie(res, OAUTH_FLOW_COOKIE, '/api/auth');
     const statusCode = Number(error?.statusCode) || 500;
-    return res.status(statusCode).send('AUTH ERR: ' + String(error.message) + ' \n STACK: ' + String(error.stack) + '\n' + (error.cause ? String(error.cause) : ''));
+    log('ERROR', 'OAuth callback error', { message: error.message, statusCode });
+    return res.status(statusCode).send('Authentication failed. Please try again.');
   }
 }
 
