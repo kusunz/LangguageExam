@@ -750,7 +750,7 @@ input:focus-visible,
 .section-option.selected {
   border-color: var(--accent-primary);
   background: var(--accent-soft);
-  color: var(--accent-primary);
+  color: var(--text-secondary);
 }
 
 .section-option i {
@@ -1454,6 +1454,7 @@ input:focus-visible,
 
 .choice.selected .choice-letter {
   background: var(--accent-primary);
+  color: var(--accent-text);
 }
 
 .choice-text {
@@ -1855,7 +1856,7 @@ input:focus-visible,
 
 .review-choice.correct-answer .choice-letter {
   background: var(--success);
-  color: white;
+  color: var(--text-inverse);
 }
 
 .review-choice.correct-answer-unanswered {
@@ -1865,7 +1866,7 @@ input:focus-visible,
 
 .review-choice.correct-answer-unanswered .choice-letter {
   background: var(--warning);
-  color: white;
+  color: var(--text-inverse);
 }
 
 .review-choice.wrong-answer {
@@ -1875,7 +1876,7 @@ input:focus-visible,
 
 .review-choice.wrong-answer .choice-letter {
   background: var(--error);
-  color: white;
+  color: var(--text-inverse);
 }
 
 /* ============================================
@@ -2415,7 +2416,7 @@ input:focus-visible,
 
 .grading-option .option-icon.ai {
   background: var(--accent-gradient);
-  color: white;
+  color: var(--accent-text);
 }
 
 .grading-option .option-info h4 {
@@ -2650,7 +2651,7 @@ strong.hl {
 
 .review-choice.correct-answer .choice-letter {
   background: var(--success);
-  color: #fff;
+  color: var(--text-inverse);
 }
 
 .review-choice.correct-answer-unanswered {
@@ -2660,7 +2661,7 @@ strong.hl {
 
 .review-choice.correct-answer-unanswered .choice-letter {
   background: var(--warning);
-  color: #fff;
+  color: var(--text-inverse);
 }
 
 .review-choice.wrong-answer {
@@ -2670,7 +2671,7 @@ strong.hl {
 
 .review-choice.wrong-answer .choice-letter {
   background: var(--error);
-  color: #fff;
+  color: var(--text-inverse);
 }
 
 .review-choice.user-selected:not(.wrong-answer):not(.correct-answer) {
@@ -2807,7 +2808,7 @@ strong.hl {
 }
 .credit-badge.exhausted {
   background: rgba(220, 50, 50, 0.15);
-  color: #dc3545;
+  color: var(--error-strong);
 }
 .credit-badge #credit-tier {
   font-size: 0.7rem;

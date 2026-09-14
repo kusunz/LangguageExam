@@ -3166,7 +3166,7 @@
                     return `
         <div class="question-item placeholder-item" data-question-id="${item.id}">
           <div class="question-number">Câu ${idx + 1}</div>
-          <div class="question-prompt text-muted" style="text-align: center; padding: 2rem; color: #888;">
+          <div class="question-prompt text-muted" style="text-align: center; padding: 2rem; color: var(--text-muted);">
             <i class="fa-solid fa-spinner fa-spin"></i> Đang hoàn thiện nội dung câu hỏi...
           </div>
         </div>
