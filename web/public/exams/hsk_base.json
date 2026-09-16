@@ -1,0 +1,156 @@
+{
+  "exam_id": "hsk",
+  "display_name_vi": "HSK",
+  "language": "zh-CN",
+  "script": "han",
+  "modes": {
+    "basic": { "time_scale": 0.3333, "question_scale": 0.3333 },
+    "standard": { "time_scale": 0.6667, "question_scale": 0.6667 },
+    "official": { "time_scale": 1.0, "question_scale": 1.0 }
+  },
+  "ui": {
+    "navigation_mode": "mondai",
+    "show_script_in_test": false,
+    "reveal_script_in_review": true,
+    "reading_focus_tools": { "enable_zoom": true, "enable_focus_mode": true }
+  },
+  "levels": [
+    {
+      "level": "HSK1",
+      "display_name_vi": "HSK 1",
+      "official_time_limits_sec": {
+        "groups": [ { "group_id": "listening", "time_sec": 1200 }, { "group_id": "reading", "time_sec": 1200 } ],
+        "overall_time_sec": 2400
+      },
+      "groups": [
+        { "group_id": "listening", "title_vi": "Nghe hiểu", "mondai": [
+          { "mondai_id": "H1", "title_vi": "Nghe - Đối thoại", "instructions_vi": "Nghe đoạn đối thoại ngắn và chọn đáp án đúng.", "types": ["listening_dialogue"], "count_official": 12 },
+          { "mondai_id": "H2", "title_vi": "Nghe - Đoạn dài", "instructions_vi": "Nghe một đoạn nói ngắn và trả lời câu hỏi.", "types": ["listening_passage"], "count_official": 6 }
+        ] },
+        { "group_id": "reading", "title_vi": "Đọc hiểu", "mondai": [
+          { "mondai_id": "H4", "title_vi": "Điền từ", "instructions_vi": "Chọn từ thích hợp để điền vào chỗ trống.", "types": ["reading_cloze"], "count_official": 12 },
+          { "mondai_id": "H5", "title_vi": "Chèn câu", "instructions_vi": "Chọn câu thích hợp để điền vào đoạn văn.", "types": ["reading_sentence"], "count_official": 6 }
+        ] }
+      ]
+    },
+    {
+      "level": "HSK2",
+      "display_name_vi": "HSK 2",
+      "official_time_limits_sec": {
+        "groups": [ { "group_id": "listening", "time_sec": 1500 }, { "group_id": "reading", "time_sec": 1500 }, { "group_id": "writing", "time_sec": 900 } ],
+        "overall_time_sec": 3900
+      },
+      "groups": [
+        { "group_id": "listening", "title_vi": "Nghe hiểu", "mondai": [
+          { "mondai_id": "H1", "title_vi": "Nghe - Đối thoại", "instructions_vi": "Nghe hội thoại ngắn và chọn đáp án đúng.", "types": ["listening_dialogue"], "count_official": 10 },
+          { "mondai_id": "H2", "title_vi": "Nghe - Đoạn dài", "instructions_vi": "Nghe đoạn nói và trả lời câu hỏi.", "types": ["listening_passage"], "count_official": 8 }
+        ] },
+        { "group_id": "reading", "title_vi": "Đọc hiểu", "mondai": [
+          { "mondai_id": "H4", "title_vi": "Điền từ", "instructions_vi": "Chọn từ thích hợp để điền vào chỗ trống.", "types": ["reading_cloze"], "count_official": 10 },
+          { "mondai_id": "H5", "title_vi": "Chèn câu", "instructions_vi": "Chọn câu thích hợp để điền vào đoạn văn.", "types": ["reading_sentence"], "count_official": 8 },
+          { "mondai_id": "H6", "title_vi": "Hiểu nội dung", "instructions_vi": "Đọc đoạn văn và trả lời câu hỏi.", "types": ["reading_comprehension"], "count_official": 8 }
+        ] },
+        { "group_id": "writing", "title_vi": "Viết", "mondai": [
+          { "mondai_id": "H7", "title_vi": "Sắp xếp câu", "instructions_vi": "Sắp xếp các từ thành câu hoàn chỉnh.", "types": ["writing_order"], "count_official": 8 },
+          { "mondai_id": "H8", "title_vi": "Bài luận ngắn", "instructions_vi": "Viết câu trả lời ngắn dựa trên đoạn đã đọc.", "types": ["writing_essay"], "count_official": 2 }
+        ] }
+      ]
+    },
+    {
+      "level": "HSK3",
+      "display_name_vi": "HSK 3",
+      "official_time_limits_sec": {
+        "groups": [ { "group_id": "listening", "time_sec": 1800 }, { "group_id": "reading", "time_sec": 1800 }, { "group_id": "writing", "time_sec": 1200 } ],
+        "overall_time_sec": 4800
+      },
+      "groups": [
+        { "group_id": "listening", "title_vi": "Nghe hiểu", "mondai": [
+          { "mondai_id": "H1", "title_vi": "Nghe - Đối thoại", "instructions_vi": "Nghe đoạn đối thoại và chọn đáp án đúng.", "types": ["listening_dialogue"], "count_official": 10 },
+          { "mondai_id": "H2", "title_vi": "Nghe - Đoạn dài", "instructions_vi": "Nghe đoạn nói và trả lời câu hỏi.", "types": ["listening_passage"], "count_official": 8 },
+          { "mondai_id": "H3", "title_vi": "Nghe - Tổng hợp", "instructions_vi": "Nghe đoạn tin và trả lời câu hỏi liên quan.", "types": ["listening_integrated"], "count_official": 5 }
+        ] },
+        { "group_id": "reading", "title_vi": "Đọc hiểu", "mondai": [
+          { "mondai_id": "H4", "title_vi": "Điền từ", "instructions_vi": "Chọn từ thích hợp để điền vào chỗ trống.", "types": ["reading_cloze"], "count_official": 8 },
+          { "mondai_id": "H5", "title_vi": "Chèn câu", "instructions_vi": "Chọn câu thích hợp để điền vào đoạn văn.", "types": ["reading_sentence"], "count_official": 6 },
+          { "mondai_id": "H6", "title_vi": "Hiểu nội dung", "instructions_vi": "Đọc đoạn văn và trả lời câu hỏi.", "types": ["reading_comprehension"], "count_official": 10 }
+        ] },
+        { "group_id": "writing", "title_vi": "Viết", "mondai": [
+          { "mondai_id": "H7", "title_vi": "Sắp xếp câu", "instructions_vi": "Sắp xếp các từ thành câu hoàn chỉnh.", "types": ["writing_order"], "count_official": 6 },
+          { "mondai_id": "H8", "title_vi": "Bài luận ngắn", "instructions_vi": "Viết câu trả lời ngắn dựa trên đoạn đã đọc.", "types": ["writing_essay"], "count_official": 3 }
+        ] }
+      ]
+    },
+    {
+      "level": "HSK4",
+      "display_name_vi": "HSK 4",
+      "official_time_limits_sec": {
+        "groups": [ { "group_id": "listening", "time_sec": 2100 }, { "group_id": "reading", "time_sec": 2400 }, { "group_id": "writing", "time_sec": 1200 } ],
+        "overall_time_sec": 5700
+      },
+      "groups": [
+        { "group_id": "listening", "title_vi": "Nghe hiểu", "mondai": [
+          { "mondai_id": "H1", "title_vi": "Nghe - Đối thoại", "instructions_vi": "Nghe đoạn đối thoại và chọn đáp án đúng.", "types": ["listening_dialogue"], "count_official": 8 },
+          { "mondai_id": "H2", "title_vi": "Nghe - Đoạn dài", "instructions_vi": "Nghe đoạn nói và trả lời câu hỏi.", "types": ["listening_passage"], "count_official": 8 },
+          { "mondai_id": "H3", "title_vi": "Nghe - Tổng hợp", "instructions_vi": "Nghe đoạn tin và trả lời câu hỏi liên quan.", "types": ["listening_integrated"], "count_official": 6 }
+        ] },
+        { "group_id": "reading", "title_vi": "Đọc hiểu", "mondai": [
+          { "mondai_id": "H4", "title_vi": "Điền từ", "instructions_vi": "Chọn từ thích hợp để điền vào chỗ trống.", "types": ["reading_cloze"], "count_official": 6 },
+          { "mondai_id": "H5", "title_vi": "Chèn câu", "instructions_vi": "Chọn câu thích hợp để điền vào đoạn văn.", "types": ["reading_sentence"], "count_official": 6 },
+          { "mondai_id": "H6", "title_vi": "Hiểu nội dung", "instructions_vi": "Đọc đoạn văn và trả lời câu hỏi.", "types": ["reading_comprehension"], "count_official": 14 }
+        ] },
+        { "group_id": "writing", "title_vi": "Viết", "mondai": [
+          { "mondai_id": "H7", "title_vi": "Sắp xếp câu", "instructions_vi": "Sắp xếp các từ thành câu hoàn chỉnh.", "types": ["writing_order"], "count_official": 5 },
+          { "mondai_id": "H8", "title_vi": "Bài luận ngắn", "instructions_vi": "Viết câu trả lời ngắn dựa trên đoạn đã đọc.", "types": ["writing_essay"], "count_official": 4 }
+        ] }
+      ]
+    },
+    {
+      "level": "HSK5",
+      "display_name_vi": "HSK 5",
+      "official_time_limits_sec": {
+        "groups": [ { "group_id": "listening", "time_sec": 3000 }, { "group_id": "reading", "time_sec": 3000 }, { "group_id": "writing", "time_sec": 1800 } ],
+        "overall_time_sec": 7800
+      },
+      "groups": [
+        { "group_id": "listening", "title_vi": "Nghe hiểu", "mondai": [
+          { "mondai_id": "H1", "title_vi": "Nghe - Đối thoại", "instructions_vi": "Nghe hội thoại và chọn đáp án đúng.", "types": ["listening_dialogue"], "count_official": 20 },
+          { "mondai_id": "H2", "title_vi": "Nghe - Đoạn dài", "instructions_vi": "Nghe đoạn nói và trả lời câu hỏi.", "types": ["listening_passage"], "count_official": 15 },
+          { "mondai_id": "H3", "title_vi": "Nghe - Tổng hợp", "instructions_vi": "Nghe đoạn tin và trả lời câu hỏi liên quan.", "types": ["listening_integrated"], "count_official": 8 }
+        ] },
+        { "group_id": "reading", "title_vi": "Đọc hiểu", "mondai": [
+          { "mondai_id": "H4", "title_vi": "Điền từ", "instructions_vi": "Chọn từ thích hợp để điền vào chỗ trống.", "types": ["reading_cloze"], "count_official": 15 },
+          { "mondai_id": "H5", "title_vi": "Chèn câu", "instructions_vi": "Chọn câu thích hợp để điền vào đoạn văn.", "types": ["reading_sentence"], "count_official": 10 },
+          { "mondai_id": "H6", "title_vi": "Hiểu nội dung", "instructions_vi": "Đọc đoạn văn và trả lời câu hỏi.", "types": ["reading_comprehension"], "count_official": 20 }
+        ] },
+        { "group_id": "writing", "title_vi": "Viết", "mondai": [
+          { "mondai_id": "H7", "title_vi": "Sắp xếp câu", "instructions_vi": "Sắp xếp các từ thành câu hoàn chỉnh.", "types": ["writing_order"], "count_official": 8 },
+          { "mondai_id": "H8", "title_vi": "Bài luận ngắn", "instructions_vi": "Viết câu trả lời ngắn dựa trên đoạn đã đọc.", "types": ["writing_essay"], "count_official": 2 }
+        ] }
+      ]
+    },
+    {
+      "level": "HSK6",
+      "display_name_vi": "HSK 6",
+      "official_time_limits_sec": {
+        "groups": [ { "group_id": "listening", "time_sec": 3600 }, { "group_id": "reading", "time_sec": 3900 }, { "group_id": "writing", "time_sec": 2100 } ],
+        "overall_time_sec": 9600
+      },
+      "groups": [
+        { "group_id": "listening", "title_vi": "Nghe hiểu", "mondai": [
+          { "mondai_id": "H1", "title_vi": "Nghe - Đối thoại", "instructions_vi": "Nghe đoạn đối thoại và chọn đáp án đúng.", "types": ["listening_dialogue"], "count_official": 12 },
+          { "mondai_id": "H2", "title_vi": "Nghe - Đoạn dài", "instructions_vi": "Nghe đoạn nói và trả lời câu hỏi.", "types": ["listening_passage"], "count_official": 10 },
+          { "mondai_id": "H3", "title_vi": "Nghe - Tổng hợp", "instructions_vi": "Nghe đoạn tin và trả lời câu hỏi liên quan.", "types": ["listening_integrated"], "count_official": 12 }
+        ] },
+        { "group_id": "reading", "title_vi": "Đọc hiểu", "mondai": [
+          { "mondai_id": "H4", "title_vi": "Điền từ", "instructions_vi": "Chọn từ thích hợp để điền vào chỗ trống.", "types": ["reading_cloze"], "count_official": 6 },
+          { "mondai_id": "H5", "title_vi": "Chèn câu", "instructions_vi": "Chọn câu thích hợp để điền vào đoạn văn.", "types": ["reading_sentence"], "count_official": 6 },
+          { "mondai_id": "H6", "title_vi": "Hiểu nội dung", "instructions_vi": "Đọc đoạn văn dài và trả lời câu hỏi.", "types": ["reading_comprehension"], "count_official": 22 }
+        ] },
+        { "group_id": "writing", "title_vi": "Viết", "mondai": [
+          { "mondai_id": "H7", "title_vi": "Sắp xếp câu", "instructions_vi": "Sắp xếp các từ thành câu hoàn chỉnh.", "types": ["writing_order"], "count_official": 4 },
+          { "mondai_id": "H8", "title_vi": "Bài luận dài", "instructions_vi": "Viết bài luận dựa trên đoạn đã đọc.", "types": ["writing_essay"], "count_official": 10 }
+        ] }
+      ]
+    }
+  ]
+}

@@ -95,14 +95,13 @@
                 <option value="N1">N1 (Cao cấp)</option>
               </select>
             </div>
-            <div class="exam-tab-wrapper" data-exam="hsk" aria-disabled="true" role="button" tabindex="-1"
-              aria-pressed="false" aria-label="HSK sắp có, hiện chưa khả dụng">
+            <div class="exam-tab-wrapper" data-exam="hsk" role="button" tabindex="0"
+              aria-pressed="false" aria-label="Chon ky thi HSK">
               <div class="exam-tab-header">
                 <span class="exam-flag">🇨🇳</span>
                 <span class="exam-name">HSK</span>
-                <span class="coming-soon">Sắp có</span>
               </div>
-              <select id="hsk-level" class="level-select" disabled>
+              <select id="hsk-level" class="level-select">
                 <option value="HSK1">HSK 1</option>
                 <option value="HSK2">HSK 2</option>
                 <option value="HSK3">HSK 3</option>
@@ -448,10 +447,149 @@
         <div id="mistakes-empty" class="empty-state hidden">
           <p>Chưa có lỗi sai nào được ghi nhận</p>
         </div>
-      </main>
-    </section>
+              </main>
+            </section>
 
-    <!-- Email OTP Modal -->
+            <!-- Subscription Screen -->
+            <section id="subscription-screen" class="screen">
+              <header class="app-header glass shell-topbar">
+                <div class="header-left">
+                  <button id="btn-back-subscription" class="btn btn-icon-only" aria-label="Quay lại trang chủ"><i
+                      class="fa-solid fa-arrow-left"></i></button>
+                  <span class="header-title">Thanh toán & Gói</span>
+                </div>
+                <div class="header-right">
+                  <span id="sub-user-email" class="user-badge"></span>
+                  <div id="sub-credit-badge" class="credit-badge" title="Daily exam credits">
+                    <span id="sub-credit-count"></span><span id="sub-credit-tier"></span>
+                  </div>
+                  <button id="btn-theme-toggle-sub" class="btn btn-icon-only" title="Đổi giao diện" aria-label="Đổi giao diện"><i
+                      class="fa-solid fa-moon"></i></button>
+                  <button id="btn-logout-sub" class="btn btn-icon-only" title="Đăng xuất" aria-label="Đăng xuất"><i
+                      class="fa-solid fa-power-off"></i></button>
+                </div>
+              </header>
+
+              <main class="home-content shell-main__content" style="flex: 1; overflow-y: auto; padding: var(--space-lg);">
+                <div style="max-width: 900px; margin: 0 auto;">
+                  <div class="section-heading" style="margin-bottom: var(--space-xl);">
+                    <span class="eyebrow">billing & plans</span>
+                    <h1>Gói thành viên & Thanh toán</h1>
+                    <p>Nâng cấp để mở khóa đầy đủ tính năng, credits hàng tháng cao hơn và hỗ trợ ưu tiên.</p>
+                  </div>
+
+                  <div id="sub-success-message" class="feedback feedback--success hidden" role="status"></div>
+                  <div id="sub-error-message" class="feedback feedback--error hidden" role="alert"></div>
+
+                  <!-- Current Subscription Overview -->
+                  <div id="sub-current-plan" class="section-card glass" style="margin-bottom: var(--space-xl); display: none;">
+                    <h2>Gói hiện tại</h2>
+                    <div id="sub-current-plan-details" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-md); margin-top: var(--space-md);">
+                      <div>
+                        <dt style="color: var(--text-muted); font-size: var(--text-sm);">Gói</dt>
+                        <dd id="sub-current-plan-name" style="font-weight: 600; font-size: var(--text-lg);">Free Tier</dd>
+                      </div>
+                      <div>
+                        <dt style="color: var(--text-muted); font-size: var(--text-sm);">Trạng thái</dt>
+                        <dd id="sub-current-plan-status" style="font-weight: 500;"><span class="status-pill">inactive</span></dd>
+                      </div>
+                      <div>
+                        <dt style="color: var(--text-muted); font-size: var(--text-sm);">Credits khả dụng</dt>
+                        <dd id="sub-current-credits" style="font-weight: 600; font-size: var(--text-lg);">0 credits</dd>
+                      </div>
+                      <div>
+                        <dt style="color: var(--text-muted); font-size: var(--text-sm);">Hạn mức ngày</dt>
+                        <dd id="sub-current-daily" style="font-weight: 500;">0 credits / ngày</dd>
+                      </div>
+                    </div>
+                    <div id="sub-cancel-section" style="margin-top: var(--space-lg); display: none;">
+                      <button id="btn-cancel-subscription" class="btn btn-secondary" type="button">Hủy đăng ký</button>
+                    </div>
+                  </div>
+
+                  <!-- Controls: Currency & Provider Selector -->
+                  <div class="section-card glass" style="display: flex; gap: 2rem; flex-wrap: wrap; align-items: center; margin-bottom: var(--space-xl); padding: var(--space-lg);">
+                    <div>
+                      <label style="display: block; font-size: var(--text-sm); margin-bottom: var(--space-xs); color: var(--text-muted);">Đơn vị tiền tệ</label>
+                      <div style="display: flex; gap: var(--space-sm);">
+                        <button id="sub-currency-usd" type="button" class="btn btn-primary" data-currency="USD">USD ($)</button>
+                        <button id="sub-currency-vnd" type="button" class="btn btn-secondary" data-currency="VND">VND (₫)</button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label style="display: block; font-size: var(--text-sm); margin-bottom: var(--space-xs); color: var(--text-muted);">Phương thức thanh toán</label>
+                      <div style="display: flex; gap: var(--space-sm); flex-wrap: wrap;">
+                        <button id="sub-provider-paypal" type="button" class="btn btn-primary" data-provider="paypal">
+                          <i class="fa-brands fa-paypal"></i> PayPal
+                        </button>
+                        <button id="sub-provider-crypto" type="button" class="btn btn-secondary" data-provider="crypto">
+                          <i class="fa-solid fa-coins"></i> Crypto (USDT/BTC)
+                        </button>
+                        <button id="sub-provider-vietqr" type="button" class="btn btn-secondary" data-provider="vietqr">
+                          <i class="fa-solid fa-qrcode"></i> VietQR (Chuyển khoản VN)
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Pricing Grid -->
+                  <div id="sub-loading" class="section-card glass" style="text-align: center; padding: var(--space-2xl); display: none;">
+                    <div class="loading-spinner" style="width: 32px; height: 32px; margin: 0 auto var(--space-md); border-color: var(--accent-primary); border-right-color: transparent;"></div>
+                    <p>Đang tải gói thành viên...</p>
+                  </div>
+
+                  <div id="sub-plans-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-lg); display: none;">
+                    <!-- Plan cards will be inserted here -->
+                  </div>
+
+                  <!-- Payment History / Invoices Section -->
+                  <div class="section-card glass" style="margin-top: var(--space-xl);">
+                    <h2>Lịch sử thanh toán</h2>
+                    <div id="sub-invoices-empty" style="padding: var(--space-lg) 0; color: var(--text-muted); text-align: center; display: none;">
+                      Chưa có giao dịch nào.
+                    </div>
+                    <table id="sub-invoices-table" style="width: 100%; border-collapse: collapse; margin-top: var(--space-md); display: none;">
+                      <thead>
+                        <tr style="border-bottom: 1px solid var(--glass-border); text-align: left;">
+                          <th style="padding: var(--space-sm);">Ngày</th>
+                          <th style="padding: var(--space-sm);">Phương thức</th>
+                          <th style="padding: var(--space-sm);">Mã tham chiếu</th>
+                          <th style="padding: var(--space-sm);">Số tiền</th>
+                          <th style="padding: var(--space-sm);">Trạng thái</th>
+                        </tr>
+                      </thead>
+                      <tbody id="sub-invoices-body"></tbody>
+                    </table>
+                  </div>
+
+                  <!-- FAQ Section -->
+                  <div class="section-card glass" style="margin-top: var(--space-xl);">
+                    <h2>Câu hỏi thường gặp</h2>
+                    <dl class="detail-list" style="margin-top: var(--space-md);">
+                      <div>
+                        <dt>Credits hàng ngày hoạt động như thế nào?</dt>
+                        <dd>Mọi người dùng nhận 30 credits miễn phí cơ bản và 20 credits nạp lại mỗi 24h (múi giờ UTC).</dd>
+                      </div>
+                      <div>
+                        <dt>Phương thức thanh toán nào được chấp nhận?</dt>
+                        <dd>Chúng tôi chấp nhận PayPal, Crypto (USDT/BTC), và Chuyển khoản ngân hàng Việt Nam qua VietQR.</dd>
+                      </div>
+                      <div>
+                        <dt>Có thể đổi đơn vị tiền tệ không?</dt>
+                        <dd>Có, bạn có thể chuyển đổi giữa USD ($) và VND (₫) bất cứ lúc nào trước khi chọn phương thức thanh toán.</dd>
+                      </div>
+                      <div>
+                        <dt>Hủy đăng ký hoạt động như thế nào?</dt>
+                        <dd>Bạn có thể hủy đăng ký bất cứ lúc nào. Quyền lợi và credits vẫn hoạt động đến hết kỳ thanh toán hiện tại.</dd>
+                      </div>
+                    </dl>
+                  </div>
+                </div>
+              </main>
+            </section>
+
+            <!-- Email OTP Modal -->
     <div id="otp-modal" class="modal hidden" role="dialog" aria-modal="true" aria-hidden="true"
       aria-labelledby="otp-modal-title" aria-describedby="otp-email-display">
       <div class="modal-backdrop" aria-hidden="true"></div>

@@ -1,10 +1,10 @@
 # Japanese Practice
 
-Language exam practice (JLPT N2; HSK template ready). Exams are generated 100% by AI.
+Language exam practice (JLPT N5-N1; HSK 1-6). Exams are generated 100% by AI.
 
 ## Features
 
-- JLPT N2 practice (HSK template ready to extend)
+- JLPT N5-N1 and HSK 1-6 practice
 - AI-generated, fully randomized questions
 - TTS audio (Gemini / Deepgram / browser fallback)
 - Overall and per-group timers
@@ -53,19 +53,6 @@ vercel.json
 package.json
 README.md
 DEPLOYMENT.md
-```
-
-## Extend an Exam
-
-1. Add `web/exams/hsk_5.json` following `web/exams/jlpt_n2.json`.
-2. Add the tab in `web/index.html`.
-
-Exam spec:
-
-```json
-{ "exam_id": "hsk_5", "display_name_vi": "HSK 5", "language": "zh-CN", "level": "HSK5",
-  "modes": { "basic": {}, "standard": {}, "official": {} }, "official_time_limits_sec": {},
-  "groups": [{}], "ui": {} }
 ```
 
 ## Test Modes

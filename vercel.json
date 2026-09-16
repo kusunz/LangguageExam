@@ -136,6 +136,78 @@
     {
       "path": "/api/admin/daily-bank/N1/official",
       "schedule": "50 2 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK1/basic",
+      "schedule": "25 0 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK1/standard",
+      "schedule": "25 1 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK1/official",
+      "schedule": "25 2 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK2/basic",
+      "schedule": "25 3 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK2/standard",
+      "schedule": "25 4 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK2/official",
+      "schedule": "25 5 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK3/basic",
+      "schedule": "25 6 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK3/standard",
+      "schedule": "25 7 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK3/official",
+      "schedule": "25 8 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK4/basic",
+      "schedule": "25 9 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK4/standard",
+      "schedule": "25 10 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK4/official",
+      "schedule": "25 11 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK5/basic",
+      "schedule": "25 12 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK5/standard",
+      "schedule": "25 13 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK5/official",
+      "schedule": "25 14 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK6/basic",
+      "schedule": "25 15 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK6/standard",
+      "schedule": "25 16 * * *"
+    },
+    {
+      "path": "/api/admin/daily-bank/HSK6/official",
+      "schedule": "25 17 * * *"
     }
   ]
 }

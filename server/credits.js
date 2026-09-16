@@ -6,7 +6,7 @@
  * Credits reset daily at UTC midnight.
  */
 
-const VALID_LEVELS = ['N5', 'N4', 'N3', 'N2', 'N1'];
+const VALID_LEVELS = ['N5', 'N4', 'N3', 'N2', 'N1', 'HSK1', 'HSK2', 'HSK3', 'HSK4', 'HSK5', 'HSK6'];
 const DEFAULT_TIER = 'free';
 
 const TIER_DAILY_CREDITS = {
@@ -22,7 +22,14 @@ const LEVEL_COSTS = {
   N4: 5,
   N3: 7,
   N2: 10,
-  N1: 15
+  N1: 15,
+  // HSK (Chinese) levels
+  HSK1: 2,
+  HSK2: 3,
+  HSK3: 5,
+  HSK4: 7,
+  HSK5: 10,
+  HSK6: 15
 };
 
 const MODE_MULTIPLIERS = {

@@ -83,8 +83,8 @@ Copy `.env.local.template` to `server/.env`.
 
 ## 7. Daily Warmup & LLM Budget
 
-- Vercel Hobby/Free supports up to 100 cron jobs, with each job limited to one run per day. The 30 daily entries in `vercel.json` are compatible with that limit.
-- The crons call `/api/admin/daily-bank/:level/:mode` for every JLPT level and mode in two waves. Each run fills that day's snapshot buckets (5 items/bucket) and publishes 5 full exam blueprints, so `exam/start` mostly hits the cache instead of the LLM.
+- Vercel Hobby/Free supports up to 100 cron jobs, with each job limited to one run per day. The 48 daily entries in `vercel.json` (30 JLPT, 18 HSK) are compatible with that limit.
+- The crons call `/api/admin/daily-bank/:level/:mode` for every JLPT and HSK level and mode in two waves. Each run fills that day's snapshot buckets (5 items/bucket) and publishes 5 full exam blueprints, so `exam/start` mostly hits the cache instead of the LLM.
 - Hobby cron timing has per-hour precision, so a job may start up to 59 minutes after its scheduled minute. Runs are idempotent and must not depend on exact-minute execution; a failed first-wave run can be retried by the second wave.
 - NIM is the primary provider; OpenRouter is a fallback/repair path capped by `OPENROUTER_DAILY_MAX` (default 1000 calls/day).
 - Tuning knobs: `DAILY_BANK_SET_COUNT`, `DAILY_BANK_TARGET_PER_BUCKET`, `DAILY_BANK_WARM_MAX_GENERATE_TOTAL`, `OPENROUTER_DAILY_MAX`.

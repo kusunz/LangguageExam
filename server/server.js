@@ -46,6 +46,7 @@ const {
   PASSAGE_LENGTH_TARGETS,
   TYPE_TITLES
 } = require('./jlpt_config');
+const { getExamConfig } = require('./jlpt_config');
 const { createClient } = require('@deepgram/sdk');
 
 // DB availability is now checked via db.initDb() at usage points
@@ -674,7 +675,7 @@ const DEFAULT_MODES = {
   official: { question_scale: 1.0, time_scale: 1.0 }
 };
 
-const DAILY_BANK_LEVELS = ['N5', 'N4', 'N3', 'N2', 'N1'];
+const DAILY_BANK_LEVELS = ['N5', 'N4', 'N3', 'N2', 'N1', 'HSK1', 'HSK2', 'HSK3', 'HSK4', 'HSK5', 'HSK6'];
 const DAILY_BANK_MODES = ['basic', 'standard', 'official'];
 const DAILY_BANK_RETENTION_DAYS = Math.max(
   30,
@@ -709,21 +710,51 @@ const DAILY_BANK_SCHEDULE_MINUTE = Math.max(
   Math.min(59, Number.parseInt(process.env.DAILY_BANK_SCHEDULE_MINUTE || '5', 10))
 );
 
-const DAILY_BANK_VARIANTS = [
-  { key: 'full', title: 'Full Exam', mondaiIds: null },
-  { key: 'vocab_grammar', title: 'Vocabulary & Grammar', mondaiIds: ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7'] },
-  { key: 'vocab', title: 'Vocabulary', mondaiIds: ['M1', 'M2', 'M3', 'M4'] },
-  { key: 'grammar', title: 'Grammar', mondaiIds: ['M5', 'M6', 'M7'] },
-  { key: 'reading', title: 'Reading', mondaiIds: ['M8', 'M9', 'M10', 'M11', 'M12'] },
-  { key: 'listening', title: 'Listening', mondaiIds: ['L1', 'L2', 'L3', 'L4', 'L5'] }
-];
+const DAILY_BANK_VARIANTS = {
+  jlpt: [
+    { key: 'full', title: 'Full Exam', mondaiIds: null },
+    { key: 'vocab_grammar', title: 'Vocabulary & Grammar', mondaiIds: ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7'] },
+    { key: 'vocab', title: 'Vocabulary', mondaiIds: ['M1', 'M2', 'M3', 'M4'] },
+    { key: 'grammar', title: 'Grammar', mondaiIds: ['M5', 'M6', 'M7'] },
+    { key: 'reading', title: 'Reading', mondaiIds: ['M8', 'M9', 'M10', 'M11', 'M12'] },
+    { key: 'listening', title: 'Listening', mondaiIds: ['L1', 'L2', 'L3', 'L4', 'L5'] }
+  ],
+  hsk: [
+    { key: 'full', title: 'Full Exam', mondaiIds: null },
+    { key: 'listening', title: 'Listening', mondaiIds: ['H1', 'H2', 'H3'] },
+    { key: 'reading', title: 'Reading', mondaiIds: ['H4', 'H5', 'H6'] },
+    { key: 'writing', title: 'Writing', mondaiIds: ['H7', 'H8'] }
+  ]
+};
 
-const DAILY_BANK_VARIANT_MAP = new Map(DAILY_BANK_VARIANTS.map((variant) => [variant.key, variant]));
-const DAILY_BANK_EXACT_VARIANT_LOOKUP = new Map(
-  DAILY_BANK_VARIANTS
-    .filter((variant) => Array.isArray(variant.mondaiIds) && variant.mondaiIds.length > 0)
-    .map((variant) => [variant.mondaiIds.slice().sort().join('|'), variant.key])
-);
+function getExamVariants(examType = 'jlpt') {
+  const key = String(examType || 'jlpt').trim().toLowerCase();
+  return DAILY_BANK_VARIANTS[key] || DAILY_BANK_VARIANTS.jlpt;
+}
+
+function buildVariantMaps(examType) {
+  const variants = getExamVariants(examType);
+  const map = new Map(variants.map((variant) => [variant.key, variant]));
+  const exact = new Map(
+    variants
+      .filter((variant) => Array.isArray(variant.mondaiIds) && variant.mondaiIds.length > 0)
+      .map((variant) => [variant.mondaiIds.slice().sort().join('|'), variant.key]) 
+  );
+  const fullIds = normalizeMondaiIdList(
+    variants.flatMap((variant) => Array.isArray(variant.mondaiIds) ? variant.mondaiIds : []),
+    64
+  );
+  return { variants, map, exact, fullIds };
+}
+
+const DAILY_BANK_VARIANT_MAP_CACHE = new Map();
+function getVariantMaps(examType = 'jlpt') {
+  const key = String(examType || 'jlpt').trim().toLowerCase();
+  if (DAILY_BANK_VARIANT_MAP_CACHE.has(key)) return DAILY_BANK_VARIANT_MAP_CACHE.get(key);
+  const built = buildVariantMaps(key);
+  DAILY_BANK_VARIANT_MAP_CACHE.set(key, built);
+  return built;
+}
 const CURRENT_DAY_RARE_BUCKET_WARM_ENABLED = envFlag('CURRENT_DAY_RARE_BUCKET_WARM_ENABLED');
 const CURRENT_DAY_RARE_BUCKET_WARM_ON_STARTUP = envFlag('CURRENT_DAY_RARE_BUCKET_WARM_ON_STARTUP');
 const CURRENT_DAY_RARE_BUCKET_WARM_TARGET_PER_BUCKET = Math.max(
@@ -2832,8 +2863,8 @@ async function publishBlueprintExam(params) {
     snapshotId,
     blueprint
   } = params;
-  const title = buildPublishedExamTitle({ level, mode, variantKey, setNo, bankDateYmd });
-  const description = buildPublishedExamDescription({ level, mode, variantKey, bankDateYmd });
+  const title = buildPublishedExamTitle({ level, mode, variantKey, setNo, bankDateYmd, examId: examSpec?.exam_id });
+  const description = buildPublishedExamDescription({ level, mode, variantKey, bankDateYmd, examId: examSpec?.exam_id });
   const expiresAt = new Date(`${addDaysToDateYmd(bankDateYmd, DAILY_BANK_RETENTION_DAYS)}T23:59:59.999Z`).toISOString();
   const blueprintHashes = extractUniqueMondaiHashes(blueprint);
   const meta = {
@@ -2962,12 +2993,13 @@ async function selectPublishedExamBlueprint(options = {}) {
     allowRepeat = false
   } = options;
 
+  const examType = inferExamTypeFromExamId(examId || 'jlpt');
   const normalizedRequestedIds = normalizeMondaiIdList(requestedMondaiIds, 64);
   const candidateVariantKeys = uniqueStrings([
     ...(variantKey && !String(variantKey).startsWith('custom:') ? [variantKey] : []),
     ...ensureArray(fallbackVariantKeys),
-    ...inferPublishedVariantCandidates(normalizedRequestedIds)
-  ], DAILY_BANK_VARIANTS.length + 2).filter((key) => key === 'full' || DAILY_BANK_VARIANT_MAP.has(key));
+    ...inferPublishedVariantCandidates(normalizedRequestedIds, examType)
+  ], getExamVariants(examType).length + 2).filter((key) => key === 'full' || getVariantMaps(examType).map.has(key));
 
   if (!examId || !level || !mode || candidateVariantKeys.length === 0) {
     return null;
@@ -3206,8 +3238,8 @@ async function runDailyBankWorkflow(options = {}) {
   const levels = uniqueStrings(options.levels || DAILY_BANK_LEVELS, DAILY_BANK_LEVELS.length);
   const modes = uniqueStrings(options.modes || DAILY_BANK_MODES, DAILY_BANK_MODES.length);
   const variantKeys = uniqueStrings(
-    options.variants || DAILY_BANK_VARIANTS.map((variant) => variant.key),
-    DAILY_BANK_VARIANTS.length
+    options.variants || getExamVariants('jlpt').map((variant) => variant.key),
+    getExamVariants('jlpt').length
   );
   const results = [];
 
@@ -3691,8 +3723,11 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
   // Re-process reading slots if this is a full exam or has reading section
   // Note: Only apply if we have multiple reading mondai to select from.
   const readingGroup = blueprint.groups.find(g => g.group_id === 'main' || g.group_id === 'reading');
-  if (readingGroup && READING_TIME_BUDGET[mode] && READING_TIME_BUDGET[mode][level]) {
-    const budgetSec = READING_TIME_BUDGET[mode][level];
+  const examTypeForReading = inferExamTypeFromExamId(examSpec?.exam_id || 'jlpt');
+  const examConfigForReading = getExamConfig(examTypeForReading);
+  const readingBudget = examConfigForReading.timeBudget;
+  if (readingGroup && readingBudget[mode] && readingBudget[mode][level]) {
+    const budgetSec = readingBudget[mode][level];
 
     // Filter out only reading slots
     const readingSlots = readingGroup.mondai_slots.filter(s => s.delivery_mode === 'whole');
@@ -3717,7 +3752,7 @@ async function buildExamBlueprint(examSpec, level, mode, seed, setNo, plan, snap
 
     // 1. Ensure type diversity (Greedy)
     // Permitted types needed? 
-    const requiredTypes = JLPT_READING_TYPES[level] || [];
+    const requiredTypes = examConfigForReading.readingTypes[level] || [];
 
     // Shuffle candidates for randomness
     candidates.sort(() => rng() - 0.5);
@@ -3787,7 +3822,7 @@ const GEMINI_TTS_MODELS = [
 ];
 
 const READING_TYPE_SET = new Set(['reading_short', 'reading_mid', 'reading_long', 'reading_compare', 'reading_info']);
-const LISTENING_TYPES = ['listening_task', 'listening_main', 'listening_general', 'listening_quick', 'listening_integrated', 'listening_dialogue', 'listening_mono', 'listen_respond', 'listen_integration', 'listen_task'];
+const LISTENING_TYPES = ['listening_task', 'listening_main', 'listening_general', 'listening_quick', 'listening_integrated', 'listening_dialogue', 'listening_passage', 'listening_mono', 'listen_respond', 'listen_integration', 'listen_task'];
 const LISTENING_TYPE_SET = new Set(LISTENING_TYPES);
 const PASSAGE_REQUIRED_TYPE_SET = new Set(['grammar_passage', ...READING_TYPE_SET]);
 const PASSAGE_FORBIDDEN_TYPE_SET = new Set(['kanji', 'vocab_context', 'vocab_synonym', 'vocab_usage', 'grammar_select', 'grammar_order', ...LISTENING_TYPES]);
@@ -4590,14 +4625,34 @@ async function loadExamBaseSpec(examType = 'jlpt') {
   return cloneJson(spec);
 }
 
-async function buildDailyBankExamSpec(level, examType = 'jlpt') {
+function inferExamTypeFromLevel(level, examType) {
+  if (examType) return String(examType || 'jlpt').trim().toLowerCase();
+  const lv = String(level || '').toUpperCase();
+  if (lv.startsWith('HSK')) return 'hsk';
+  if (lv.startsWith('N') && ['N1', 'N2', 'N3', 'N4', 'N5'].includes(lv)) return 'jlpt';
+  return 'jlpt';
+}
+
+async function buildDailyBankExamSpec(level, examType) {
   const normalizedLevel = String(level || 'N5').toUpperCase();
-  const baseSpec = await loadExamBaseSpec(examType);
+  const inferredExamType = inferExamTypeFromLevel(normalizedLevel, examType);
+  const baseSpec = await loadExamBaseSpec(inferredExamType);
+
+  let levelSpec = baseSpec;
+  if (Array.isArray(baseSpec.levels)) {
+    const match = baseSpec.levels.find((entry) => String(entry.level || '').toUpperCase() === normalizedLevel);
+    if (match) {
+      const { levels, ...rest } = baseSpec;
+      levelSpec = { ...rest, ...match };
+      delete levelSpec.levels;
+    }
+  }
+
   return {
-    ...baseSpec,
-    exam_id: `${String(examType || 'jlpt').toLowerCase()}_${normalizedLevel}`,
+    ...levelSpec,
+    exam_id: `${inferredExamType}_${normalizedLevel}`,
     level: normalizedLevel,
-    display_name_vi: `${baseSpec.display_name_vi || String(examType || 'JLPT').toUpperCase()} ${normalizedLevel}`
+    display_name_vi: `${levelSpec.display_name_vi || inferredExamType.toUpperCase()} ${normalizedLevel}`
   };
 }
 
@@ -4674,7 +4729,8 @@ function filterExamSpecByMondaiIds(examSpec, allowedMondaiIds) {
 }
 
 function buildExamVariantSpec(examSpec, variantKey) {
-  const variant = DAILY_BANK_VARIANT_MAP.get(variantKey);
+  const examType = inferExamTypeFromExamId(examSpec?.exam_id || 'jlpt');
+  const variant = getVariantMaps(examType).map.get(variantKey);
   if (!variant) {
     throw new Error(`Unsupported daily bank variant: ${variantKey}`);
   }
@@ -4691,11 +4747,8 @@ function normalizeMondaiIdList(values, limit = 64) {
   ).sort();
 }
 
-function getDailyBankFullVariantMondaiIds() {
-  return normalizeMondaiIdList(
-    DAILY_BANK_VARIANTS.flatMap((variant) => Array.isArray(variant.mondaiIds) ? variant.mondaiIds : []),
-    64
-  );
+function getDailyBankFullVariantMondaiIds(examType = 'jlpt') {
+  return getVariantMaps(examType).fullIds;
 }
 
 function getRequestedMondaiIds(examSpec) {
@@ -4703,15 +4756,17 @@ function getRequestedMondaiIds(examSpec) {
 }
 
 function inferExamVariantKey(examSpec) {
+  const examType = inferExamTypeFromExamId(examSpec?.exam_id || 'jlpt');
+  const maps = getVariantMaps(examType);
   const normalizedIds = getRequestedMondaiIds(examSpec);
   if (normalizedIds.length === 0) return 'custom:empty';
 
   const joined = normalizedIds.join('|');
-  if (joined === getDailyBankFullVariantMondaiIds().join('|')) {
+  if (joined === maps.fullIds.join('|')) {
     return 'full';
   }
-  if (DAILY_BANK_EXACT_VARIANT_LOOKUP.has(joined)) {
-    return DAILY_BANK_EXACT_VARIANT_LOOKUP.get(joined);
+  if (maps.exact.has(joined)) {
+    return maps.exact.get(joined);
   }
   return `custom:${joined}`;
 }
@@ -4736,7 +4791,14 @@ function filterBlueprintByMondaiIds(blueprint, allowedMondaiIds) {
   return filteredBlueprint;
 }
 
-function inferPublishedVariantCandidates(examSpecOrMondaiIds) {
+function inferPublishedVariantCandidates(examSpecOrMondaiIds, examType) {
+  let inferredExamType = examType;
+  if (!inferredExamType) {
+    inferredExamType = Array.isArray(examSpecOrMondaiIds)
+      ? 'jlpt'
+      : inferExamTypeFromExamId(examSpecOrMondaiIds?.exam_id || examSpecOrMondaiIds?.meta?.exam_id || 'jlpt');
+  }
+  const maps = getVariantMaps(inferredExamType);
   const normalizedIds = Array.isArray(examSpecOrMondaiIds)
     ? normalizeMondaiIdList(examSpecOrMondaiIds, 64)
     : getRequestedMondaiIds(examSpecOrMondaiIds);
@@ -4744,17 +4806,16 @@ function inferPublishedVariantCandidates(examSpecOrMondaiIds) {
   if (normalizedIds.length === 0) return [];
 
   const joined = normalizedIds.join('|');
-  const fullJoined = getDailyBankFullVariantMondaiIds().join('|');
-  if (joined === fullJoined) {
+  if (joined === maps.fullIds.join('|')) {
     return ['full'];
   }
 
-  const exact = DAILY_BANK_EXACT_VARIANT_LOOKUP.get(joined);
+  const exact = maps.exact.get(joined);
   if (exact) {
     return exact === 'full' ? ['full'] : [exact, 'full'];
   }
 
-  const containingKeys = DAILY_BANK_VARIANTS
+  const containingKeys = maps.variants
     .filter((variant) => variant.key !== 'full' && Array.isArray(variant.mondaiIds))
     .filter((variant) => {
       const variantIds = normalizeMondaiIdList(variant.mondaiIds, 64);
@@ -4763,19 +4824,23 @@ function inferPublishedVariantCandidates(examSpecOrMondaiIds) {
     .sort((left, right) => ensureArray(left.mondaiIds).length - ensureArray(right.mondaiIds).length)
     .map((variant) => variant.key);
 
-  return uniqueStrings([...containingKeys, 'full'], DAILY_BANK_VARIANTS.length + 1);
+  return uniqueStrings([...containingKeys, 'full'], maps.variants.length + 1);
 }
 
-function buildPublishedExamTitle({ level, mode, variantKey, setNo, bankDateYmd }) {
-  const variant = DAILY_BANK_VARIANT_MAP.get(variantKey);
+function buildPublishedExamTitle({ level, mode, variantKey, setNo, bankDateYmd, examId }) {
+  const examType = inferExamTypeFromExamId(examId || 'jlpt');
+  const variant = getVariantMaps(examType).map.get(variantKey);
   const variantLabel = variant?.title || variantKey;
-  return `[DailyBank ${bankDateYmd}] JLPT ${level} ${mode} ${variantLabel} #${setNo}`;
+  const family = examType.toUpperCase();
+  return `[DailyBank ${bankDateYmd}] ${family} ${level} ${mode} ${variantLabel} #${setNo}`;
 }
 
-function buildPublishedExamDescription({ level, mode, variantKey, bankDateYmd }) {
-  const variant = DAILY_BANK_VARIANT_MAP.get(variantKey);
+function buildPublishedExamDescription({ level, mode, variantKey, bankDateYmd, examId }) {
+  const examType = inferExamTypeFromExamId(examId || 'jlpt');
+  const variant = getVariantMaps(examType).map.get(variantKey);
   const variantLabel = variant?.title || variantKey;
-  return `Prebuilt daily bank for JLPT ${level} ${mode} ${variantLabel} on ${bankDateYmd}`;
+  const family = examType.toUpperCase();
+  return `Prebuilt daily bank for ${family} ${level} ${mode} ${variantLabel} on ${bankDateYmd}`;
 }
 
 // ============ User Management ============
@@ -5163,8 +5228,9 @@ async function generateGeminiTTS(text, language, speed = 1.0, voice) {
 
 function getExamPromptProfile(examSpec) {
   const examId = String(examSpec?.exam_id || '').toLowerCase();
+  const language = examSpec?.language || 'ja-JP';
 
-  if (examId.includes('jlpt') || examSpec?.language === 'ja-JP') {
+  if (examId.includes('jlpt') || language === 'ja-JP') {
     const jlptCanDo = {
       'N5': {
         desc: 'Understand very basic sentences. Familiar, concrete daily topics. Explicit information only.',
@@ -5203,6 +5269,50 @@ function getExamPromptProfile(examSpec) {
 - Belongs to ${examSpec.level} OR lower
 - Frequently appears in official JLPT prep materials
 - Natural Japanese usage (no textbook artifacts)`
+    };
+  }
+
+if (examId.includes('hsk') || language === 'zh-CN') {
+    const hskCanDo = {
+      'HSK1': {
+        desc: 'Understand and use the most common Chinese daily expressions and very basic sentences.',
+        grammar: 'basic subject-verb/object order, simple question words, no complex clauses, pinyin reliance',
+        types: 'character recognition, vocabulary context, basic sentence formation, literal short-dialogue comprehension'
+      },
+      'HSK2': {
+        desc: 'Understand simple main points of short texts and voice messages. Express needs in direct situations.',
+        grammar: 'adverbial de, directional complements, partial sentence components, simple shi/cai, mei/buyao',
+        types: 'vocabulary context, synonym selection, sentence insertion, dialogue + short passage comprehension'
+      },
+      'HSK3': {
+        desc: 'Understand main points of short standard messages on work, school and leisure. Handle routine travel situations.',
+        grammar: 'ba construction, bei passive, complement forms, ba vs bei, comparative bi, embedded clauses'
+      },
+      'HSK4': {
+        desc: 'Understand main points of clear standard speech in routine matters. Discuss in basic terms on familiar topics.',
+        grammar: 'conditional jiaru/youshi, ba construction, topic-comment, concessive suiran/jinchi, double-subject',
+        types: 'longer passage comprehension with implicit points, integrated listening, grammar in context'
+      },
+      'HSK5': {
+        desc: 'Understand main points of complex speech on concrete and abstract topics in professional or educational settings.',
+        grammar: 'SOV order, clause stacking, mixed constructions, suiran-dao, yuqiexiaoyu, emphasis dou/lian',
+        types: 'longer passage comprehension, multi-step integrated listening, grammar application in essays'
+      },
+      'HSK6': {
+        desc: 'Understand long, complex texts on abstract and technical subjects, appreciating stylistic and semantic nuance.',
+        grammar: 'flexible word order, heavy topicalization, embedded relative clauses, rhetorical devices, classical-modern hybrids'
+      }
+    };
+    return {
+      family: 'HSK',
+      authority: 'Center for Language Education of China (HSK Center)',
+      systemRole: 'You are an AI Expert that generates HSK exam content.',
+      levelProfiles: hskCanDo,
+      fallbackLevel: hskCanDo.HSK3,
+      scopeRules: `Vocabulary and grammar MUST satisfy ALL conditions:
+|- Belongs to ${examSpec.level} OR lower
+|- Appears in official HSK prep materials or standard Chinese corpora
+|- Natural Chinese usage (no textbook artifacts)`
     };
   }
 
@@ -5259,7 +5369,7 @@ function buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGener
   const promptProfile = getExamPromptProfile(examSpec);
 
   // Reading type IDs for special handling
-  const readingTypes = ['reading_short', 'reading_mid', 'reading_long', 'reading_compare', 'reading_info'];
+  const readingTypes = ['reading_short', 'reading_mid', 'reading_long', 'reading_compare', 'reading_info', 'reading_cloze', 'reading_sentence', 'reading_comprehension'];
   // Listening type IDs
   const listeningTypes = LISTENING_TYPES;
 
@@ -5273,7 +5383,8 @@ function buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGener
     const officialLabel = `${isListening || String(m.mondai_id || '').startsWith('L') ? 'Listen' : 'Mondai'} ${officialNum}`;
 
     if (isReading) {
-      const targets = PASSAGE_LENGTH_TARGETS[mode] || PASSAGE_LENGTH_TARGETS['official'];
+      const promptExamType = inferExamTypeFromExamId(examSpec?.exam_id || 'jlpt');
+      const targets = getExamConfig(promptExamType).passageTargets[mode] || getExamConfig(promptExamType).passageTargets['official'];
       const type = m.types.find(t => targets[t]) || 'reading_mid';
       const targetLength = targets[type] || 'medium length';
 
@@ -5289,7 +5400,7 @@ function buildMondaiChunkPrompt(examSpec, mode, group, groupIndex, mondaiToGener
     ★★★ LISTENING AUDIO RULES ★★★
     - This is a listening mondai. It MUST include mondai.media.script_text.
     - Put script_text at MONDAI level only: mondai.media.script_text (NOT in items)
-    - Use natural Japanese audio transcript only. No headers, no explanations inside script_text.
+    - Use natural ${getTtsLanguageName(examSpec.language || 'zh-CN')} audio transcript only. No headers, no explanations inside script_text.
     - Preferred script format for dialogue: "A: こんにちは\nB: はい、こんにちは"
     - If monologue, still place the full transcript in mondai.media.script_text
     - For listening mondai, omit passage.text entirely
@@ -5364,7 +5475,7 @@ ${usedVocabulary.length > 0 ? `Sample Vocabulary: ${usedVocabulary.slice(0, 6).j
       return `- ${m.mondai_id}: include a short passage.text and make all ${totalQuestions} questions depend on that passage context; do not generate isolated grammar questions here.`;
     }
     if (isListening) {
-      return `- ${m.mondai_id}: this is listening content, so put all audio transcript in mondai.media.script_text only; items must not contain item.media; do not create passage.text; keep explain_brief in Vietnamese and keep script_text as natural Japanese audio lines only.`;
+      return `- ${m.mondai_id}: this is listening content, so put all audio transcript in mondai.media.script_text only; items must not contain item.media; do not create passage.text; keep explain_brief in Vietnamese and keep script_text as natural ${getTtsLanguageName(examSpec.language || 'zh-CN')} audio lines only.`;
     }
     if (primaryType === 'grammar_order') {
       return `- ${m.mondai_id}: each prompt must show 4 numbered fragments (1.-4. or ①-④) and all choices must be order patterns such as "1-3-2-4", not full sentences.`;
@@ -6341,7 +6452,7 @@ app.get('/api/admin/daily-bank/status', async (req, res) => {
     targetPerBucket: DAILY_BANK_TARGET_PER_BUCKET,
     levels: DAILY_BANK_LEVELS,
     modes: DAILY_BANK_MODES,
-    variants: DAILY_BANK_VARIANTS.map((variant) => variant.key),
+    variants: getExamVariants('jlpt').map((variant) => variant.key),
     lastRunDateYmd: dailyBankRuntimeState.lastRunDateYmd,
     lastStartedAt: dailyBankRuntimeState.lastStartedAt,
     lastFinishedAt: dailyBankRuntimeState.lastFinishedAt,
@@ -7841,6 +7952,8 @@ if (require.main === module) {
 // Serve static web assets after API routes
 
 module.exports = app;
+
+
 
 
 
