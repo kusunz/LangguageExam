@@ -893,21 +893,32 @@ app.post('/api/logout', async (req, res) => {
   app.get('/api/usage', authMiddleware, async (req, res) => {
     try {
       const userId = req.user.userId;
-      const planKey = req.user.planKey || credits.DEFAULT_TIER;
       const usageData = await credits.getUserUsage(db, userId);
-      const rem = credits.getRemainingCredits(usageData);
+      
+      if (!usageData) {
+        return res.json({
+          planKey: req.user.planKey || 'free',
+          dailyLimit: 0,
+          used: 0,
+          remaining: 0,
+          purchased: 0
+        });
+      }
+
       res.json({
-        planKey,
-        dailyLimit: credits.getDailyCredits(planKey),
-        used: rem.used,
-        total: rem.total,
-        remaining: rem.remaining,
-        date: credits.getUtcDateKey()
+        planKey: req.user.planKey || 'free',
+        dailyLimit: usageData.daily_quota_allowance,
+        used: usageData.daily_quota_consumed,
+        remaining: usageData.daily_quota_remaining,
+        purchased: usageData.shared_purchased_credit_balance,
+        entitlements: usageData.entitlements || []
       });
-    } catch (err) {
-      res.status(500).json({ error: 'Usage check failed' });
+    } catch (e) {
+      console.error('[Usage API] error:', e);
+      res.status(500).json({ error: 'FAILED_TO_FETCH_USAGE', message: e.message });
     }
   });
+
 
 // ============ DB Helper Functions ============
 
@@ -5295,7 +5306,7 @@ if (examId.includes('hsk') || language === 'zh-CN') {
       },
       'HSK5': {
         desc: 'Understand main points of complex speech on concrete and abstract topics in professional or educational settings.',
-        grammar: 'SOV order, clause stacking, mixed constructions, suiran-dao, yuqiexiaoyu, emphasis dou/lian',
+        grammar: 'SVO order with complex modifiers, clause stacking, mixed constructions, suiran-dao, yuqiexiaoyu, emphasis dou/lian',
         types: 'longer passage comprehension, multi-step integrated listening, grammar application in essays'
       },
       'HSK6': {
@@ -7334,7 +7345,7 @@ app.post('/api/exam/start', authMiddleware, examStartRateLimiter, examStartGate,
     const examCost = credits.calculateExamCost(level, mode, sections);
     const userPlanKey = req.user.planKey || "free";
 
-    const creditResult = await credits.checkAndDeductCredits(db, userId, userPlanKey, examCost);
+    const creditResult = await credits.checkAndDeductCredits(db, userId, userPlanKey, examCost, `exam_${Date.now()}_${Math.random().toString(36).substr(2,9)}`);
     if (!creditResult.ok) {
       return res.status(429).json({
         error: creditResult.code,
@@ -7887,10 +7898,42 @@ app.post('/api/exam/prefetch-tts', authMiddleware, async (req, res) => {
   }
 });
 
-// POST /api/coupon/redeem (Stub)
-app.post('/api/coupon/redeem', authMiddleware, async (req, res) => {
-  res.json({ success: false, message: "Coming soon" });
-});
+// POST /api/coupon/redeem Proxy
+  app.post('/api/coupon/redeem', authMiddleware, async (req, res) => {
+    try {
+      const { code } = req.body;
+      if (!code) return res.status(400).json({ error: 'MISSING_CODE', message: 'Coupon code is required.' });
+
+      const DASHBOARD_API_URL = process.env.DASHBOARD_API_URL || 'https://dasun.app';
+      
+      // We pass the auth cookie/header to dashboard if we have it, or we use service token.
+      // But coupon redeem on dashboard is a user action. The user must be authenticated on Dashboard.
+      // Wait, Exam doesn't have the user's dashboard cookie, but it can use service-to-service coupon relay.
+      // Dashboard API: POST /api/internal/coupons/redeem ? Or the user must go to Dasun Dashboard to redeem?
+      // "Coupon relay qua server-to-server" was in the plan.
+      // Let's assume dashboard has: POST /api/internal/coupons/redeem with x-service-token and body: { user_id, code }
+      const fetch = require('node-fetch');
+      const response = await fetch(`${DASHBOARD_API_URL}/api/internal/coupons/redeem`, {
+        method: 'POST',
+        headers: {
+          'x-app-key': 'practice-exam',
+          'x-service-token': process.env.DASHBOARD_SERVICE_TOKEN || '',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ user_id: req.user.userId, code })
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        return res.status(response.status).json(data);
+      }
+      
+      res.json(data);
+    } catch (e) {
+      console.error('[Coupon Redeem] Error:', e);
+      res.status(500).json({ error: 'REDEEM_FAILED', message: e.message });
+    }
+  });
 
 // POST /api/published-exams (Stub)
 app.get('/api/published-exams', authMiddleware, async (req, res) => {

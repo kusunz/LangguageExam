@@ -1039,13 +1039,8 @@
                 return;
             }
             badge.style.display = 'inline-flex';
-            if (countEl) countEl.textContent = `${usage.remaining}/${usage.total}`;
-            if (tierEl) tierEl.textContent = usage.planKey ? `(${usage.planKey.toUpperCase()})` : '';
-            if (usage.remaining <= 0) {
-                badge.classList.add('exhausted');
-            } else {
-                badge.classList.remove('exhausted');
-            }
+            if (countEl) countEl.innerHTML = `Daily: ${usage.remaining}/${usage.dailyLimit} | Credits: ${usage.purchased || 0}`;
+            if (tierEl) tierEl.textContent = ` (${usage.planKey})`;
         },
 
         updateUI() {
@@ -4683,366 +4678,41 @@
             // Subscription UI
             // ============================================
             const SubscriptionUI = {
-                selectedCurrency: 'USD',
-                selectedProvider: 'paypal',
-                plans: [],
-                userSubscription: null,
-                invoices: [],
+            async init() {
+                this.bindEvents();
+            },
 
-                async init() {
-                    this.bindEvents();
-                },
+            bindEvents() {
+                $('#btn-back-subscription')?.addEventListener('click', () => showScreen('home-screen'));
+                $('#btn-theme-toggle-sub')?.addEventListener('click', () => Theme.toggle());
+                $('#btn-logout-sub')?.addEventListener('click', () => Auth.logout());
+            },
 
-                bindEvents() {
-                    // Back button
-                    $('#btn-back-subscription')?.addEventListener('click', () => showScreen('home-screen'));
-            
-                    // Currency selector
-                    $('#sub-currency-usd')?.addEventListener('click', () => this.setCurrency('USD'));
-                    $('#sub-currency-vnd')?.addEventListener('click', () => this.setCurrency('VND'));
-            
-                    // Provider selector
-                    $('#sub-provider-paypal')?.addEventListener('click', () => this.setProvider('paypal'));
-                    $('#sub-provider-crypto')?.addEventListener('click', () => this.setProvider('crypto'));
-                    $('#sub-provider-vietqr')?.addEventListener('click', () => this.setProvider('vietqr'));
-            
-                    // Cancel subscription
-                    $('#btn-cancel-subscription')?.addEventListener('click', () => this.handleCancelSubscription());
-            
-                    // Theme toggle and logout (reuse existing)
-                    $('#btn-theme-toggle-sub')?.addEventListener('click', () => Theme.toggle());
-                    $('#btn-logout-sub')?.addEventListener('click', () => Auth.logout());
-                },
-
-                setCurrency(currency) {
-                    this.selectedCurrency = currency;
-                    const usdBtn = $('#sub-currency-usd');
-                    const vndBtn = $('#sub-currency-vnd');
-                    if (usdBtn && vndBtn) {
-                        usdBtn.className = currency === 'USD' ? 'btn btn-primary' : 'btn btn-secondary';
-                        vndBtn.className = currency === 'VND' ? 'btn btn-primary' : 'btn btn-secondary';
-                    }
-                    // VietQR forces VND
-                    if (currency === 'VND') {
-                        this.setProvider('vietqr');
-                    }
-                    this.renderPlanCards();
-                },
-
-                setProvider(provider) {
-                    this.selectedProvider = provider;
-                    const buttons = {
-                        paypal: $('#sub-provider-paypal'),
-                        crypto: $('#sub-provider-crypto'),
-                        vietqr: $('#sub-provider-vietqr')
-                    };
-                    Object.entries(buttons).forEach(([key, btn]) => {
-                        if (btn) {
-                            btn.className = key === provider ? 'btn btn-primary' : 'btn btn-secondary';
-                        }
-                    });
-                    // VietQR forces VND currency
-                    if (provider === 'vietqr') {
-                        this.setCurrency('VND');
-                    }
-                },
-
-                async loadSubscriptionData() {
-                    this.showLoading(true);
-                    this.hideMessages();
-            
-                    try {
-                        // Fetch plans from dasun.app API
-                        const plansRes = await fetch('https://dasun.app/api/v1/subscriptions/plans', {
-                            credentials: 'include'
-                        });
-                        if (plansRes.ok) {
-                            this.plans = await plansRes.json();
-                        }
-                
-                        // Fetch current user subscription
-                        const meRes = await fetch('https://dasun.app/api/v1/subscriptions/me', {
-                            credentials: 'include'
-                        });
-                        if (meRes.ok) {
-                            this.userSubscription = await meRes.json();
-                        }
-                
-                        // Fetch invoices
-                        const invRes = await fetch('https://dasun.app/api/v1/subscriptions/invoices', {
-                            credentials: 'include'
-                        });
-                        if (invRes.ok) {
-                            this.invoices = await invRes.json();
-                        }
-                
-                        this.renderAll();
-                    } catch (err) {
-                        console.error('Failed to load subscription data:', err);
-                        this.showError('Không thể tải dữ liệu gói thành viên. Vui lòng thử lại.');
-                    } finally {
-                        this.showLoading(false);
-                    }
-                },
-
-                renderAll() {
-                    this.renderCurrentPlan();
-                    this.renderPlanCards();
-                    this.renderInvoices();
-                    this.updateCreditBadge();
-                },
-
-                renderCurrentPlan() {
-                    const container = $('#sub-current-plan');
-                    const cancelSection = $('#sub-cancel-section');
-            
-                    if (!this.userSubscription || !this.userSubscription.has_active_subscription) {
-                        if (container) container.style.display = 'none';
-                        return;
-                    }
-            
-                    if (container) container.style.display = 'block';
-            
-                    const sub = this.userSubscription;
-                    const nameEl = $('#sub-current-plan-name');
-                    const statusEl = $('#sub-current-plan-status');
+            async loadSubscriptionData() {
+                try {
+                    const usage = await Api.getUsage();
+                    const sub = usage || {};
                     const creditsEl = $('#sub-current-credits');
                     const dailyEl = $('#sub-current-daily');
-            
-                    if (nameEl) nameEl.textContent = sub.display_name || sub.plan_key || 'Free Tier';
-                    if (statusEl) statusEl.innerHTML = `<span class="status-pill">${sub.status || 'inactive'}</span>`;
-                    if (creditsEl) creditsEl.textContent = `${sub.credits_balance || 0} credits`;
-                    if (dailyEl) dailyEl.textContent = `${sub.daily_allowance || 0} credits / ngày`;
-            
-                    if (cancelSection) cancelSection.style.display = 'block';
-                },
-
-                renderPlanCards() {
+                    
+                    if (creditsEl) creditsEl.textContent = `${sub.purchased || 0} credits`;
+                    if (dailyEl) dailyEl.textContent = `${sub.dailyLimit || 0} credits / ngày`;
+                    
                     const grid = $('#sub-plans-grid');
-                    const loading = $('#sub-loading');
-            
-                    if (!grid) return;
-            
-                    if (this.plans.length === 0) {
-                        if (loading) loading.style.display = 'block';
-                        grid.style.display = 'none';
-                        return;
+                    if (grid) {
+                        grid.innerHTML = `<div style="text-align: center; padding: 2rem;">
+                            <h3>Quản lý thanh toán và gói cước tại Dasun Dashboard</h3>
+                            <p style="margin-top: 1rem; color: var(--text-muted);">
+                                Nhấn vào nút bên dưới để chuyển đến trang quản lý gói cước trung tâm của hệ sinh thái Dasun.
+                            </p>
+                            <a href="https://dashboard.dasun.app/subscription" class="btn btn-primary" style="margin-top: 1.5rem; display: inline-block;">Đi đến Dasun Dashboard</a>
+                        </div>`;
                     }
-            
-                    if (loading) loading.style.display = 'none';
-                    grid.style.display = 'grid';
-            
-                    grid.innerHTML = this.plans.map(plan => this.createPlanCard(plan)).join('');
-            
-                    // Bind checkout buttons
-                    grid.querySelectorAll('.sub-checkout-btn').forEach(btn => {
-                        btn.addEventListener('click', (e) => {
-                            const planKey = e.target.dataset.planKey;
-                            this.handleCheckout(planKey);
-                        });
-                    });
-                },
-
-                createPlanCard(plan) {
-                    const isFree = plan.price_usd === 0 && plan.price_vnd === 0;
-                    const price = this.selectedCurrency === 'VND' 
-                        ? (plan.price_vnd > 0 ? plan.price_vnd.toLocaleString() + ' VND / tháng' : 'Miễn phí')
-                        : (plan.price_usd > 0 ? '$' + plan.price_usd.toFixed(2) + ' USD / tháng' : 'Miễn phí');
-            
-                    const featuresHtml = (plan.features || []).map(f => `<li>${this.escapeHtml(f)}</li>`).join('');
-            
-                    return `
-                        <article class="section-card glass" style="display: flex; flex-direction: column; justify-content: space-between;">
-                            <div>
-                                <h2>${this.escapeHtml(plan.display_name)}</h2>
-                                <p style="font-size: 1.25rem; font-weight: bold; margin: 0.5rem 0;">${price}</p>
-                                <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1rem;">${this.escapeHtml(plan.description || '')}</p>
-                                <ul style="list-style: none; padding: 0; margin: 1rem 0;">
-                                    ${featuresHtml}
-                                </ul>
-                            </div>
-                            ${isFree ? `
-                                <button class="btn btn-secondary" type="button" disabled style="width: 100%;">Gói mặc định</button>
-                            ` : `
-                                <button class="btn btn-primary sub-checkout-btn" type="button" style="width: 100%;" data-plan-key="${plan.plan_key}">
-                                    Đăng ký với ${this.getProviderLabel(this.selectedProvider)}
-                                </button>
-                            `}
-                        </article>
-                    `;
-                },
-
-                getProviderLabel(provider) {
-                    const labels = {
-                        paypal: 'PayPal',
-                        crypto: 'Crypto',
-                        vietqr: 'VietQR'
-                    };
-                    return labels[provider] || provider;
-                },
-
-                async handleCheckout(planKey) {
-                    this.hideMessages();
-                    const btn = document.querySelector(`.sub-checkout-btn[data-plan-key="${planKey}"]`);
-                    if (btn) {
-                        btn.disabled = true;
-                        btn.textContent = 'Đang xử lý...';
-                    }
-            
-                    try {
-                        const res = await fetch('https://dasun.app/api/v1/subscriptions/checkout', {
-                            method: 'POST',
-                            credentials: 'include',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                plan_key: planKey,
-                                provider: this.selectedProvider,
-                                currency: this.selectedCurrency
-                            })
-                        });
-                
-                        const data = await res.json();
-                
-                        if (!res.ok) {
-                            throw new Error(data.detail?.message || 'Tạo phiên thanh toán thất bại');
-                        }
-                
-                        if (data.checkout_url) {
-                            this.showSuccess('Đang chuyển hướng đến trang thanh toán...');
-                            setTimeout(() => {
-                                window.location.assign(data.checkout_url);
-                            }, 1000);
-                        }
-                    } catch (err) {
-                        this.showError(err instanceof Error ? err.message : 'Thanh toán thất bại. Vui lòng thử lại.');
-                    } finally {
-                        if (btn) {
-                            btn.disabled = false;
-                            btn.textContent = `Đăng ký với ${this.getProviderLabel(this.selectedProvider)}`;
-                        }
-                    }
-                },
-
-                async handleCancelSubscription() {
-                    this.hideMessages();
-                    const btn = $('#btn-cancel-subscription');
-                    if (!btn) return;
-            
-                    if (!confirm('Bạn có chắc chắn muốn hủy đăng ký? Quyền lợi sẽ tiếp tục đến hết kỳ thanh toán hiện tại.')) {
-                        return;
-                    }
-            
-                    btn.disabled = true;
-                    btn.textContent = 'Đang hủy...';
-            
-                    try {
-                        const res = await fetch('https://dasun.app/api/v1/subscriptions/cancel', {
-                            method: 'POST',
-                            credentials: 'include'
-                        });
-                
-                        const data = await res.json();
-                
-                        if (!res.ok) {
-                            throw new Error(data.detail?.message || 'Hủy đăng ký thất bại');
-                        }
-                
-                        this.userSubscription = data;
-                        this.showSuccess('Đăng ký của bạn đã được lên lịch hủy vào cuối kỳ thanh toán hiện tại.');
-                        this.renderCurrentPlan();
-                    } catch (err) {
-                        this.showError(err instanceof Error ? err.message : 'Hủy đăng ký thất bại. Vui lòng thử lại.');
-                    } finally {
-                        btn.disabled = false;
-                        btn.textContent = 'Hủy đăng ký';
-                    }
-                },
-
-                renderInvoices() {
-                    const table = $('#sub-invoices-table');
-                    const empty = $('#sub-invoices-empty');
-                    const body = $('#sub-invoices-body');
-            
-                    if (!table || !empty || !body) return;
-            
-                    if (this.invoices.length === 0) {
-                        table.style.display = 'none';
-                        empty.style.display = 'block';
-                        return;
-                    }
-            
-                    empty.style.display = 'none';
-                    table.style.display = 'table';
-            
-                    body.innerHTML = this.invoices.map(inv => `
-                        <tr style="border-bottom: 1px solid var(--glass-border);">
-                            <td style="padding: var(--space-sm);">${inv.created_at ? new Date(inv.created_at).toLocaleDateString('vi-VN') : '-'}</td>
-                            <td style="padding: var(--space-sm); text-transform: uppercase;">${this.escapeHtml(inv.provider)}</td>
-                            <td style="padding: var(--space-sm); font-family: monospace;">${this.escapeHtml(inv.provider_transaction_id)}</td>
-                            <td style="padding: var(--space-sm);">${inv.amount} ${inv.currency}</td>
-                            <td style="padding: var(--space-sm);"><span class="status-pill">${this.escapeHtml(inv.status)}</span></td>
-                        </tr>
-                    `).join('');
-                },
-
-                updateCreditBadge() {
-                    const countEl = $('#sub-credit-count');
-                    const tierEl = $('#sub-credit-tier');
-                    const badge = $('#sub-credit-badge');
-            
-                    if (!State.usage) return;
-            
-                    if (countEl) countEl.textContent = `${State.usage.remaining}/${State.usage.total}`;
-                    if (tierEl) tierEl.textContent = State.usage.planKey ? `(${State.usage.planKey.toUpperCase()})` : '';
-                    if (badge) badge.style.display = 'inline-flex';
-            
-                    const emailEl = $('#sub-user-email');
-                    if (emailEl && State.user) {
-                        emailEl.textContent = State.user.isDemo ? 'Khách (Demo)' : (State.userData?.nickname || State.user.email);
-                    }
-                },
-
-                showLoading(show) {
-                    const loading = $('#sub-loading');
-                    const grid = $('#sub-plans-grid');
-                    if (loading) loading.style.display = show ? 'block' : 'none';
-                    if (grid) grid.style.display = show ? 'none' : 'grid';
-                },
-
-                showError(message) {
-                    const el = $('#sub-error-message');
-                    const successEl = $('#sub-success-message');
-                    if (el) {
-                        el.textContent = message;
-                        el.classList.remove('hidden');
-                    }
-                    if (successEl) successEl.classList.add('hidden');
-                },
-
-                showSuccess(message) {
-                    const el = $('#sub-success-message');
-                    const errorEl = $('#sub-error-message');
-                    if (el) {
-                        el.textContent = message;
-                        el.classList.remove('hidden');
-                    }
-                    if (errorEl) errorEl.classList.add('hidden');
-                },
-
-                hideMessages() {
-                    const errorEl = $('#sub-error-message');
-                    const successEl = $('#sub-success-message');
-                    if (errorEl) errorEl.classList.add('hidden');
-                    if (successEl) successEl.classList.add('hidden');
-                },
-
-                escapeHtml(text) {
-                    if (!text) return '';
-                    const div = document.createElement('div');
-                    div.textContent = text;
-                    return div.innerHTML;
+                } catch (err) {
+                    console.error('Failed to load subscription data:', err);
                 }
-            };
+            }
+        };
 
             const AdminUI = {
         storageKey: 'admin_warmup_secret',
