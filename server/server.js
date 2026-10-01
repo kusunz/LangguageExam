@@ -1,3 +1,12 @@
+
+function toUserUuid(userId) {
+  if (typeof userId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(userId)) {
+    return userId;
+  }
+  const hash = crypto.createHash("sha256").update(String(userId || "anonymous-user")).digest("hex");
+  return hash.slice(0, 8) + "-" + hash.slice(8, 12) + "-4" + hash.slice(13, 16) + "-8" + hash.slice(17, 20) + "-" + hash.slice(20, 32);
+}
+
 /**
  * Language Exam Practice Server
  * Express server with Privy auth, LLM proxy, and user data storage
@@ -63,7 +72,7 @@ const IS_DEMO_MODE = !process.env.SESSION_INTROSPECT_URL;
 const DASUN_AUTHORIZE_URL = process.env.DASUN_AUTHORIZE_URL || 'https://sso.dasun.app/oauth/authorize';
 const OAUTH_TOKEN_URL = process.env.OAUTH_TOKEN_URL || 'https://sso.dasun.app/oauth/token';
 const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || 'japanesePractice';
-const OAUTH_SERVICE_TOKEN = process.env.OAUTH_SERVICE_TOKEN || '';
+const OAUTH_SERVICE_TOKEN = process.env.OAUTH_SERVICE_TOKEN || process.env.INTERNAL_SERVICE_TOKEN || process.env.DASHBOARD_SERVICE_TOKEN || '';
 const OAUTH_REDIRECT_URI = process.env.OAUTH_REDIRECT_URI || '';
 const LOCAL_SESSION_COOKIE = process.env.LOCAL_SESSION_COOKIE || 'jp_session';
 const LOCAL_SESSION_SECURE = process.env.LOCAL_SESSION_SECURE === 'true' || process.env.NODE_ENV === 'production';
@@ -541,7 +550,7 @@ function extractUserFromSessionData(sessionData) {
 async function introspectSession(headers) {
   try {
     const appKey = process.env.INTERNAL_APP_KEY || 'japanesePractice';
-    const serviceToken = process.env.INTERNAL_SERVICE_TOKEN || '';
+    const serviceToken = process.env.INTERNAL_SERVICE_TOKEN || process.env.OAUTH_SERVICE_TOKEN || process.env.DASHBOARD_SERVICE_TOKEN || '';
     if (!serviceToken) {
       log('ERROR', 'Internal service token is not configured');
       return null;
@@ -905,8 +914,13 @@ app.post('/api/logout', async (req, res) => {
         });
       }
 
+      const activeEntitlements = Array.isArray(usageData?.entitlements) ? usageData.entitlements : [];
+      const hasPro = activeEntitlements.some(e => e === 'pro' || e === 'plan:pro');
+      const hasPlus = activeEntitlements.some(e => e === 'plus' || e === 'plan:plus');
+      const effectivePlan = hasPro ? 'pro' : hasPlus ? 'plus' : (req.user.planKey || 'free');
+
       res.json({
-        planKey: req.user.planKey || 'free',
+        planKey: effectivePlan,
         dailyLimit: usageData.daily_quota_allowance,
         used: usageData.daily_quota_consumed,
         remaining: usageData.daily_quota_remaining,
@@ -7901,37 +7915,36 @@ app.post('/api/exam/prefetch-tts', authMiddleware, async (req, res) => {
 // POST /api/coupon/redeem Proxy
   app.post('/api/coupon/redeem', authMiddleware, async (req, res) => {
     try {
-      const { code } = req.body;
+      const code = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
       if (!code) return res.status(400).json({ error: 'MISSING_CODE', message: 'Coupon code is required.' });
+      const targetUserId = toUserUuid(req.user.userId);
 
       const DASHBOARD_API_URL = process.env.DASHBOARD_API_URL || 'https://dasun.app';
-      
-      // We pass the auth cookie/header to dashboard if we have it, or we use service token.
-      // But coupon redeem on dashboard is a user action. The user must be authenticated on Dashboard.
-      // Wait, Exam doesn't have the user's dashboard cookie, but it can use service-to-service coupon relay.
-      // Dashboard API: POST /api/internal/coupons/redeem ? Or the user must go to Dasun Dashboard to redeem?
-      // "Coupon relay qua server-to-server" was in the plan.
-      // Let's assume dashboard has: POST /api/internal/coupons/redeem with x-service-token and body: { user_id, code }
-      const fetch = require('node-fetch');
+      const DASHBOARD_APP_KEY = process.env.DASHBOARD_APP_KEY || process.env.INTERNAL_APP_KEY || 'japanesePractice';
+      const DASHBOARD_SERVICE_TOKEN = process.env.DASHBOARD_SERVICE_TOKEN || process.env.INTERNAL_SERVICE_TOKEN || process.env.OAUTH_SERVICE_TOKEN || '';
       const response = await fetch(`${DASHBOARD_API_URL}/api/internal/coupons/redeem`, {
         method: 'POST',
         headers: {
-          'x-app-key': 'practice-exam',
-          'x-service-token': process.env.DASHBOARD_SERVICE_TOKEN || '',
+          'x-app-key': DASHBOARD_APP_KEY,
+          'x-service-token': DASHBOARD_SERVICE_TOKEN,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ user_id: req.user.userId, code })
+        body: JSON.stringify({ user_id: targetUserId || toUserUuid(req.user.userId), code })
       });
 
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        return res.status(response.status).json(data);
+        const detail = data.detail || {};
+        const code = detail.code || data.error || 'REDEEM_FAILED';
+        const message = detail.message || data.message || 'Unable to redeem this code.';
+        const status = (response.status === 401 || response.status === 403) ? 502 : response.status;
+        return res.status(status).json({ error: code, message, details: detail.details });
       }
-      
+
       res.json(data);
     } catch (e) {
       console.error('[Coupon Redeem] Error:', e);
-      res.status(500).json({ error: 'REDEEM_FAILED', message: e.message });
+      res.status(500).json({ error: 'REDEEM_FAILED', message: 'Unable to redeem this code.' });
     }
   });
 

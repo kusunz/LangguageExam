@@ -1,11 +1,20 @@
+const crypto = require("crypto");
+function toUserUuid(userId) {
+  if (typeof userId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(userId)) {
+    return userId;
+  }
+  const hash = crypto.createHash("sha256").update(String(userId || "anonymous-user")).digest("hex");
+  return hash.slice(0, 8) + "-" + hash.slice(8, 12) + "-4" + hash.slice(13, 16) + "-8" + hash.slice(17, 20) + "-" + hash.slice(20, 32);
+}
+
 
 'use strict';
 
 const fetch = require('node-fetch'); // wait, node v22 has global fetch
 
 const DASHBOARD_API_URL = process.env.DASHBOARD_API_URL || 'https://dasun.app';
-const DASHBOARD_APP_KEY = 'practice-exam';
-const DASHBOARD_SERVICE_TOKEN = process.env.DASHBOARD_SERVICE_TOKEN || '';
+const DASHBOARD_APP_KEY = process.env.DASHBOARD_APP_KEY || process.env.INTERNAL_APP_KEY || 'japanesePractice';
+const DASHBOARD_SERVICE_TOKEN = process.env.DASHBOARD_SERVICE_TOKEN || process.env.INTERNAL_SERVICE_TOKEN || process.env.OAUTH_SERVICE_TOKEN || '';
 
 const VALID_LEVELS = ['N5', 'N4', 'N3', 'N2', 'N1', 'HSK1', 'HSK2', 'HSK3', 'HSK4', 'HSK5', 'HSK6'];
 const DEFAULT_TIER = 'free';
@@ -51,12 +60,13 @@ async function initCreditsTable(db) {
 }
 
 async function getUserUsage(db, userId) {
-  if (!userId || String(userId).startsWith('demo') || userId === 'demo-user') {
+  if (!userId) {
     return { daily_quota_allowance: 15, daily_quota_consumed: 0, daily_quota_remaining: 15, shared_purchased_credit_balance: 0 };
   }
+  const targetUuid = toUserUuid(userId);
 
   try {
-    const res = await fetch(`${DASHBOARD_API_URL}/api/internal/credits/balance?user_id=${userId}`, {
+    const res = await fetch(`${DASHBOARD_API_URL}/api/internal/credits/balance?user_id=${targetUuid}`, {
       headers: {
         'x-app-key': DASHBOARD_APP_KEY,
         'x-service-token': DASHBOARD_SERVICE_TOKEN,

@@ -578,6 +578,10 @@
             return this.request('/usage', { method: 'GET' });
         },
 
+        async redeemCoupon(code) {
+            return this.request('/coupon/redeem', { method: 'POST', body: { code } });
+        },
+
         async getAdminLlmConfig(secret) {
             return this.requestAdmin('/admin/llm-config', { method: 'GET', secret });
         },
@@ -4683,20 +4687,41 @@
             },
 
             bindEvents() {
+                if (this._bound) return;
+                this._bound = true;
                 $('#btn-back-subscription')?.addEventListener('click', () => showScreen('home-screen'));
                 $('#btn-theme-toggle-sub')?.addEventListener('click', () => Theme.toggle());
                 $('#btn-logout-sub')?.addEventListener('click', () => Auth.logout());
+                $('#btn-open-redeem')?.addEventListener('click', () => this.openRedeemModal());
+                $('#btn-submit-redeem')?.addEventListener('click', () => this.submitRedeem());
+                $('#btn-cancel-redeem')?.addEventListener('click', () => this.closeRedeemModal());
+                $('#redeem-code-input')?.addEventListener('keydown', (event) => {
+                    if (event.key === 'Enter') {
+                        event.preventDefault();
+                        this.submitRedeem();
+                    }
+                });
             },
 
             async loadSubscriptionData() {
                 try {
                     const usage = await Api.getUsage();
                     const sub = usage || {};
+                    const planCard = $('#sub-current-plan');
+                    const planNameEl = $('#sub-current-plan-name');
+                    const planStatusEl = $('#sub-current-plan-status');
                     const creditsEl = $('#sub-current-credits');
                     const dailyEl = $('#sub-current-daily');
+                    const subCountEl = $('#sub-credit-count');
+                    const subTierEl = $('#sub-credit-tier');
                     
+                    if (planCard) planCard.style.display = 'block';
+                    if (planNameEl) planNameEl.textContent = sub.planKey ? String(sub.planKey).toUpperCase() : 'Free Tier';
+                    if (planStatusEl) planStatusEl.innerHTML = `<span class="status-pill status-pill--active">${sub.planKey && sub.planKey !== 'free' ? 'active' : 'free'}</span>`;
                     if (creditsEl) creditsEl.textContent = `${sub.purchased || 0} credits`;
-                    if (dailyEl) dailyEl.textContent = `${sub.dailyLimit || 0} credits / ngày`;
+                    if (dailyEl) dailyEl.textContent = `${sub.remaining || 0}/${sub.dailyLimit || 0} credits / ngày`;
+                    if (subCountEl) subCountEl.innerHTML = `Daily: ${sub.remaining || 0}/${sub.dailyLimit || 0} | Credits: ${sub.purchased || 0}`;
+                    if (subTierEl) subTierEl.textContent = ` (${sub.planKey || 'free'})`;
                     
                     const grid = $('#sub-plans-grid');
                     if (grid) {
@@ -4710,6 +4735,111 @@
                     }
                 } catch (err) {
                     console.error('Failed to load subscription data:', err);
+                }
+            },
+
+            openRedeemModal() {
+                const modal = $('#redeem-modal');
+                const errorEl = $('#redeem-error');
+                const input = $('#redeem-code-input');
+                if (errorEl) {
+                    errorEl.textContent = '';
+                    errorEl.classList.add('hidden');
+                }
+                if (input) input.value = '';
+                this._redeemCleanup = openModal(modal, {
+                    initialFocus: input,
+                    onRequestClose: () => this.closeRedeemModal()
+                });
+            },
+
+            closeRedeemModal() {
+                if (typeof this._redeemCleanup === 'function') {
+                    this._redeemCleanup();
+                    this._redeemCleanup = null;
+                }
+            },
+
+            setRedeemError(message) {
+                const errorEl = $('#redeem-error');
+                if (!errorEl) return;
+                if (!message) {
+                    errorEl.textContent = '';
+                    errorEl.classList.add('hidden');
+                    return;
+                }
+                errorEl.textContent = message;
+                errorEl.classList.remove('hidden');
+            },
+
+            startLockoutCountdown(seconds) {
+                this.lockoutSeconds = seconds;
+                const input = $('#redeem-code-input');
+                const submitBtn = $('#btn-submit-redeem');
+                if (input) input.disabled = true;
+                if (submitBtn) {
+                    submitBtn.disabled = true;
+                    submitBtn.textContent = `Chờ ${this.lockoutSeconds}s`;
+                }
+                if (this._lockoutTimer) clearInterval(this._lockoutTimer);
+                this._lockoutTimer = setInterval(() => {
+                    if (this.lockoutSeconds > 1) {
+                        this.lockoutSeconds -= 1;
+                        if (submitBtn) submitBtn.textContent = `Chờ ${this.lockoutSeconds}s`;
+                    } else {
+                        this.lockoutSeconds = 0;
+                        clearInterval(this._lockoutTimer);
+                        this._lockoutTimer = null;
+                        if (input) input.disabled = false;
+                        if (submitBtn) {
+                            submitBtn.disabled = false;
+                            submitBtn.textContent = 'Redeem';
+                        }
+                    }
+                }, 1000);
+            },
+
+            async submitRedeem() {
+                if (this.lockoutSeconds > 0) return;
+                const input = $('#redeem-code-input');
+                const code = (input?.value || '').trim();
+                const submitBtn = $('#btn-submit-redeem');
+                if (!code) {
+                    this.setRedeemError('Vui lòng nhập mã redeem.');
+                    return;
+                }
+                this.setRedeemError('');
+                if (submitBtn) submitBtn.disabled = true;
+                try {
+                    const result = await Api.redeemCoupon(code);
+                    this.closeRedeemModal();
+                    const successEl = $('#sub-success-message');
+                    const errorEl = $('#sub-error-message');
+                    if (errorEl) {
+                        errorEl.textContent = '';
+                        errorEl.classList.add('hidden');
+                    }
+                    if (successEl) {
+                        if (result.coupon_type === 'plan_grant' && result.reward?.display_name) {
+                            successEl.textContent = `Đã redeem mã. Gói hiện tại: ${result.reward.display_name}.`;
+                        } else if (result.reward?.credits) {
+                            successEl.textContent = `Đã redeem mã. +${result.reward.credits} credits.`;
+                        } else {
+                            successEl.textContent = 'Đã redeem mã thành công.';
+                        }
+                        successEl.classList.remove('hidden');
+                    }
+                    await this.loadSubscriptionData();
+                } catch (err) {
+                    const retryAfter = err?.details?.details?.retry_after_seconds || err?.details?.retry_after_seconds;
+                    if (typeof retryAfter === 'number' && retryAfter > 0) {
+                        this.startLockoutCountdown(retryAfter);
+                    }
+                    this.setRedeemError(err.message || 'Không thể redeem mã này.');
+                } finally {
+                    if (submitBtn && (!this.lockoutSeconds || this.lockoutSeconds <= 0)) {
+                        submitBtn.disabled = false;
+                    }
                 }
             }
         };
@@ -5106,11 +5236,13 @@
                 $('#btn-mistakes-back').addEventListener('click', () => showScreen('home-screen'));
 
                 // Subscription
-                $('#btn-subscription')?.addEventListener('click', () => {
+                const openSubScreen = () => {
                     SubscriptionUI.init();
                     SubscriptionUI.loadSubscriptionData();
                     showScreen('subscription-screen');
-                });
+                };
+                $('#btn-subscription')?.addEventListener('click', openSubScreen);
+                $('#credit-badge')?.addEventListener('click', openSubScreen);
                 $('#btn-back-subscription')?.addEventListener('click', () => showScreen('home-screen'));
 
                 // Keyboard shortcuts
