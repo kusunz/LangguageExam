@@ -33,8 +33,19 @@ const {
   getGeminiTextKeyStages
 } = require("./gemini");
 const { callNIM } = require("./nim");
+const { NineRouterProvider, callNineRouter } = require("./9router");
 const { getRoleConfig } = require("./prompt-roles");
 const { parsePositiveInt } = require("./provider-utils");
+
+// Initialize 9Router provider with Cloudflare support
+const nineRouterProvider = new NineRouterProvider({
+  localUrl: process.env.NINEROUTER_LOCAL_URL,
+  publicUrl: process.env.NINEROUTER_PUBLIC_URL,
+  apiKey: process.env.NINEROUTER_API_KEY,
+  cfClientId: process.env.CF_ACCESS_CLIENT_ID,
+  cfClientSecret: process.env.CF_ACCESS_CLIENT_SECRET,
+  usePublic: process.env.NINEROUTER_USE_PUBLIC === 'true'
+});
 
 const TEMPORARY_UNAVAILABLE_PAYLOAD = {
   error: "llm_temporarily_unavailable",
@@ -219,53 +230,23 @@ function buildProviderStages(taskName) {
   const roleConfig = getRoleConfig(taskName);
   const stages = [];
 
-  // NIM stages FIRST (primary - https://integrate.api.nvidia.com/v1 via 9Router)
-  // Primary for quality. Note: NIM models do NOT support structured JSON output native,
-  // so extractJsonFragment + repair fallback is used for JSON parsing.
-  if (taskName === 'generate' && taskConfig.nimPrimary) {
-    stages.push({
-      name: 'nim-primary',
-      provider: 'nim',
-      model: taskConfig.nimPrimary,
-      repairModel: repairConfig.nimSecondary, // JSON-capable NIM repair (nemotron-3.5-lightning)
-      useReasoning: false,
-      jsonFormat: false, // NIM models: text output, need extraction
-      systemPrompt: roleConfig.system,
-      temperature: roleConfig.temperature,
-      maxTokens: roleConfig.maxTokens
-    });
-  }
-  if (taskName === 'explain' && taskConfig.nimPrimary) {
-    stages.push({
-      name: 'nim-primary',
-      provider: 'nim',
-      model: taskConfig.nimPrimary,
-      repairModel: repairConfig.nimSecondary,
-      useReasoning: false,
-      jsonFormat: false,
-      systemPrompt: roleConfig.system,
-      temperature: roleConfig.temperature,
-      maxTokens: roleConfig.maxTokens
-    });
-    if (taskConfig.nimSecondary) {
+  // ============================================================
+  // FALLBACK CHAIN: 9router (primary) -> OpenRouter (secondary) -> NIM (tertiary) -> Gemini (final)
+  // ============================================================
+  
+  // PRIMARY: 9Router (try local first, then public with Cloudflare)
+  // Uses 9Router's routing to multiple providers
+  if (taskConfig.nimPrimary || taskConfig.openrouterPrimary) {
+    const primaryModel = taskName === 'generate' || taskName === 'explain' 
+      ? (taskConfig.nimPrimary || taskConfig.openrouterPrimary)
+      : taskConfig.openrouterPrimary;
+    
+    if (primaryModel) {
       stages.push({
-        name: 'nim-secondary',
-        provider: 'nim',
-        model: taskConfig.nimSecondary,
-        repairModel: repairConfig.nimSecondary,
-        useReasoning: false,
-        jsonFormat: false,
-        systemPrompt: roleConfig.system,
-        temperature: roleConfig.temperature,
-        maxTokens: roleConfig.maxTokens
-      });
-    }
-    if (taskConfig.nimTertiary) {
-      stages.push({
-        name: 'nim-tertiary',
-        provider: 'nim',
-        model: taskConfig.nimTertiary,
-        repairModel: repairConfig.nimSecondary,
+        name: '9router-primary',
+        provider: '9router',
+        model: primaryModel,
+        repairModel: repairConfig.openrouterPrimary || repairConfig.nimSecondary,
         useReasoning: false,
         jsonFormat: false,
         systemPrompt: roleConfig.system,
@@ -275,11 +256,10 @@ function buildProviderStages(taskName) {
     }
   }
 
-  // OpenRouter stages (fallback - includes JSON-native repair models)
+  // SECONDARY: OpenRouter (includes JSON-native models for better JSON support)
   if (process.env.OPENROUTER_API_KEY) {
     const isFreeModel = (model) => model && model.includes(":free");
     
-
     if (taskConfig.openrouterPrimary) {
       const primaryIsFree = isFreeModel(taskConfig.openrouterPrimary);
       stages.push({
@@ -312,7 +292,7 @@ function buildProviderStages(taskName) {
         provider: "openrouter",
         model: taskConfig.openrouterRouter,
         repairModel: repairConfig.openrouterSecondary,
-        useReasoning: routerModel,
+        useReasoning: false,
         systemPrompt: roleConfig.system,
         temperature: roleConfig.temperature,
         maxTokens: roleConfig.maxTokens
@@ -320,7 +300,50 @@ function buildProviderStages(taskName) {
     }
   }
 
-  // Gemini stages as FALLBACK
+  // TERTIARY: NIM Direct (direct NIM via https://integrate.api.nvidia.com/v1)
+  // Fallback if both 9Router and OpenRouter fail. NIM models don't support structured JSON natively,
+  // so extractJsonFragment + repair fallback is used for JSON parsing.
+  if (taskConfig.nimPrimary) {
+    stages.push({
+      name: 'nim-primary',
+      provider: 'nim',
+      model: taskConfig.nimPrimary,
+      repairModel: repairConfig.nimSecondary, // JSON-capable NIM repair (nemotron-3.5-lightning)
+      useReasoning: false,
+      jsonFormat: false, // NIM models: text output, need extraction
+      systemPrompt: roleConfig.system,
+      temperature: roleConfig.temperature,
+      maxTokens: roleConfig.maxTokens
+    });
+  }
+  if (taskConfig.nimSecondary && (taskName === 'explain' || taskName === 'generate')) {
+    stages.push({
+      name: 'nim-secondary',
+      provider: 'nim',
+      model: taskConfig.nimSecondary,
+      repairModel: repairConfig.nimSecondary,
+      useReasoning: false,
+      jsonFormat: false,
+      systemPrompt: roleConfig.system,
+      temperature: roleConfig.temperature,
+      maxTokens: roleConfig.maxTokens
+    });
+  }
+  if (taskConfig.nimTertiary && taskName === 'explain') {
+    stages.push({
+      name: 'nim-tertiary',
+      provider: 'nim',
+      model: taskConfig.nimTertiary,
+      repairModel: repairConfig.nimSecondary,
+      useReasoning: false,
+      jsonFormat: false,
+      systemPrompt: roleConfig.system,
+      temperature: roleConfig.temperature,
+      maxTokens: roleConfig.maxTokens
+    });
+  }
+
+  // FINAL FALLBACK: Gemini
   const geminiStages = getGeminiTextKeyStages();
   for (const keyStage of geminiStages) {
     stages.push({
@@ -328,7 +351,7 @@ function buildProviderStages(taskName) {
       provider: "gemini",
       model: DEFAULT_GEMINI_MODEL_FALLBACK,
       repairModel: DEFAULT_GEMINI_MODEL_FALLBACK,
-      apiKey: keyStage.apiKey
+      apiKey: ***
     });
   }
 
@@ -342,14 +365,13 @@ function buildProviderStages(taskName) {
         provider: "gemini",
         model: DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
         repairModel: DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
-        apiKey: keyStage.apiKey
+        apiKey: ***
       });
     }
   }
 
   return stages;
 }
-
 function prioritizeStages(stages, options = {}) {
   const preferredProviders = Array.isArray(options.preferredProviders)
     ? options.preferredProviders.map((value) => String(value || "").trim()).filter(Boolean)
@@ -583,6 +605,8 @@ async function invokeStage(stage, prompt, options) {
   let result;
   if (stage.provider === "openrouter") {
     result = await callOpenRouter(requestOptions);
+  } else if (stage.provider === "9router") {
+    result = await nineRouterProvider.callWithFallback(requestOptions);
   } else if (stage.provider === "nim") {
     // NIM models don't support structured JSON output natively
     // We rely on extractJsonFragment in parseAndValidateJson
