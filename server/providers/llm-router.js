@@ -351,7 +351,7 @@ function buildProviderStages(taskName) {
       provider: "gemini",
       model: DEFAULT_GEMINI_MODEL_FALLBACK,
       repairModel: DEFAULT_GEMINI_MODEL_FALLBACK,
-      apiKey: ***
+      apiKey: process.env.GEMINI_API_KEY_A
     });
   }
 
@@ -365,7 +365,7 @@ function buildProviderStages(taskName) {
         provider: "gemini",
         model: DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
         repairModel: DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
-        apiKey: ***
+        apiKey: process.env.GEMINI_API_KEY_A
       });
     }
   }
@@ -614,7 +614,7 @@ async function invokeStage(stage, prompt, options) {
   } else {
     result = await callGeminiText({
       ...requestOptions,
-      apiKey: stage.apiKey
+      apiKey: process.env.GEMINI_API_KEY_A
     });
   }
   
