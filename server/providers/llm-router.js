@@ -1,55 +1,20 @@
-const { callOpenRouter } = require("./openrouter");
-// OpenRouter daily budget guard (protects accounts with a per-day request cap)
-const OPENROUTER_DAILY_MAX = Number.parseInt(
-  process.env.OPENROUTER_DAILY_MAX || '1000',
-  10
-);
-let openRouterDailyUsed = 0;
-let openRouterDailyWindowStart = Date.now();
-
-function isOpenRouterDailyBudgetExhausted() {
-  const now = Date.now();
-  if (now - openRouterDailyWindowStart >= 24 * 60 * 60 * 1000) {
-    openRouterDailyWindowStart = now;
-    openRouterDailyUsed = 0;
-  }
-  return openRouterDailyUsed >= OPENROUTER_DAILY_MAX;
-}
-
-function markOpenRouterCall() {
-  const now = Date.now();
-  if (now - openRouterDailyWindowStart >= 24 * 60 * 60 * 1000) {
-    openRouterDailyWindowStart = now;
-    openRouterDailyUsed = 0;
-  }
-  openRouterDailyUsed += 1;
-  return openRouterDailyUsed;
-}
-
+const { callOpenRouter } = require('./openrouter');
 const {
   DEFAULT_GEMINI_MODEL_FALLBACK,
   DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
   callGeminiText,
   getGeminiTextKeyStages
-} = require("./gemini");
-const { callNIM } = require("./nim");
-const { NineRouterProvider, callNineRouter } = require("./9router");
-const { getRoleConfig } = require("./prompt-roles");
-const { parsePositiveInt } = require("./provider-utils");
-
-// Initialize 9Router provider with Cloudflare support
-const nineRouterProvider = new NineRouterProvider({
-  localUrl: process.env.NINEROUTER_LOCAL_URL,
-  publicUrl: process.env.NINEROUTER_PUBLIC_URL,
-  apiKey: process.env.NINEROUTER_API_KEY,
-  cfClientId: process.env.CF_ACCESS_CLIENT_ID,
-  cfClientSecret: process.env.CF_ACCESS_CLIENT_SECRET,
-  usePublic: process.env.NINEROUTER_USE_PUBLIC === 'true'
-});
+} = require('./gemini');
+const {
+  callNineRouter,
+  getNineRouterBaseUrl,
+  isRetryableNineRouterFailure,
+  checkNineRouterHealth
+} = require('./ninerouter');
 
 const TEMPORARY_UNAVAILABLE_PAYLOAD = {
-  error: "llm_temporarily_unavailable",
-  message: "Generation service temporarily unavailable. Please try again later.",
+  error: 'llm_temporarily_unavailable',
+  message: 'Generation service temporarily unavailable. Please try again later.',
   retryable: true
 };
 const stageCooldownState = new Map();
@@ -60,11 +25,22 @@ const MISSING_ENDPOINT_STAGE_COOLDOWN_MS = parsePositiveInt(
   6 * 60 * 60 * 1000
 );
 
+// NineRouter health check & circuit breaker
+const NINEROUTER_HEALTH_CHECK_INTERVAL_MS = parsePositiveInt(process.env.NINEROUTER_HEALTH_CHECK_INTERVAL_MS, 30000);
+const NINEROUTER_COOLDOWN_MS = parsePositiveInt(process.env.NINEROUTER_COOLDOWN_MS, 60000);
+const NINEROUTER_MAX_FAILURES_BEFORE_CIRCUIT_OPEN = 3;
+const providerHealthState = new Map(); // provider -> { healthy: bool, lastCheck, consecutiveFailures, circuitOpenUntil }
+let healthCheckIntervalId = null;
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 function logRouter(message, data = null) {
   const stamp = new Date().toISOString();
   try {
-    console.log(`[${stamp}] [LLM_ROUTER] ${message}${data ? " " + JSON.stringify(data) : ""}`);
+    console.log(`[${stamp}] [LLM_ROUTER] ${message}${data ? ' ' + JSON.stringify(data) : ''}`);
   } catch (error) {
     console.log(`[${stamp}] [LLM_ROUTER] ${message}`);
   }
@@ -96,11 +72,11 @@ function getTemporaryUnavailablePayload(error) {
 
 function getStageCacheKey(stage) {
   return [
-    stage?.provider || "unknown",
-    stage?.name || "unnamed",
-    stage?.model || "default",
-    stage?.apiKey ? String(stage.apiKey).slice(-8) : ""
-  ].join("|");
+    stage?.provider || 'unknown',
+    stage?.name || 'unnamed',
+    stage?.model || 'default',
+    stage?.apiKey ? String(stage.apiKey).slice(-8) : ''
+  ].join('|');
 }
 
 function getStageCooldownEntry(stage) {
@@ -119,7 +95,7 @@ function clearStageCooldown(stage) {
 }
 
 function parseRetryDelayMs(message) {
-  const text = String(message || "");
+  const text = String(message || '');
   let bestMs = 0;
   const patterns = [
     /please retry in\s+([0-9.]+)s/gi,
@@ -139,25 +115,12 @@ function parseRetryDelayMs(message) {
   return bestMs || null;
 }
 
-function isCompatModel(stage) {
-  return stage?.name?.includes("-compat") === true;
-}
-
 function getStageCooldownMs(stage, error) {
   if (!error) return null;
 
-  const message = String(error.message || "");
-
-  // Skip compat models entirely on 503 (model overloaded)
+  const message = String(error.message || '');
   if (
-    error.status === 503 &&
-    isCompatModel(stage)
-  ) {
-    return MISSING_ENDPOINT_STAGE_COOLDOWN_MS;
-  }
-
-  if (
-    stage?.provider === "openrouter" &&
+    stage?.provider === 'openrouter' &&
     error.status === 404 &&
     /no endpoints found/i.test(message)
   ) {
@@ -171,7 +134,7 @@ function getStageCooldownMs(stage, error) {
     return Math.max(parseRetryDelayMs(message) || 0, RATE_LIMIT_STAGE_COOLDOWN_MS);
   }
 
-  if (typeof error.status === "number" && error.status >= 500) {
+  if (typeof error.status === 'number' && error.status >= 500) {
     return DEFAULT_STAGE_COOLDOWN_MS;
   }
 
@@ -190,7 +153,7 @@ function markStageCooldown(stage, error) {
     until: Date.now() + cooldownMs,
     cooldownMs,
     status: error?.status || null,
-    reason: String(error?.message || "").slice(0, 240)
+    reason: String(error?.message || '').slice(0, 240)
   };
   stageCooldownState.set(getStageCacheKey(stage), entry);
   return entry;
@@ -199,26 +162,34 @@ function markStageCooldown(stage, error) {
 function getTaskModels() {
   return {
     generate: {
-      openrouterPrimary: process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || "google/gemma-4-31b-it:free",
-      openrouterSecondary: process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || "openai/gpt-oss-20b:free",
-      openrouterTertiary: process.env.OPENROUTER_MODEL_GENERATE_TERTIARY || "nvidia/nemotron-3-ultra-550b-a55b:free",
-      nimPrimary: process.env.NIM_MODEL_GENERATE_PRIMARY || process.env.NIM_MODEL_PRIMARY || "openai/gpt-oss-120b",
-      nimSecondary: process.env.NIM_MODEL_GENERATE_SECONDARY || process.env.NIM_MODEL_SECONDARY || "nvidia/nemotron-3-ultra",
-      nimTertiary: process.env.NIM_MODEL_GENERATE_TERTIARY || process.env.NIM_MODEL_TERTIARY || "nvidia/nemotron-3-super",
-      geminiFallback: process.env.GEMINI_MODEL_GENERATE_FALLBACK || process.env.GEMINI_MODEL_FALLBACK || "gemini-3.1-flash-lite"
+      ninerouterPrimary:
+        process.env.NINEROUTER_MODEL_GENERATE_PRIMARY || 'gpt-oss-120b',
+      ninerouterSecondary:
+        process.env.NINEROUTER_MODEL_GENERATE_SECONDARY || 'nemotron-3-ultra',
+      openrouterPrimary:
+        process.env.OPENROUTER_MODEL_GENERATE_PRIMARY || 'qwen/qwen3.6-plus-preview:free',
+      openrouterSecondary:
+        process.env.OPENROUTER_MODEL_GENERATE_SECONDARY || 'nvidia/nemotron-3-super-120b-a12b:free'
     },
     repair: {
-      openrouterPrimary: process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || "google/gemma-4-31b-it:free",
-      openrouterSecondary: process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || "openai/gpt-oss-20b:free",
-      nimSecondary: process.env.NIM_MODEL_REPAIR_SECONDARY || "nvidia/nemotron-3.5-lightning-30b-a3b"
+      ninerouterPrimary:
+        process.env.NINEROUTER_MODEL_REPAIR_PRIMARY || 'gpt-oss-20b',
+      ninerouterSecondary:
+        process.env.NINEROUTER_MODEL_REPAIR_SECONDARY || 'nemotron-3-super',
+      openrouterPrimary:
+        process.env.OPENROUTER_MODEL_REPAIR_PRIMARY || 'nvidia/nemotron-3-nano-30b-a3b:free',
+      openrouterSecondary:
+        process.env.OPENROUTER_MODEL_REPAIR_SECONDARY || 'arcee-ai/trinity-large-preview:free'
     },
     explain: {
-      openrouterPrimary: process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || "google/gemma-4-31b-it:free",
-      openrouterSecondary: process.env.OPENROUTER_MODEL_EXPLAIN_SECONDARY || "openai/gpt-oss-20b:free",
-      openrouterTertiary: process.env.OPENROUTER_MODEL_EXPLAIN_TERTIARY || "nvidia/nemotron-3.5-lightning:free",
-      nimPrimary: process.env.NIM_MODEL_PRIMARY || "openai/gpt-oss-120b",
-      nimSecondary: process.env.NIM_MODEL_SECONDARY || "nvidia/nemotron-3-ultra",
-      nimTertiary: process.env.NIM_MODEL_TERTIARY || "nvidia/nemotron-3.5-lightning-30b-a3b"
+      ninerouterPrimary:
+        process.env.NINEROUTER_MODEL_EXPLAIN_PRIMARY || 'gpt-oss-120b',
+      ninerouterSecondary:
+        process.env.NINEROUTER_MODEL_EXPLAIN_SECONDARY || 'nemotron-3-ultra',
+      openrouterPrimary:
+        process.env.OPENROUTER_MODEL_EXPLAIN_PRIMARY || 'qwen/qwen3.6-plus-preview:free',
+      openrouterSecondary:
+        process.env.OPENROUTER_MODEL_EXPLAIN_SECONDARY || 'nvidia/nemotron-3-super-120b-a12b:free'
     }
   };
 }
@@ -227,131 +198,41 @@ function buildProviderStages(taskName) {
   const taskModels = getTaskModels();
   const taskConfig = taskModels[taskName];
   const repairConfig = taskModels.repair;
-  const roleConfig = getRoleConfig(taskName);
   const stages = [];
 
-  // ============================================================
-  // FALLBACK CHAIN: 9router (primary) -> OpenRouter (secondary) -> NIM (tertiary) -> Gemini (final)
-  // ============================================================
-  
-  // PRIMARY: 9Router (try local first, then public with Cloudflare)
-  // Uses 9Router's routing to multiple providers
-  if (taskConfig.nimPrimary || taskConfig.openrouterPrimary) {
-    const primaryModel = taskName === 'generate' || taskName === 'explain' 
-      ? (taskConfig.nimPrimary || taskConfig.openrouterPrimary)
-      : taskConfig.openrouterPrimary;
-    
-    if (primaryModel) {
+  if (!taskConfig) {
+    throw createRouterError(`Unsupported LLM task: ${taskName}`, { status: 500, retryable: false });
+  }
+
+  // 1. NineRouter (PRIMARY) - only if API key configured
+  if (process.env.NINEROUTER_API_KEY) {
+    if (taskConfig.ninerouterPrimary) {
       stages.push({
-        name: '9router-primary',
-        provider: '9router',
-        model: primaryModel,
-        repairModel: repairConfig.openrouterPrimary || repairConfig.nimSecondary,
-        useReasoning: false,
-        jsonFormat: false,
-        systemPrompt: roleConfig.system,
-        temperature: roleConfig.temperature,
-        maxTokens: roleConfig.maxTokens
+        name: 'ninerouter-primary',
+        provider: 'ninerouter',
+        model: taskConfig.ninerouterPrimary,
+        repairModel: repairConfig.ninerouterPrimary
+      });
+    }
+    if (taskConfig.ninerouterSecondary) {
+      stages.push({
+        name: 'ninerouter-secondary',
+        provider: 'ninerouter',
+        model: taskConfig.ninerouterSecondary,
+        repairModel: repairConfig.ninerouterSecondary
       });
     }
   }
 
-  // SECONDARY: OpenRouter (includes JSON-native models for better JSON support)
-  if (process.env.OPENROUTER_API_KEY) {
-    const isFreeModel = (model) => model && model.includes(":free");
-    
-    if (taskConfig.openrouterPrimary) {
-      const primaryIsFree = isFreeModel(taskConfig.openrouterPrimary);
-      stages.push({
-        name: "openrouter-primary",
-        provider: "openrouter",
-        model: taskConfig.openrouterPrimary,
-        repairModel: repairConfig.openrouterPrimary,
-        useReasoning: primaryIsFree,
-        systemPrompt: roleConfig.system,
-        temperature: roleConfig.temperature,
-        maxTokens: roleConfig.maxTokens
-      });
-    }
-    if (taskConfig.openrouterSecondary) {
-      const secondaryIsFree = isFreeModel(taskConfig.openrouterSecondary);
-      stages.push({
-        name: "openrouter-secondary",
-        provider: "openrouter",
-        model: taskConfig.openrouterSecondary,
-        repairModel: repairConfig.openrouterSecondary,
-        useReasoning: secondaryIsFree,
-        systemPrompt: roleConfig.system,
-        temperature: roleConfig.temperature,
-        maxTokens: roleConfig.maxTokens
-      });
-    }
-    if (taskConfig.openrouterRouter) {
-      stages.push({
-        name: "openrouter-router",
-        provider: "openrouter",
-        model: taskConfig.openrouterRouter,
-        repairModel: repairConfig.openrouterSecondary,
-        useReasoning: false,
-        systemPrompt: roleConfig.system,
-        temperature: roleConfig.temperature,
-        maxTokens: roleConfig.maxTokens
-      });
-    }
-  }
-
-  // TERTIARY: NIM Direct (direct NIM via https://integrate.api.nvidia.com/v1)
-  // Fallback if both 9Router and OpenRouter fail. NIM models don't support structured JSON natively,
-  // so extractJsonFragment + repair fallback is used for JSON parsing.
-  if (taskConfig.nimPrimary) {
-    stages.push({
-      name: 'nim-primary',
-      provider: 'nim',
-      model: taskConfig.nimPrimary,
-      repairModel: repairConfig.nimSecondary, // JSON-capable NIM repair (nemotron-3.5-lightning)
-      useReasoning: false,
-      jsonFormat: false, // NIM models: text output, need extraction
-      systemPrompt: roleConfig.system,
-      temperature: roleConfig.temperature,
-      maxTokens: roleConfig.maxTokens
-    });
-  }
-  if (taskConfig.nimSecondary && (taskName === 'explain' || taskName === 'generate')) {
-    stages.push({
-      name: 'nim-secondary',
-      provider: 'nim',
-      model: taskConfig.nimSecondary,
-      repairModel: repairConfig.nimSecondary,
-      useReasoning: false,
-      jsonFormat: false,
-      systemPrompt: roleConfig.system,
-      temperature: roleConfig.temperature,
-      maxTokens: roleConfig.maxTokens
-    });
-  }
-  if (taskConfig.nimTertiary && taskName === 'explain') {
-    stages.push({
-      name: 'nim-tertiary',
-      provider: 'nim',
-      model: taskConfig.nimTertiary,
-      repairModel: repairConfig.nimSecondary,
-      useReasoning: false,
-      jsonFormat: false,
-      systemPrompt: roleConfig.system,
-      temperature: roleConfig.temperature,
-      maxTokens: roleConfig.maxTokens
-    });
-  }
-
-  // FINAL FALLBACK: Gemini
+  // 2. Gemini (FALLBACK 1) - existing logic
   const geminiStages = getGeminiTextKeyStages();
   for (const keyStage of geminiStages) {
     stages.push({
       name: keyStage.name,
-      provider: "gemini",
+      provider: 'gemini',
       model: DEFAULT_GEMINI_MODEL_FALLBACK,
       repairModel: DEFAULT_GEMINI_MODEL_FALLBACK,
-      apiKey: process.env.GEMINI_API_KEY_A
+      apiKey: keyStage.apiKey
     });
   }
 
@@ -362,25 +243,46 @@ function buildProviderStages(taskName) {
     for (const keyStage of geminiStages) {
       stages.push({
         name: `${keyStage.name}-compat`,
-        provider: "gemini",
+        provider: 'gemini',
         model: DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
         repairModel: DEFAULT_GEMINI_MODEL_FALLBACK_COMPAT,
-        apiKey: process.env.GEMINI_API_KEY_A
+        apiKey: keyStage.apiKey
+      });
+    }
+  }
+
+  // 3. OpenRouter (FALLBACK 2) - only if API key configured
+  if (process.env.OPENROUTER_API_KEY) {
+    if (taskConfig.openrouterPrimary) {
+      stages.push({
+        name: 'openrouter-primary',
+        provider: 'openrouter',
+        model: taskConfig.openrouterPrimary,
+        repairModel: repairConfig.openrouterPrimary
+      });
+    }
+    if (taskConfig.openrouterSecondary) {
+      stages.push({
+        name: 'openrouter-secondary',
+        provider: 'openrouter',
+        model: taskConfig.openrouterSecondary,
+        repairModel: repairConfig.openrouterSecondary
       });
     }
   }
 
   return stages;
 }
+
 function prioritizeStages(stages, options = {}) {
   const preferredProviders = Array.isArray(options.preferredProviders)
-    ? options.preferredProviders.map((value) => String(value || "").trim()).filter(Boolean)
+    ? options.preferredProviders.map((value) => String(value || '').trim()).filter(Boolean)
     : [];
   const preferredStageNames = Array.isArray(options.preferredStageNames)
-    ? options.preferredStageNames.map((value) => String(value || "").trim()).filter(Boolean)
+    ? options.preferredStageNames.map((value) => String(value || '').trim()).filter(Boolean)
     : [];
   const preferredModels = Array.isArray(options.preferredModels)
-    ? options.preferredModels.map((value) => String(value || "").trim()).filter(Boolean)
+    ? options.preferredModels.map((value) => String(value || '').trim()).filter(Boolean)
     : [];
 
   if (
@@ -414,11 +316,10 @@ function prioritizeStages(stages, options = {}) {
     })
     .map((entry) => entry.stage);
 }
-
 function stripMarkdownFences(text) {
-  return String(text || "")
-    .replace(/```json/gi, "")
-    .replace(/```/g, "")
+  return String(text || '')
+    .replace(/```json/gi, '')
+    .replace(/```/g, '')
     .trim();
 }
 
@@ -439,7 +340,7 @@ function extractJsonFragment(text) {
       continue;
     }
 
-    if (char === "\\") {
+    if (char === '\\') {
       escape = true;
       continue;
     }
@@ -450,8 +351,8 @@ function extractJsonFragment(text) {
     }
 
     if (inString) continue;
-    if (char === "{" || char === "[") depth += 1;
-    if (char === "}" || char === "]") depth -= 1;
+    if (char === '{' || char === '[') depth += 1;
+    if (char === '}' || char === ']') depth -= 1;
 
     if (depth === 0) {
       return cleaned.slice(start, index + 1);
@@ -464,9 +365,9 @@ function extractJsonFragment(text) {
 function normalizeValidationErrors(validationResult) {
   if (!validationResult) return [];
   if (validationResult === true) return [];
-  if (validationResult === false) return ["validation_failed"];
-  if (typeof validationResult === "string") return [validationResult];
-  if (!Array.isArray(validationResult)) return ["validation_failed"];
+  if (validationResult === false) return ['validation_failed'];
+  if (typeof validationResult === 'string') return [validationResult];
+  if (!Array.isArray(validationResult)) return ['validation_failed'];
   return validationResult.filter(Boolean).map((item) => String(item));
 }
 
@@ -481,20 +382,20 @@ function parseAndValidateJson(text, validateResult) {
       ok: false,
       rawText: text,
       fragment,
-      validationErrors: ["invalid_json"],
+      validationErrors: ['invalid_json'],
       error: createRouterError(`Invalid JSON response: ${error.message}`, {
         retryable: true,
-        code: "invalid_json"
+        code: 'invalid_json'
       })
     };
   }
 
-  if (typeof validateResult === "function") {
+  if (typeof validateResult === 'function') {
     let validationErrors;
     try {
       validationErrors = normalizeValidationErrors(validateResult(parsedValue));
     } catch (error) {
-      validationErrors = [error.message || "validation_failed"];
+      validationErrors = [error.message || 'validation_failed'];
     }
 
     if (validationErrors.length > 0) {
@@ -504,9 +405,9 @@ function parseAndValidateJson(text, validateResult) {
         fragment,
         parsedValue,
         validationErrors,
-        error: createRouterError(`Schema validation failed: ${validationErrors.join(", ")}`, {
+        error: createRouterError(`Schema validation failed: ${validationErrors.join(', ')}`, {
           retryable: true,
-          code: "schema_invalid",
+          code: 'schema_invalid',
           validationErrors
         })
       };
@@ -525,11 +426,11 @@ function parseAndValidateJson(text, validateResult) {
 function buildTaskReasoningOptions(task, options = {}) {
   const explicitReasoning = options.reasoning;
   if (explicitReasoning === null) return undefined;
-  if (explicitReasoning && typeof explicitReasoning === "object") return explicitReasoning;
+  if (explicitReasoning && typeof explicitReasoning === 'object') return explicitReasoning;
 
-  if (task !== "generate" && task !== "explain") return undefined;
+  if (task !== 'generate') return undefined;
 
-  const budget = Number.parseInt(process.env.OPENROUTER_GENERATE_REASONING_MAX_TOKENS || "1024", 10);
+  const budget = Number.parseInt(process.env.OPENROUTER_GENERATE_REASONING_MAX_TOKENS || '512', 10);
   if (!Number.isFinite(budget) || budget <= 0) return undefined;
 
   return {
@@ -545,47 +446,95 @@ function buildDefaultRepairPrompt(context) {
     validationErrors = []
   } = context;
 
-  return `You are a JSON repair specialist. Fix invalid JSON while preserving original intent.
+  return `You are repairing a JSON response for a strict downstream parser.
 
 ORIGINAL TASK:
-${String(originalPrompt || "").slice(0, 12000)}
+${String(originalPrompt || '').slice(0, 12000)}
 
 CURRENT OUTPUT:
-${String(rawText || "").slice(0, 12000)}
+${String(rawText || '').slice(0, 12000)}
 
 VALIDATION ERRORS:
-${validationErrors.length > 0 ? validationErrors.join("\n") : "invalid_json"}
+${validationErrors.length > 0 ? validationErrors.join('\n') : 'invalid_json'}
 
 RULES:
-1. Output ONLY valid JSON - no markdown, no explanation
-2. Fix syntax errors: missing quotes, trailing commas, unclosed brackets
-3. Preserve all original fields and values where possible
-4. If a value is missing, infer the minimal valid fix
-5. Maintain the original schema structure`;
+1. Return valid JSON only.
+2. Preserve the original meaning unless a field must change to satisfy JSON/schema validity.
+3. Do not add commentary or markdown.
+4. If a value is missing, infer the smallest valid fix.
+
+FIX THE JSON NOW.`;
 }
 
 function isRetryableFailure(error) {
   if (!error) return false;
   if (error.retryable) return true;
   if (error.status === 402 || error.status === 429) return true;
-  if (typeof error.status === "number" && error.status >= 500) return true;
+  if (typeof error.status === 'number' && error.status >= 500) return true;
   return false;
 }
 
-
-
-
-
-const fs = require('fs');
-const path = require('path');
-function traceLLM(stageName, model, prompt, responseText, ms) {
-  try {
-    const logPath = path.join(__dirname, '../llm_trace.log');
-    const truncPrompt = prompt.length > 1500 ? prompt.substring(0, 1500) + "\n...(truncated)" : prompt;
-    const entry = "\n========================================\n[" + new Date().toISOString() + "] STAGE: " + stageName + " | MODEL: " + model + " | TIME: " + ms + "ms\n-- PROMPT --\n" + truncPrompt + "\n-- RESPONSE --\n" + responseText + "\n";
-    fs.appendFileSync(logPath, entry);
-  } catch(e) {}
+// NineRouter health check & circuit breaker functions
+function getProviderHealthState(provider) {
+  return providerHealthState.get(provider) || { healthy: true, consecutiveFailures: 0, circuitOpenUntil: 0 };
 }
+
+function updateProviderHealthState(provider, success) {
+  const state = getProviderHealthState(provider);
+  state.lastCheck = Date.now();
+  if (success) {
+    state.healthy = true;
+    state.consecutiveFailures = 0;
+    state.circuitOpenUntil = 0;
+  } else {
+    state.consecutiveFailures += 1;
+    if (state.consecutiveFailures >= NINEROUTER_MAX_FAILURES_BEFORE_CIRCUIT_OPEN) {
+      state.healthy = false;
+      state.circuitOpenUntil = Date.now() + NINEROUTER_COOLDOWN_MS;
+    }
+  }
+  providerHealthState.set(provider, state);
+}
+
+function isProviderHealthy(provider) {
+  if (provider !== 'ninerouter') return true; // Only circuit-break NineRouter for now
+  const state = getProviderHealthState(provider);
+  if (state.healthy) return true;
+  // Circuit open - check if cooldown elapsed (half-open)
+  if (Date.now() >= state.circuitOpenUntil) {
+    // Allow one test request (half-open state)
+    return true;
+  }
+  return false;
+}
+
+async function runNineRouterHealthCheck() {
+  try {
+    const healthy = await checkNineRouterHealth();
+    updateProviderHealthState('ninerouter', healthy);
+    logRouter('health_check', { provider: 'ninerouter', healthy });
+    return healthy;
+  } catch (error) {
+    updateProviderHealthState('ninerouter', false);
+    logRouter('health_check_failed', { provider: 'ninerouter', error: error.message });
+    return false;
+  }
+}
+
+function startHealthCheckInterval() {
+  if (healthCheckIntervalId) return;
+  healthCheckIntervalId = setInterval(() => {
+    runNineRouterHealthCheck();
+  }, NINEROUTER_HEALTH_CHECK_INTERVAL_MS);
+  if (typeof healthCheckIntervalId.unref === 'function') {
+    healthCheckIntervalId.unref();
+  }
+  // Run initial check
+  runNineRouterHealthCheck();
+}
+
+// Start health check on module load
+startHealthCheckInterval();
 
 async function invokeStage(stage, prompt, options) {
   const requestOptions = {
@@ -596,43 +545,27 @@ async function invokeStage(stage, prompt, options) {
     timeoutMs: options.timeoutMs,
     reasoning: options.reasoning,
     fetchImpl: options.fetchImpl,
-    includeRaw: options.includeRaw,
-    useReasoning: stage.useReasoning,
-    systemPrompt: stage.systemPrompt
+    includeRaw: options.includeRaw
   };
 
-  const start = Date.now();
-  let result;
-  if (stage.provider === "openrouter") {
-    result = await callOpenRouter(requestOptions);
-  } else if (stage.provider === "9router") {
-    result = await nineRouterProvider.callWithFallback(requestOptions);
-  } else if (stage.provider === "nim") {
-    // NIM models don't support structured JSON output natively
-    // We rely on extractJsonFragment in parseAndValidateJson
-    result = await callNIM(requestOptions);
-  } else {
-    result = await callGeminiText({
-      ...requestOptions,
-      apiKey: process.env.GEMINI_API_KEY_A
-    });
+  if (stage.provider === 'ninerouter') {
+    return callNineRouter(requestOptions);
   }
-  
-  traceLLM(stage.name, stage.model, prompt, result.text, Date.now() - start);
-  return result;
+
+  if (stage.provider === 'openrouter') {
+    return callOpenRouter(requestOptions);
+  }
+
+  return callGeminiText({
+    ...requestOptions,
+    apiKey: stage.apiKey
+  });
 }
-
-
-
-
 
 async function invokeRepairStage(stage, prompt, options) {
   const repairStage = {
     ...stage,
-    model: stage.repairModel || stage.model,
-    // Repair always uses json_object mode, no reasoning
-    useReasoning: false,
-    systemPrompt: getRoleConfig("repair").system
+    model: stage.repairModel || stage.model
   };
 
   return invokeStage(repairStage, prompt, {
@@ -666,23 +599,42 @@ async function runJsonTask(options) {
   });
   if (stages.length === 0) {
     throw createTemporaryUnavailableError(
-      createRouterError("No LLM providers configured", { retryable: true, code: "provider_unconfigured" })
+      createRouterError('No LLM providers configured', { retryable: true, code: 'provider_unconfigured' })
     );
   }
 
   let lastRetryableError = null;
 
-  for (const stage of stages) {
-    const cooldownEntry = getStageCooldownEntry(stage);
-    if (cooldownEntry) {
+    for (const stage of stages) {
+      // Skip unhealthy providers (circuit breaker)
+      if (!isProviderHealthy(stage.provider)) {
+        lastRetryableError = createRouterError(`Provider ${stage.provider} circuit open`, {
+          retryable: true,
+          provider: stage.provider,
+          model: stage.model,
+          code: 'provider_circuit_open',
+          retryAfterMs: Math.max(1, getProviderHealthState(stage.provider).circuitOpenUntil - Date.now())
+        });
+        logRouter('stage_skipped_circuit_open', {
+          task,
+          stage: stage.name,
+          provider: stage.provider,
+          model: stage.model,
+          retryAt: new Date(getProviderHealthState(stage.provider).circuitOpenUntil).toISOString()
+        });
+        continue;
+      }
+
+      const cooldownEntry = getStageCooldownEntry(stage);
+      if (cooldownEntry) {
       lastRetryableError = createRouterError(`Stage ${stage.name} cooling down`, {
         retryable: true,
         provider: stage.provider,
         model: stage.model,
-        code: "stage_cooling_down",
+        code: 'stage_cooling_down',
         retryAfterMs: Math.max(1, cooldownEntry.until - Date.now())
       });
-      logRouter("stage_skipped_cooldown", {
+      logRouter('stage_skipped_cooldown', {
         task,
         stage: stage.name,
         provider: stage.provider,
@@ -694,31 +646,12 @@ async function runJsonTask(options) {
       continue;
     }
 
-    if (stage.provider === "openrouter" && isOpenRouterDailyBudgetExhausted()) {
-      logRouter("stage_skipped_openrouter_daily_cap", {
-        task,
-        stage: stage.name,
-        provider: stage.provider,
-        model: stage.model,
-        usedToday: openRouterDailyUsed,
-        dailyMax: OPENROUTER_DAILY_MAX
-      });
-      lastRetryableError = createRouterError("OpenRouter daily budget exhausted", {
-        retryable: true,
-        provider: stage.provider,
-        model: stage.model,
-        code: "openrouter_daily_cap"
-      });
-      continue;
-    }
-
-    logRouter("stage_start", {
+    logRouter('stage_start', {
       task,
       stage: stage.name,
       provider: stage.provider,
       model: stage.model
     });
-    if (stage.provider === "openrouter") markOpenRouterCall();
 
     let response;
     try {
@@ -731,25 +664,33 @@ async function runJsonTask(options) {
         includeRaw
       });
     } catch (error) {
-      if (isRetryableFailure(error)) {
-        const cooldown = markStageCooldown(stage, error);
-        lastRetryableError = error;
-        logRouter("stage_retryable_failure", {
-          task,
-          stage: stage.name,
-          provider: stage.provider,
-          model: stage.model,
-          error: error.message,
-          cooldownMs: cooldown?.cooldownMs || null
-        });
-        continue;
-      }
-      throw error;
-    }
+          if (isRetryableFailure(error)) {
+            // Update provider health state for circuit breaker
+            if (stage.provider === 'ninerouter') {
+              updateProviderHealthState('ninerouter', false);
+            }
+            const cooldown = markStageCooldown(stage, error);
+            lastRetryableError = error;
+            logRouter('stage_retryable_failure', {
+              task,
+              stage: stage.name,
+              provider: stage.provider,
+              model: stage.model,
+              error: error.message,
+              cooldownMs: cooldown?.cooldownMs || null
+            });
+            continue;
+          }
+          throw error;
+        }
 
-    const parsed = parseAndValidateJson(response.text, validateResult);
-    if (parsed.ok) {
-      clearStageCooldown(stage);
+        const parsed = parseAndValidateJson(response.text, validateResult);
+        if (parsed.ok) {
+          // Update provider health state on success
+          if (stage.provider === 'ninerouter') {
+            updateProviderHealthState('ninerouter', true);
+          }
+          clearStageCooldown(stage);
       return {
         result: parsed.value,
         meta: {
@@ -761,7 +702,7 @@ async function runJsonTask(options) {
       };
     }
 
-    const repairPrompt = typeof buildRepairPrompt === "function"
+    const repairPrompt = typeof buildRepairPrompt === 'function'
       ? buildRepairPrompt({
         task,
         stage,
@@ -779,7 +720,7 @@ async function runJsonTask(options) {
         validationErrors: parsed.validationErrors
       });
 
-    logRouter("repair_start", {
+    logRouter('repair_start', {
       task,
       stage: stage.name,
       provider: stage.provider,
@@ -813,14 +754,14 @@ async function runJsonTask(options) {
         `Invalid JSON after repair from ${stage.provider} ${stage.repairModel || stage.model}`,
         {
           retryable: true,
-          code: "invalid_json_after_repair",
+          code: 'invalid_json_after_repair',
           provider: stage.provider,
           model: stage.repairModel || stage.model,
           validationErrors: repaired.validationErrors
         }
       );
 
-      logRouter("repair_invalid_after_pass", {
+      logRouter('repair_invalid_after_pass', {
         task,
         stage: stage.name,
         provider: stage.provider,
@@ -828,26 +769,30 @@ async function runJsonTask(options) {
         validationErrors: repaired.validationErrors
       });
     } catch (error) {
-      if (isRetryableFailure(error)) {
-        const cooldown = markStageCooldown(stage, error);
-        lastRetryableError = error;
-        logRouter("repair_retryable_failure", {
-          task,
-          stage: stage.name,
-          provider: stage.provider,
-          model: stage.repairModel || stage.model,
-          error: error.message,
-          cooldownMs: cooldown?.cooldownMs || null
-        });
-        continue;
+          if (isRetryableFailure(error)) {
+            // Update provider health state for circuit breaker
+            if (stage.provider === 'ninerouter') {
+              updateProviderHealthState('ninerouter', false);
+            }
+            const cooldown = markStageCooldown(stage, error);
+            lastRetryableError = error;
+            logRouter('repair_retryable_failure', {
+              task,
+              stage: stage.name,
+              provider: stage.provider,
+              model: stage.repairModel || stage.model,
+              error: error.message,
+              cooldownMs: cooldown?.cooldownMs || null
+            });
+            continue;
+          }
+
+          throw error;
+        }
       }
 
-      throw error;
+      throw createTemporaryUnavailableError(lastRetryableError);
     }
-  }
-
-  throw createTemporaryUnavailableError(lastRetryableError);
-}
 
 module.exports = {
   buildDefaultRepairPrompt,
@@ -855,9 +800,12 @@ module.exports = {
   createTemporaryUnavailableError,
   getTemporaryUnavailablePayload,
   isTemporaryUnavailableError,
-  runJsonTask
+  runJsonTask,
+  // Health check & circuit breaker (for testing/monitoring)
+  runNineRouterHealthCheck,
+  getProviderHealthState,
+  isProviderHealthy,
+  startHealthCheckInterval
 };
-
-
 
 
