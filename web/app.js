@@ -4845,27 +4845,24 @@
         };
 
             const AdminUI = {
-        storageKey: 'admin_warmup_secret',
-        config: null,
+                    config: null,
 
-        init() {
-            const secretInput = $('#admin-secret');
-            if (!secretInput) return;
+                    init() {
+                        const secretInput = $('#admin-secret');
+                        if (!secretInput) return;
 
-            const savedSecret = sessionStorage.getItem(this.storageKey) || '';
-            secretInput.value = savedSecret;
+                        const panel = $('.admin-panel');
+                        if (panel && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
+                            panel.removeAttribute('hidden');
+                        }
 
-            secretInput.addEventListener('input', (event) => {
-                sessionStorage.setItem(this.storageKey, event.target.value.trim());
-            });
+                        $('#btn-admin-load')?.addEventListener('click', () => this.loadConfig());
+                        $('#btn-admin-healthcheck')?.addEventListener('click', () => this.runHealthcheck());
+                    },
 
-            $('#btn-admin-load')?.addEventListener('click', () => this.loadConfig());
-            $('#btn-admin-healthcheck')?.addEventListener('click', () => this.runHealthcheck());
-        },
-
-        getSecret() {
-            return ($('#admin-secret')?.value || '').trim();
-        },
+                    getSecret() {
+                        return ($('#admin-secret')?.value || '').trim();
+                    },
 
         setBadge(tone, text) {
             const badge = $('#admin-health-badge');
@@ -5276,8 +5273,10 @@
         });
 
         Theme.init();
-        AdminUI.init();
-        initEventHandlers();
+                if (!import.meta.env.PROD) {
+                    AdminUI.init();
+                }
+                initEventHandlers();
         await Auth.init();
 
         // Only show login screen if no session was restored
